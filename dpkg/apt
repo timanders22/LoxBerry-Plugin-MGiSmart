@@ -1,0 +1,8 @@
+# These packages will be installed by apt-get -y install PACKAGENAME
+# One line per package, use exact packagename as you would do for apt-get.
+#
+# mosquitto-clients liefert mosquitto_sub / mosquitto_pub. Damit liest das
+# Plugin die Werte des SAIC-MQTT-Gateways und schickt Befehle zurueck.
+# Fehlt das Paket, meldet die Oberflaeche das deutlich - nachinstallieren mit
+# "sudo apt-get update && sudo apt-get install -y mosquitto-clients".
+mosquitto-clients
