@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- MG iSmart: Auto mit Ladestecker -->
+  <rect x="8" y="8" width="496" height="496" rx="96" fill="#1b5e20"/>
+  <path d="M104 296 L136 208 L344 208 L392 296 Z" fill="#ffffff"/>
+  <rect x="88" y="296" width="320" height="72" rx="24" fill="#ffffff"/>
+  <circle cx="160" cy="376" r="36" fill="#1b5e20"/>
+  <circle cx="336" cy="376" r="36" fill="#1b5e20"/>
+  <path d="M268 128 L212 232 L252 232 L232 320 L300 208 L258 208 Z" fill="#6dac20"/>
+</svg>
