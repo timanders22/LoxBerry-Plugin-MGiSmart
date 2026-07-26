@@ -1,0 +1,5 @@
+#!/bin/sh
+# Liest die zuletzt vom SAIC-MQTT-Gateway veroeffentlichten Werte ein.
+if [ -f REPLACELBPHTMLDIR/cron.php ]; then
+  /usr/bin/php REPLACELBPHTMLDIR/cron.php >/dev/null 2>&1
+fi
