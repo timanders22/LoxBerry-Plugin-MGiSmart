@@ -1,0 +1,43 @@
+<h2>MG iSmart</h2>
+
+<p>Bringt die Daten eines <b>MG-Elektrofahrzeugs</b> (iSMART / SAIC) nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Klima, Standort — und schickt Befehle zurück: Laden stoppen, Ziel-Ladestand, Ladestrombegrenzung, Standklima, „Auto finden".</p>
+
+<p>Kompatibel mit LoxBerry 3.x und <b>LoxBerry 4</b> (reines PHP, PHP 7.4 und 8.x).</p>
+
+<h3>Wie es funktioniert</h3>
+
+<p>MG/SAIC bietet keine offene Schnittstelle an; die App spricht über ein verschlüsseltes, tokenbasiertes Protokoll mit den Servern. Das quelloffene Projekt <a href="https://github.com/SAIC-iSmart-API/saic-python-mqtt-gateway" target="_blank">SAIC MQTT Gateway</a> bildet dieses Protokoll nach und veröffentlicht die Fahrzeugdaten per MQTT.</p>
+
+<p>Dieses Plugin setzt darauf auf:</p>
+
+<pre><code>Fahrzeug ─ iSMART-Server ─ SAIC-MQTT-Gateway (Docker) ─ MQTT-Broker ─ dieses Plugin ─ Loxone</code></pre>
+
+<p>Eine Neuimplementierung der SAIC-API in PHP wäre aufwendig und würde bei jeder Änderung der Gegenstelle brechen. Der Reiter <b>Gateway einrichten</b> enthält den kompletten <code>docker run</code>-Befehl und die Stolperfallen.</p>
+
+<h3>Funktionen</h3>
+
+<ul><li><b>Loxone-Zeile</b> mit Ladestand (% und kWh), Ziel-SoC, Reichweite, Ladestatus, Stecker, Ladeleistung, Restladezeit, Kilometerstand, 12-V-Spannung, Verriegelung, Innen-/Außentemperatur</li><li><b>Steuerbefehle</b> aus einer festen, geprüften Liste — nichts anderes nimmt der Endpunkt an: Laden stoppen/starten, Ziel-SoC 60–100 %, Ladestrom 6/8/16 A/MAX, Standklima, Heckscheibenheizung, Auto finden, Status jetzt abfragen</li><li><b>Meldungen</b> für Loxone: Ziel-Ladestand erreicht, Kabel ein-/ausgesteckt, Auto steht unverschlossen — als <code>PUSHAKTIV=1</code> für ein einstellbares Fenster</li><li><b>Robuste Zuordnung</b>: Das Plugin sucht jeden Wert über mehrere mögliche Themennamen. Liefert ein Modell etwas nicht, kommt <code>-1</code> statt eines Fehlers</li><li><b>Debug-Ansicht</b> mit allen empfangenen MQTT-Themen — dort steht auch die Fahrzeug-ID</li><li>Reiter: Einstellungen, Gateway einrichten, Einbindung in Loxone (inkl. kompletter Baustein-Liste), Test, Protokoll</li></ul>
+
+<h3>Endpunkte</h3>
+
+<table class="sm-tbl">
+<tr><th>Aufruf</th><th>Zweck</th></tr>
+<tr><td><code>/plugins/mgismart/mg.php</code></td><td>Loxone-Zeile <code>MG;OK=..;SOC=..;ZIEL=..;LAEDT=..;…</code></td></tr>
+<tr><td><code>/plugins/mgismart/mg.php?cmd=ziel_80</code></td><td>Befehl ans Fahrzeug</td></tr>
+<tr><td><code>/plugins/mgismart/mg.php?json=1</code></td><td>Zustand als JSON</td></tr>
+<tr><td><code>/plugins/mgismart/mg.php?debug=1</code></td><td>alle empfangenen MQTT-Themen</td></tr>
+<tr><td><code>/plugins/mgismart/mg.php?refresh=1</code></td><td>Werte sofort neu einlesen</td></tr>
+<tr><td><code>/plugins/mgismart/mg.php?ptest=1</code></td><td>Test-Pushnachricht auslösen</td></tr>
+</table>
+
+<h3>Wichtige Hinweise</h3>
+
+<ul><li><b>12-Volt-Batterie:</b> Das Abfragen weckt die Fahrzeugelektronik. Das Ruheintervall des Gateways (Standard: einmal täglich) sollte man nicht verkürzen. Für frische Werte gezielt <code>?cmd=auffrischen</code> verwenden.</li><li><b>Nur eine Sitzung:</b> Meldet sich die iSMART-App an, pausiert das Gateway rund 15 Minuten.</li><li><b>„Laden starten" ist unzuverlässig</b>, „Laden stoppen" funktioniert gut. Wer über die Wallbox schaltet, ist auf der sicheren Seite; die Ladestrombegrenzung des Autos wirkt dagegen zuverlässig.</li><li>Die Schnittstelle ist <b>inoffiziell</b> und kann sich jederzeit ändern.</li></ul>
+
+<h3>Voraussetzungen</h3>
+
+<ul><li>LoxBerry-Plugin <b>Docker</b> (für den Gateway-Container)</li><li>Paket <b>mosquitto-clients</b> (wird bei der Installation mitinstalliert)</li><li>iSMART-Konto mit registriertem Fahrzeug</li></ul>
+
+<h3>Datenschutz</h3>
+
+<p>Das <b>iSMART-Passwort kennt nur der Gateway-Container</b> — dieses Plugin braucht es nicht. Broker-Zugangsdaten liegen in <code>config/plugins/mgismart/mg.json</code>, die Datei wird auf <code>chmod 600</code> gesetzt. Passwörter werden im Protokoll maskiert. Im Plugin sind <b>keine persönlichen Daten</b> enthalten.</p>

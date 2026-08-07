@@ -3,7 +3,9 @@
  * MG iSmart - Endpunkt fuer Loxone und Drittsoftware
  *
  *   (ohne Parameter) -> MG;OK=..;SOC=..;ZIEL=..;REICHWEITE=..;LAEDT=..;STECKER=..;...
- *   ?cmd=ziel_80     -> Befehl ans Fahrzeug (erlaubte Liste siehe Oberflaeche)
+ *   ?cmd=ziel_80&token=T -> Befehl ans Fahrzeug (erlaubte Liste siehe Oberflaeche)
+ *                       Schaltender Aufruf - erfordert das Merkwort aus dem
+ *                       Reiter "Einbindung in Loxone", sonst HTTP 403.
  *   ?json=1          -> kompletter Zustand als JSON
  *   ?debug=1         -> alle empfangenen MQTT-Themen im Klartext
  *   ?refresh=1       -> Werte sofort neu einlesen (Momentaufnahme)
@@ -37,6 +39,28 @@ function mg_ptest_active()
 
 $mg_ergebnis = '';
 if (isset($_GET['cmd'])) {
+    /* Merkwort-Pruefung fuer den SCHALTENDEN Aufruf.
+     *
+     * Diese Datei liegt im unangemeldeten Bereich, damit Loxone sie ohne
+     * Zugangsdaten erreicht. Ohne diese Pruefung koennte jeder im Netz, der
+     * die Weboberflaeche erreicht, Standklima einschalten oder ueber
+     * "Auto finden" Licht und Hupe ausloesen.
+     *
+     * Verglichen wird mit hash_equals: ein einfaches == liesse sich ueber
+     * die Antwortzeit Zeichen fuer Zeichen erraten.
+     *
+     * Fail-closed: ist noch kein Merkwort gesetzt, wird NICHT durchgelassen.
+     * Ein leeres Soll, das alles annimmt, waere die gefaehrlichste Variante.
+     */
+    $mg_cfg_tok = mg_config();
+    $mg_soll = isset($mg_cfg_tok['aktionstoken']) ? (string) $mg_cfg_tok['aktionstoken'] : '';
+    $mg_ist  = isset($_GET['token']) ? (string) $_GET['token'] : '';
+    if ($mg_soll === '' || !hash_equals($mg_soll, $mg_ist)) {
+        header('Content-Type: text/plain; charset=utf-8');
+        http_response_code(403);
+        echo "MG;OK=0;ERR=TOKEN\n";
+        exit;
+    }
     list($mg_ok, $mg_info) = mg_send(preg_replace('/[^a-z0-9_]/', '', (string) $_GET['cmd']));
     $mg_ergebnis = 'CMD;OK=' . $mg_ok . ';INFO=' . $mg_info;
     // Nach einem Befehl lohnt sich ein frischer Blick

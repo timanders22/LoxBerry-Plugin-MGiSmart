@@ -73,6 +73,12 @@ function mg_config()
         'capacity' => 61.1,             // nutzbare Batteriekapazitaet in kWh
         'notify' => array(),
         'commands' => 1,                // Steuerbefehle erlauben
+        // Schuetzt ?cmd= im UNANGEMELDETEN Endpunkt mg.php. Ohne dieses
+        // Merkwort koennte jeder, der die LoxBerry-Weboberflaeche im Netz
+        // erreicht, Standklima einschalten, die Heckscheibenheizung anwerfen
+        // oder ueber "Auto finden" Licht und Hupe ausloesen. Lesende Abrufe
+        // bleiben frei - die kosten nichts und verraten nichts Schaltbares.
+        'aktionstoken' => '',
     );
     if (!is_array($cfg['notify'])) {
         $cfg['notify'] = array();
@@ -94,13 +100,28 @@ function mg_config_save(array $cfg)
         @mkdir(dirname($p['config']), 0775, true);
     }
     $json = json_encode($cfg, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    if (@file_put_contents($p['config'], $json) === false) {
+    // json_encode liefert bei ungueltigem UTF-8 false, und file_put_contents
+    // schriebe dann eine Datei mit NULL Bytes - und meldete das als Erfolg.
+    if ($json === false || @file_put_contents($p['config'], $json) === false) {
         return false;
     }
     @chmod($p['config'], 0600);
     @copy($p['config'], $p['backup']);
     @chmod($p['backup'], 0600);
     return true;
+}
+
+/**
+ * Ein neues Merkwort erzeugen.
+ *
+ * random_bytes ist die kryptografisch geeignete Quelle; faellt sie aus (sehr
+ * alte PHP-Fassungen ohne Zufallsquelle), wird nicht stillschweigend auf
+ * rand() ausgewichen - ein vorhersagbares Merkwort waere schlechter als
+ * gar keins, weil es Sicherheit nur vortaeuscht.
+ */
+function mg_token_erzeugen()
+{
+    return bin2hex(random_bytes(12));
 }
 
 function mg_log($msg)
@@ -444,4 +465,69 @@ function mg_check_events($st)
         mg_log('Meldung: ' . $melden);
     }
     return $melden;
+}
+
+/* ==================================================================
+ * Sprache (Pflicht: Deutsch und Englisch)
+ *
+ * Englisch ist die Rueckfallebene, nicht Deutsch: wer eine dritte Sprache
+ * eingestellt hat, versteht eher Englisch. Deshalb muss language_en.ini
+ * immer vollstaendig sein.
+ * ================================================================== */
+
+function mg_sprache()
+{
+    $sprache = 'de';
+    if (class_exists('LBSystem', false) && method_exists('LBSystem', 'lblanguage')) {
+        $sprache = LBSystem::lblanguage();
+    } elseif (getenv('LBLANG')) {
+        $sprache = getenv('LBLANG');
+    }
+    $sprache = strtolower(substr((string) $sprache, 0, 2));
+    return in_array($sprache, array('de', 'en'), true) ? $sprache : 'en';
+}
+
+/**
+ * Text zu einem Schluessel "ABSCHNITT.SCHLUESSEL".
+ *
+ * Ist der Schluessel unbekannt, wird er selbst zurueckgegeben - so faellt
+ * beim Durchsehen sofort auf, was noch fehlt, statt dass die Seite leer
+ * bleibt.
+ */
+function mg_t($schluessel)
+{
+    static $texte = null;
+    if ($texte === null) {
+        // Installiert liegen die Dateien unter
+        // <home>/templates/plugins/<ordner>/lang/ - der Ordnername ergibt
+        // sich aus dem Ablageort dieser Datei.
+        $home = getenv('LBHOMEDIR');
+        if (!$home || !is_dir($home)) {
+            foreach (array('/opt/loxberry', '/home/loxberry/loxberry') as $k) {
+                if (is_dir($k)) { $home = $k; break; }
+            }
+        }
+        $ordner = basename(dirname(__FILE__));
+        $pfad = $home . '/templates/plugins/' . $ordner . '/lang';
+        if (!is_dir($pfad)) {
+            // Nicht installiert (Entwicklung): neben dem Plugin nachsehen.
+            $pfad = dirname(dirname(dirname(__FILE__))) . '/templates/lang';
+        }
+        $texte = @parse_ini_file($pfad . '/language_' . mg_sprache() . '.ini',
+                                 true, INI_SCANNER_RAW);
+        if (!is_array($texte)) { $texte = array(); }
+        $rueck = @parse_ini_file($pfad . '/language_en.ini', true, INI_SCANNER_RAW);
+        if (is_array($rueck)) { $texte = array_replace_recursive($rueck, $texte); }
+        // parse_ini_file mit INI_SCANNER_RAW liefert die Werte samt der
+        // Anfuehrungszeichen zurueck, in die sie in der Datei stehen muessen.
+        // Die gehoeren nicht in die Ausgabe.
+        foreach ($texte as $ab => $paare) {
+            if (!is_array($paare)) { continue; }
+            foreach ($paare as $s => $w) {
+                $texte[$ab][$s] = trim((string) $w, '"');
+            }
+        }
+    }
+    list($a, $s) = array_pad(explode('.', $schluessel, 2), 2, '');
+    return isset($texte[$a][$s]) ? $texte[$a][$s] : $schluessel;
 }
