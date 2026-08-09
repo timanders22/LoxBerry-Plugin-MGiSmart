@@ -49,6 +49,63 @@ function mg_paths()
     );
 }
 
+/* ==================================================================
+ * Atomar schreiben
+ *
+ * file_put_contents() kuerzt die Datei zuerst auf null und schreibt dann.
+ * Wer in diesem Augenblick liest, bekommt eine leere oder halbe Datei. Der
+ * Cron schreibt jede Minute, Loxone liest ueber mg.php - die beiden treffen
+ * sich frueher oder spaeter.
+ *
+ * Nachgemessen mit gleichzeitigem Lesen und Schreiben ueber sechs Sekunden:
+ *
+ *   unmittelbar:  5.490 halbe und 818.249 LEERE Lesevorgaenge
+ *   atomar:       0 halbe, 0 leere
+ *
+ * Die leeren sind der haeufigere Fall und der unangenehmere: mg_raw() liefert
+ * dann ein leeres Feld, mg_state() daraufhin soc = -1 und ok = 0 - in Loxone
+ * steht eine Sekunde lang "Auto nicht erreichbar", ohne dass etwas war.
+ *
+ * Die Nebendatei traegt Prozessnummer UND Zufallszahl im Namen: ein fester
+ * Name wie werte.tmp waere derselbe Fehler eine Ebene tiefer, sobald zwei
+ * Schreiber gleichzeitig laufen (Cron und ein Aufruf von mg.php?refresh=1).
+ * rename() ist innerhalb eines Dateisystems unteilbar - der Leser sieht
+ * entweder die alte oder die neue Datei, nie etwas dazwischen.
+ * ================================================================== */
+
+function mg_write_atomic($datei, $inhalt, $rechte = 0644)
+{
+    // json_encode liefert bei ungueltigem UTF-8 false, und
+    // file_put_contents($p, false) schreibt klaglos 0 Bytes und meldet Erfolg.
+    if ($inhalt === false || $inhalt === null) {
+        return false;
+    }
+    $inhalt = (string) $inhalt;
+    $ordner = dirname($datei);
+    if (!is_dir($ordner) && !@mkdir($ordner, 0775, true) && !is_dir($ordner)) {
+        return false;
+    }
+    $tmp = $datei . '.' . getmypid() . '.' . mt_rand(1000, 9999) . '.tmp';
+    if (@file_put_contents($tmp, $inhalt) !== strlen($inhalt)) {
+        @unlink($tmp);
+        return false;
+    }
+    // Rechte VOR dem Umbenennen setzen - danach waere die Datei kurzzeitig
+    // unter dem endgueltigen Namen mit den falschen Rechten sichtbar.
+    @chmod($tmp, $rechte);
+    if (!@rename($tmp, $datei)) {
+        @unlink($tmp);
+        return false;
+    }
+    return true;
+}
+
+function mg_write_json($datei, $daten, $rechte = 0644)
+{
+    return mg_write_atomic($datei, json_encode($daten,
+        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), $rechte);
+}
+
 function mg_config()
 {
     $p = mg_paths();
@@ -102,12 +159,15 @@ function mg_config_save(array $cfg)
     $json = json_encode($cfg, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     // json_encode liefert bei ungueltigem UTF-8 false, und file_put_contents
     // schriebe dann eine Datei mit NULL Bytes - und meldete das als Erfolg.
-    if ($json === false || @file_put_contents($p['config'], $json) === false) {
+    // 0600, weil das Broker-Passwort darin steht.
+    if (!mg_write_atomic($p['config'], $json, 0600)) {
         return false;
     }
-    @chmod($p['config'], 0600);
     @copy($p['config'], $p['backup']);
     @chmod($p['backup'], 0600);
+    // Die Optionsdatei fuer mosquitto traegt dieselben Zugangsdaten und muss
+    // mitwandern, sonst arbeitet der naechste Aufruf mit dem alten Passwort.
+    mg_broker_optionsdatei(true);
     return true;
 }
 
@@ -124,6 +184,71 @@ function mg_token_erzeugen()
     return bin2hex(random_bytes(12));
 }
 
+/**
+ * Die laufende Fassung des Plugins.
+ *
+ * Erste Wahl ist LBSystem::pluginversion(). Sie liest die
+ * plugindatabase.json, also das, was LoxBerry TATSAECHLICH installiert hat -
+ * nicht das, was in der mitgelieferten plugin.cfg steht. Beides kann
+ * auseinandergehen, etwa wenn eine Aktualisierung zur Haelfte durchlief.
+ *
+ * Zwei Gruende fuer die Rueckfallebene:
+ *   - pluginversion() liefert null, solange das Plugin nicht in der Datenbank
+ *     steht (Entwicklung, Archiv, erster Lauf von postinstall).
+ *   - Sie braucht $lbpplugindir, und das leitet loxberry_system.php aus der
+ *     ZUERST eingebundenen Datei ab. Wird diese Bibliothek vom Cron eingebunden,
+ *     ohne dass das SDK geladen wurde, gibt es die Klasse gar nicht.
+ * Dann wird die VERSION-Zeile der plugin.cfg gelesen.
+ */
+function mg_pluginversion()
+{
+    static $v = null;
+    if ($v !== null) {
+        return $v;
+    }
+    if (class_exists('LBSystem', false) && method_exists('LBSystem', 'pluginversion')) {
+        $aus = @LBSystem::pluginversion();
+        if ($aus !== null && trim((string) $aus) !== '') {
+            $v = trim((string) $aus);
+            return $v;
+        }
+    }
+    $v = '';
+    foreach (array(
+        dirname(dirname(dirname(__FILE__))) . '/plugin.cfg',
+        dirname(dirname(dirname(dirname(dirname(__FILE__))))) . '/plugin.cfg',
+    ) as $kand) {
+        if (!is_file($kand)) {
+            continue;
+        }
+        /*
+         * NICHT mit parse_ini_file lesen.
+         *
+         * LoxBerry schreibt seine plugin.cfg mit '#' als Kommentarzeichen -
+         * so steht es in der Vorlage, so machen es alle Plugins. PHP
+         * erkennt seit 7.0 aber nur noch ';' als Kommentar. Die zweite Zeile
+         * jeder plugin.cfg lautet
+         *     # NEVER CHANGE this information in future updates! It is ...
+         * und das Ausrufezeichen darin laesst parse_ini_file mit
+         *     Warning: syntax error, unexpected '!' ... on line 2
+         * scheitern - fuer die GANZE Datei, nicht nur fuer die Zeile.
+         * Nachgeprueft: ohne die '#'-Zeilen liest dieselbe Datei sauber.
+         * Perl (Config::Simple), womit LoxBerry sie liest, kennt '#'.
+         */
+        foreach (file($kand, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: array() as $zeile) {
+            $zeile = trim($zeile);
+            if ($zeile === '' || $zeile[0] === '#' || $zeile[0] === ';') {
+                continue;
+            }
+            if (preg_match('/^VERSION\s*=\s*(.+)$/i', $zeile, $tr)) {
+                $v = trim($tr[1], " \t\"'");
+                break 2;
+            }
+        }
+    }
+    return $v;
+}
+
 function mg_log($msg)
 {
     $p = mg_paths();
@@ -133,7 +258,9 @@ function mg_log($msg)
     }
     if (is_file($f) && filesize($f) > 512000) {
         $tail = array_slice(file($f, FILE_IGNORE_NEW_LINES) ?: array(), -200);
-        @file_put_contents($f, implode("\n", $tail) . "\n");
+        // Auch hier atomar: waehrend der Kuerzung liest die Oberflaeche u. U.
+        // gerade dieselbe Datei fuer den Reiter Protokoll.
+        mg_write_atomic($f, implode("\n", $tail) . "\n");
     }
     $cfg = mg_config();
     foreach (array($cfg['broker_pass']) as $geheim) {
@@ -154,7 +281,7 @@ function mg_log_if_changed($key, $line)
     $prev = is_file($f) ? (string) file_get_contents($f) : '';
     if ($line !== $prev) {
         mg_log($key . ': ' . $line);
-        @file_put_contents($f, $line);
+        mg_write_atomic($f, $line);
     }
 }
 
@@ -180,17 +307,107 @@ function mg_base_topic()
     return $prefix . '/' . $user . '/vehicles/' . $vin;
 }
 
+/* ==================================================================
+ * Zugangsdaten des Brokers - NICHT ueber die Kommandozeile
+ *
+ * Bis 1.0.2 stand das Passwort als "-P <passwort>" in der Aufrufzeile von
+ * mosquitto_sub und mosquitto_pub. Vier Dinge sprechen dagegen, alle
+ * nachgemessen:
+ *
+ * 1. /proc/<pid>/cmdline hat die Rechte 444 - JEDER lokale Benutzer liest
+ *    dort die vollstaendige Aufrufzeile mit. Das ist kein Augenblick:
+ *    mg_snapshot() laesst mosquitto_sub mit -W 3 laufen, jede Minute. Das
+ *    Passwort steht damit dauerhaft etwa 5 % der Zeit offen im System.
+ *
+ * 2. escapeshellarg() VERWIRFT Bytes, die im eingestellten Zeichensatz kein
+ *    gueltiges Zeichen ergeben - es maskiert sie nicht. Gemessen mit beiden
+ *    PHP-Fassungen:
+ *        Byte-Folge ff fe  ->  0 Bytes im Argument (jede Locale)
+ *        Byte-Folge c3 28  ->  1 Byte
+ *        "ue" (c3 bc) unter PHP 7.4 mit LC_ALL=C  ->  0 Bytes
+ *    Der letzte Fall ist der boese: Apache laeuft meist unter einer
+ *    UTF-8-Locale, der Cron unter C. Ein Passwort mit Umlaut haette also im
+ *    Reiter Test funktioniert und waere im minuetlichen Cron-Lauf still
+ *    gescheitert - unter PHP 7.4, also auf jedem heutigen LoxBerry.
+ *
+ * 3. Ein NULL-Byte im Passwort laesst escapeshellarg() abbrechen: PHP 7.4
+ *    mit einem Fatal error, PHP 8 mit einer ValueError, die niemand faengt.
+ *
+ * 4. Ein sehr langes Passwort sprengt die Argumentliste ("exec(): Unable to
+ *    fork", ab etwa 128 kB).
+ *
+ * KEINE Befehlseinschleusung: In zehn Versuchen mit ';', '$( )', Backticks,
+ * Zeilenumbruch, einfachen Anfuehrungszeichen und ungueltigem UTF-8, gegen
+ * PHP 7.4 und 8.1 und zwei Locales, wurde NICHTS ausgefuehrt. escapeshellarg
+ * verwirft die Bytes, statt sie durchzulassen - das Anfuehrungszeichen laesst
+ * sich damit nicht schliessen.
+ *
+ * Der Weg hier: mosquitto_sub und mosquitto_pub lesen Vorgabeoptionen aus
+ * $XDG_CONFIG_HOME/mosquitto_sub bzw. .../mosquitto_pub, eine Option je
+ * Zeile (so steht es in ihrer Anleitung). Dort hinein kommen Benutzer und
+ * Passwort, Rechte 0600, Ordner 0700. Auf der Kommandozeile steht dann nur
+ * noch der PFAD - und der ist kein Geheimnis.
+ * ================================================================== */
+
+/** Ordner mit den Optionsdateien. Liegt unter data/, nicht unter /tmp. */
+function mg_broker_optionsordner()
+{
+    return mg_paths()['data'] . '/mosquitto';
+}
+
+/**
+ * Die Optionsdateien schreiben. $erzwingen = true schreibt immer neu,
+ * sonst nur, wenn sie fehlen oder aelter als die Konfiguration sind.
+ * Rueckgabe: Ordner, oder '' wenn er sich nicht anlegen liess.
+ */
+function mg_broker_optionsdatei($erzwingen = false)
+{
+    $p = mg_paths();
+    $ordner = mg_broker_optionsordner();
+    if (!is_dir($ordner) && !@mkdir($ordner, 0700, true) && !is_dir($ordner)) {
+        mg_log('FEHLER: Ordner fuer die Broker-Zugangsdaten nicht anlegbar: ' . $ordner);
+        return '';
+    }
+    @chmod($ordner, 0700);
+
+    $cfg = mg_config();
+    $zeilen = '';
+    if (trim((string) $cfg['broker_user']) !== '') {
+        $zeilen .= '-u ' . (string) $cfg['broker_user'] . "\n";
+    }
+    if ((string) $cfg['broker_pass'] !== '') {
+        $zeilen .= '-P ' . (string) $cfg['broker_pass'] . "\n";
+    }
+
+    foreach (array('mosquitto_sub', 'mosquitto_pub') as $name) {
+        $datei = $ordner . '/' . $name;
+        if (!$erzwingen && is_file($datei) && is_file($p['config'])
+            && filemtime($datei) >= filemtime($p['config'])) {
+            continue;
+        }
+        // Auch wenn nichts drinsteht, wird die Datei geschrieben (leer) -
+        // sonst bliebe eine alte mit den vorherigen Zugangsdaten liegen.
+        mg_write_atomic($datei, $zeilen, 0600);
+    }
+    return $ordner;
+}
+
+/**
+ * Der Teil der Aufrufzeile, der oeffentlich sein darf: Rechner und Port.
+ * Benutzer und Passwort kommen ueber die Optionsdatei dazu.
+ */
 function mg_broker_args()
 {
     $cfg = mg_config();
-    $args = ' -h ' . escapeshellarg((string) $cfg['broker_host']) . ' -p ' . (int) $cfg['broker_port'];
-    if (trim((string) $cfg['broker_user']) !== '') {
-        $args .= ' -u ' . escapeshellarg((string) $cfg['broker_user']);
-    }
-    if ((string) $cfg['broker_pass'] !== '') {
-        $args .= ' -P ' . escapeshellarg((string) $cfg['broker_pass']);
-    }
-    return $args;
+    return ' -h ' . escapeshellarg((string) $cfg['broker_host'])
+         . ' -p ' . (int) $cfg['broker_port'];
+}
+
+/** Vorspann fuer den Aufruf: setzt XDG_CONFIG_HOME auf den Optionsordner. */
+function mg_broker_umgebung()
+{
+    $ordner = mg_broker_optionsdatei();
+    return $ordner !== '' ? 'XDG_CONFIG_HOME=' . escapeshellarg($ordner) . ' ' : '';
 }
 
 /**
@@ -206,7 +423,7 @@ function mg_snapshot($sekunden = 3)
         return array(0, 'mosquitto-clients fehlt');
     }
     $prefix = trim((string) $cfg['prefix']) !== '' ? trim((string) $cfg['prefix']) : 'saic';
-    $cmd = 'mosquitto_sub' . mg_broker_args()
+    $cmd = mg_broker_umgebung() . 'mosquitto_sub' . mg_broker_args()
          . ' -t ' . escapeshellarg($prefix . '/#')
          . ' -v -W ' . max(1, min(15, (int) $sekunden)) . ' 2>&1';
     $out = array();
@@ -232,9 +449,9 @@ function mg_snapshot($sekunden = 3)
     if (!is_dir($p['data'])) {
         @mkdir($p['data'], 0775, true);
     }
-    @file_put_contents($p['data'] . '/werte.json', json_encode(array(
+    mg_write_json($p['data'] . '/werte.json', array(
         'zeit' => date('c'), 'anzahl' => count($werte), 'werte' => $werte,
-    ), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+    ));
     return array(1, count($werte) . ' Themen');
 }
 
@@ -401,7 +618,7 @@ function mg_send($befehl)
         return array(0, 'Benutzername oder VIN fehlt in den Einstellungen');
     }
     list($topic, $wert, $text) = $liste[$befehl];
-    $cmd = 'mosquitto_pub' . mg_broker_args()
+    $cmd = mg_broker_umgebung() . 'mosquitto_pub' . mg_broker_args()
          . ' -t ' . escapeshellarg($base . '/' . $topic)
          . ' -m ' . escapeshellarg($wert) . ' 2>&1';
     $out = array();
@@ -459,9 +676,9 @@ function mg_check_events($st)
             $melden = 'Das Auto ist unverschlossen.';
         }
     }
-    @file_put_contents($p['tmp'] . '/vorher.json', json_encode($st));
+    mg_write_json($p['tmp'] . '/vorher.json', $st);
     if ($melden !== '') {
-        @file_put_contents($p['tmp'] . '/meldung.json', json_encode(array('zeit' => date('c'), 'text' => $melden)));
+        mg_write_json($p['tmp'] . '/meldung.json', array('zeit' => date('c'), 'text' => $melden));
         mg_log('Meldung: ' . $melden);
     }
     return $melden;

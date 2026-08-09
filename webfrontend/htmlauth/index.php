@@ -38,11 +38,22 @@ foreach (array(
 }
 
 $mg_saved = false; $mg_note = ''; $mg_err = '';
-$mg_tab = preg_match('/^tab-(settings|gateway|loxone|test|log)$/', (string) (isset($_POST['activetab']) ? $_POST['activetab'] : '')) ? $_POST['activetab'] : 'tab-settings';
+
+/* Aktiver Reiter.
+ *
+ * Er kommt aus dem abgesendeten Formular (activetab) oder aus der Adresse
+ * (?form=...). Letzteres brauchen die Reiter, seit sie echte Verweise sind.
+ * Die Positivliste MUSS jeden Reiter enthalten - fehlt einer, ist er sichtbar
+ * und anklickbar, aber nach jedem Absenden springt die Seite zurueck auf
+ * Einstellungen. */
+$mg_muster = '/^tab-(settings|gateway|loxone|test|log)$/';
+$mg_wunsch = isset($_POST['activetab']) ? (string) $_POST['activetab']
+    : (isset($_GET['form']) ? 'tab-' . (string) $_GET['form'] : '');
+$mg_tab = preg_match($mg_muster, $mg_wunsch) ? $mg_wunsch : 'tab-settings';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['clearlog'])) {
     @mkdir(dirname($mg_logfile), 0775, true);
-    @file_put_contents($mg_logfile, '[' . date('Y-m-d H:i:s') . "] Protokoll geleert (Admin-Oberflaeche)\n");
+    mg_write_atomic($mg_logfile, '[' . date('Y-m-d H:i:s') . "] Protokoll geleert (Admin-Oberflaeche)\n");
     $mg_tab = 'tab-log';
 }
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['refreshnow']) && function_exists('mg_snapshot')) {
@@ -103,7 +114,21 @@ $mg_loglines = array();
 if (is_file($mg_logfile)) {
     $mg_loglines = array_slice(array_reverse(file($mg_logfile, FILE_IGNORE_NEW_LINES) ?: array()), 0, 300);
 }
-$mg_host = $_SERVER['HTTP_HOST'] ?: 'loxberry';
+/*
+ * ?? statt ?: - der Unterschied ist hier keiner der Feinheit.
+ *
+ * "$_SERVER['HTTP_HOST'] ?: 'loxberry'" wertet die linke Seite AUS, auch wenn
+ * es den Schluessel nicht gibt. Unter PHP 7.4 ist das eine Notice, die das
+ * error_reporting dieser Datei verschluckt; unter PHP 8 eine Warning, und die
+ * steht dann im Seitenkoerper. Fehlt HTTP_HOST bei einer Anfrage ohne
+ * Host-Kopfzeile oder beim Aufruf von der Kommandozeile.
+ *
+ * Der Wert geht in die Beispieladressen fuer Loxone, deshalb wird er auf
+ * unbedenkliche Zeichen begrenzt - er kommt vom Aufrufer, nicht vom Server.
+ */
+$mg_host = isset($_SERVER['HTTP_HOST']) && $_SERVER['HTTP_HOST'] !== ''
+    ? preg_replace('/[^A-Za-z0-9\.\-:]/', '', (string) $_SERVER['HTTP_HOST'])
+    : (gethostname() ?: 'loxberry');
 
 function mg_e($s) { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); }
 
@@ -131,40 +156,53 @@ if (class_exists('LBWeb')) {
 }
 ?>
 <style>
-.mgw { max-width: 1100px; margin: 0 auto; padding: 0 10px 40px; font-size: 0.95em; }
-.mgw h2 { color: #6dac20; margin: 18px 0 6px; font-size: 1.15em; text-shadow: none; }
-.mgw label { display: block; font-weight: 600; margin: 8px 0 2px; }
-.mgw input[type=text], .mgw input[type=password], .mgw input[type=number], .mgw select {
+.sm-wrap { max-width: 1100px; margin: 0 auto; padding: 0 10px 40px; font-size: 0.95em; }
+.sm-wrap h2 { color: #6dac20; margin: 18px 0 6px; font-size: 1.15em; text-shadow: none; }
+.sm-wrap label { display: block; font-weight: 600; margin: 8px 0 2px; }
+.sm-wrap input[type=text], .sm-wrap input[type=password], .sm-wrap input[type=number], .sm-wrap select {
     width: 100%; padding: 7px 9px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; background: #fff; }
-.mgw .sm-row { display: flex; gap: 14px; flex-wrap: wrap; }
-.mgw .sm-row > div { flex: 1 1 210px; }
-.mgw .sm-small { color: #666; font-size: 0.88em; line-height: 1.45; }
-.mgw .sm-mono { font-family: monospace; background: #f4f4f4; padding: 1px 5px; border-radius: 4px; word-break: break-all; }
-.mgw .sm-btn { background: #6dac20; color: #fff !important; border: 0; border-radius: 8px; padding: 9px 18px;
+.sm-wrap .sm-row { display: flex; gap: 14px; flex-wrap: wrap; }
+.sm-wrap .sm-row > div { flex: 1 1 210px; }
+.sm-wrap .sm-small { color: #666; font-size: 0.88em; line-height: 1.45; }
+.sm-wrap .sm-mono { font-family: monospace; background: #f4f4f4; padding: 1px 5px; border-radius: 4px; word-break: break-all; }
+.sm-wrap .sm-btn { background: #6dac20; color: #fff !important; border: 0; border-radius: 8px; padding: 9px 18px;
     cursor: pointer; text-decoration: none; font-size: 0.95em; text-shadow: none !important; display: inline-block; margin: 3px 4px 3px 0; }
-.mgw .sm-alert { border-radius: 8px; padding: 10px 14px; margin: 12px 0; }
-.mgw .sm-ok { background: #e8f5e9; border: 1px solid #6dac20; }
-.mgw .sm-warn { background: #fff8e1; border: 1px solid #ffb300; }
-.mgw .sm-err { background: #ffebee; border: 1px solid #c62828; }
-.mgw .sm-info { background: #eef4fb; border: 1px solid #90a4ae; }
-.mgw .sm-tabs { display: flex; gap: 4px; margin: 14px 0 0; border-bottom: 2px solid #6dac20; flex-wrap: wrap; }
-.mgw .sm-tab { background: #eee; border: 1px solid #ccc; border-bottom: 0; border-radius: 8px 8px 0 0; padding: 9px 18px;
-    cursor: pointer; color: #444 !important; text-shadow: none !important; }
-.mgw .sm-tab.sm-active { background: #6dac20; color: #fff !important; border-color: #6dac20; font-weight: 600; }
-.mgw .sm-pane { display: none; padding-top: 4px; }
-.mgw .sm-pane.sm-active { display: block; }
-.mgw .sm-tbl { border-collapse: collapse; margin: 6px 0 10px; width: 100%; }
-.mgw .sm-tbl th, .mgw .sm-tbl td { border: 1px solid #ddd; padding: 5px 9px; text-align: left; vertical-align: top; }
-.mgw .sm-tbl th { background: #f4f4f4; }
-.mgw .sm-log, .mgw .sm-code { background: #263238; color: #cfd8dc; font-family: monospace; font-size: 0.82em;
+.sm-wrap .sm-alert { border-radius: 8px; padding: 10px 14px; margin: 12px 0; }
+.sm-wrap .sm-ok { background: #e8f5e9; border: 1px solid #6dac20; }
+.sm-wrap .sm-warn { background: #fff8e1; border: 1px solid #ffb300; }
+.sm-wrap .sm-err { background: #ffebee; border: 1px solid #c62828; }
+.sm-wrap .sm-info { background: #eef4fb; border: 1px solid #90a4ae; }
+.sm-wrap .sm-tabs { display: flex; gap: 4px; margin: 14px 0 0; border-bottom: 2px solid #6dac20; flex-wrap: wrap; }
+.sm-wrap .sm-tab { background: #eee; border: 1px solid #ccc; border-bottom: 0; border-radius: 8px 8px 0 0; padding: 9px 18px;
+    cursor: pointer; color: #444 !important; text-shadow: none !important;
+    text-decoration: none !important; display: inline-block; }
+.sm-wrap .sm-tab.sm-active { background: #6dac20; color: #fff !important; border-color: #6dac20; font-weight: 600; }
+.sm-wrap .sm-pane { display: none; padding-top: 4px; }
+.sm-wrap .sm-pane.sm-active { display: block; }
+.sm-wrap .sm-tbl { border-collapse: collapse; margin: 6px 0 10px; width: 100%; }
+.sm-wrap .sm-tbl th, .sm-wrap .sm-tbl td { border: 1px solid #ddd; padding: 5px 9px; text-align: left; vertical-align: top; }
+.sm-wrap .sm-tbl th { background: #f4f4f4; }
+.sm-wrap .sm-log, .sm-wrap .sm-code { background: #263238; color: #cfd8dc; font-family: monospace; font-size: 0.82em;
     padding: 10px; border-radius: 8px; max-height: 460px; overflow: auto; white-space: pre-wrap; box-shadow: none; }
-.mgw .sm-step { border-left: 4px solid #6dac20; padding: 4px 0 4px 12px; margin: 12px 0; }
-.mgw .sm-kacheln { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; }
-.mgw .sm-kachel { border: 1px solid #ddd; border-radius: 10px; padding: 10px 14px; min-width: 130px; }
-.mgw .sm-kachel b { display: block; font-size: 1.35em; color: #33691e; }
+.sm-wrap .sm-step { border-left: 4px solid #6dac20; padding: 4px 0 4px 12px; margin: 12px 0; }
+.sm-wrap .sm-kacheln { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; }
+.sm-wrap .sm-kachel { border: 1px solid #ddd; border-radius: 10px; padding: 10px 14px; min-width: 130px; }
+.sm-wrap .sm-kachel b { display: block; font-size: 1.35em; color: #33691e; }
 </style>
-<div class="mgw">
-<h1 style="color:#6dac20;text-shadow:none;"><?php echo mg_t('TEXT.MG_ISMART'); ?></h1>
+<div class="sm-wrap">
+<h1 style="color:#6dac20;text-shadow:none;"><?php echo mg_t('TEXT.MG_ISMART'); ?><?php
+/*
+ * Die laufende Fassung neben dem Titel.
+ *
+ * Quelle ist LBSystem::pluginversion() - also die plugindatabase.json und
+ * damit das, was LoxBerry TATSAECHLICH installiert hat. Eine hier fest
+ * eingetragene Zahl waere beim naechsten Release schon falsch; die
+ * mitgelieferte plugin.cfg dient nur als Rueckfallebene, wenn das Plugin
+ * (noch) nicht in der Datenbank steht. Siehe mg_pluginversion().
+ */
+$mg_ver = function_exists('mg_pluginversion') ? mg_pluginversion() : '';
+if ($mg_ver !== '') { ?><span class="sm-small" style="font-weight:400;"> <?= mg_e($mg_ver) ?></span><?php }
+?></h1>
 <div class="sm-small"><?php echo mg_t('TEXT.BRINGT_LADESTAND_REICHWEITE_LADEST'); ?> <b><?php echo mg_t('TEXT.SAIC_MQTT_GATEWAY'); ?></b><?php echo mg_t('TEXT.DIESES_PLUGIN_LIEST_SIE_VOM_MQTT_B'); ?></div>
 
 <?php if ($mg_saved) { ?><div class="sm-alert sm-ok"><b><?php echo mg_t('TEXT.KONFIGURATION_GESPEICHERT'); ?></b></div><?php } ?>
@@ -179,16 +217,40 @@ if (class_exists('LBWeb')) {
 <div class="sm-alert sm-warn"><b><?php echo mg_t('TEXT.NOCH_NICHT_EINGERICHTET'); ?></b> <?php echo mg_t('TEXT.ZUERST_DEN_REITER'); ?> <b><?php echo mg_t('TEXT.GATEWAY_EINRICHTEN'); ?></b> <?php echo mg_t('TEXT.ABARBEITEN_DANN_HIER_UNTEN_BENUTZE'); ?></div>
 <?php } ?>
 
+<?php
+/*
+ * Die Reiter sind echte Verweise, und der SERVER setzt sm-active.
+ *
+ * Bis 1.0.2 standen hier <div class="sm-tab"> ohne Verweis, und sm-active
+ * vergab allein das JavaScript am Seitenende. Da .sm-pane auf display:none
+ * steht, war die Seite ohne JavaScript vollstaendig leer: Ueberschrift und
+ * Reiterleiste standen da, darunter nichts - und die Reiter liessen sich
+ * nicht einmal anklicken, weil ein <div> kein Verweis ist.
+ *
+ * $mg_tab wurde serverseitig laengst ermittelt und nur ans JavaScript
+ * weitergereicht. Jetzt setzt der Server die Klasse selbst; das JavaScript
+ * spart nur noch den Seitenaufbau beim Umschalten.
+ *
+ * Diese Liste, die Positivliste in $mg_muster und die id der Flaechen
+ * muessen deckungsgleich bleiben - alle drei.
+ */
+$mg_reiter = array(
+    'tab-settings' => mg_t('REITER.EINSTELLUNGEN'),
+    'tab-gateway'  => mg_t('REITER.GATEWAY'),
+    'tab-loxone'   => mg_t('REITER.LOXONE'),
+    'tab-test'     => mg_t('REITER.TEST'),
+    'tab-log'      => mg_t('REITER.LOG'),
+);
+?>
 <div class="sm-tabs">
-    <div class="sm-tab" data-pane="tab-settings"><?php echo mg_t('REITER.EINSTELLUNGEN'); ?></div>
-    <div class="sm-tab" data-pane="tab-gateway"><?php echo mg_t('REITER.GATEWAY'); ?></div>
-    <div class="sm-tab" data-pane="tab-loxone"><?php echo mg_t('REITER.LOXONE'); ?></div>
-    <div class="sm-tab" data-pane="tab-test"><?php echo mg_t('REITER.TEST'); ?></div>
-    <div class="sm-tab" data-pane="tab-log"><?php echo mg_t('REITER.LOG'); ?></div>
+<?php foreach ($mg_reiter as $mg_id => $mg_bez) { ?>
+    <a class="sm-tab<?= $mg_tab === $mg_id ? ' sm-active' : '' ?>" data-pane="<?= mg_e($mg_id) ?>"
+       href="index.php?form=<?= mg_e(substr($mg_id, 4)) ?>"><?= $mg_bez ?></a>
+<?php } ?>
 </div>
 
 <!-- ================= <?php echo mg_t('TEXT.EINSTELLUNG'); ?>en ================= -->
-<div class="sm-pane" id="tab-settings">
+<div class="sm-pane<?= $mg_tab === 'tab-settings' ? ' sm-active' : '' ?>" id="tab-settings">
 <form action="index.php" method="post">
 <input data-role="none" type="hidden" name="save" value="1">
 <input data-role="none" type="hidden" name="activetab" value="tab-settings">
@@ -269,7 +331,7 @@ if (class_exists('LBWeb')) {
 </div>
 
 <!-- ================= Gateway einrichten ================= -->
-<div class="sm-pane" id="tab-gateway">
+<div class="sm-pane<?= $mg_tab === 'tab-gateway' ? ' sm-active' : '' ?>" id="tab-gateway">
 <h2><?php echo mg_t('TEXT.WARUM_EIN_ZUSTZLICHER_CONTAINER'); ?></h2>
 <p><?php echo mg_t('TEXT.MG_SAIC_BIETET_KEINE_OFFENE_SCHNIT'); ?> <b><?php echo mg_t('TEXT.SAIC_MQTT_GATEWAY_2'); ?></b> <?php echo mg_t('TEXT.BILDET_DIESES_PROTOKOLL_NACH_MELDE'); ?></p>
 
@@ -311,7 +373,7 @@ if (class_exists('LBWeb')) {
 </div>
 
 <!-- ================= Einbindung in Loxone ================= -->
-<div class="sm-pane" id="tab-loxone">
+<div class="sm-pane<?= $mg_tab === 'tab-loxone' ? ' sm-active' : '' ?>" id="tab-loxone">
 <h2><?php echo mg_t('TEXT.EINBINDUNG_IN_LOXONE_SCHRITT_FR_SC'); ?></h2>
 
 <div class="sm-step"><b><?php echo mg_t('TEXT.SCHRITT_1_VIRTUELLER_HTTP_EINGANG_'); ?></b> <?php echo mg_t('TEXT.ABFRAGE_300_S'); ?>
@@ -398,7 +460,7 @@ if (class_exists('LBWeb')) {
 </div>
 
 <!-- ================= Test ================= -->
-<div class="sm-pane" id="tab-test">
+<div class="sm-pane<?= $mg_tab === 'tab-test' ? ' sm-active' : '' ?>" id="tab-test">
 <h2><?php echo mg_t('TEXT.ZUSTAND'); ?></h2>
 <div class="sm-legende">
 <span><i class="sm-punkt sm-b-lesen"></i> <?php echo mg_t('LEGENDE.LESEN'); ?></span>
@@ -464,7 +526,7 @@ if (class_exists('LBWeb')) {
 </div>
 
 <!-- ================= <?php echo mg_t('TEXT.PROTOKOLL'); ?> ================= -->
-<div class="sm-pane" id="tab-log">
+<div class="sm-pane<?= $mg_tab === 'tab-log' ? ' sm-active' : '' ?>" id="tab-log">
 <h2>Protokoll</h2>
 <div class="sm-small" style="margin-bottom:8px;"><?php echo mg_t('TEXT.PROTOKOLLIERT_WERDEN_ZUSTANDSNDERU'); ?><br>
 <?php echo mg_t('TEXT.DATEI'); ?> <span class="sm-mono"><?= mg_e($mg_logfile) ?></span></div>
@@ -488,7 +550,12 @@ if (class_exists('LBWeb')) {
         tabs.forEach(function (t) { t.classList.toggle('sm-active', t.dataset.pane === id); });
         document.querySelectorAll('.sm-pane').forEach(function (p) { p.classList.toggle('sm-active', p.id === id); });
     }
-    tabs.forEach(function (t) { t.addEventListener('click', function () { zeige(t.dataset.pane); }); });
+    tabs.forEach(function (t) {
+        t.addEventListener('click', function (e) { e.preventDefault(); zeige(t.dataset.pane); });
+    });
+    // Die versteckten Formularfelder muessen den sichtbaren Reiter tragen,
+    // sonst landet man nach dem Absenden auf einem anderen.
+    document.querySelectorAll('input[name="activetab"]').forEach(function (f) { f.value = aktiv; });
     zeige(aktiv);
 })();
 </script>

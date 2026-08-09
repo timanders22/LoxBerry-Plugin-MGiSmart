@@ -8,16 +8,51 @@
  *                       Reiter "Einbindung in Loxone", sonst HTTP 403.
  *   ?json=1          -> kompletter Zustand als JSON
  *   ?debug=1         -> alle empfangenen MQTT-Themen im Klartext
- *   ?refresh=1       -> Werte sofort neu einlesen (Momentaufnahme)
- *   ?ptest=1         -> Test-Pushnachricht ausloesen (PTEST=1 fuer 5 Minuten)
+ *
+ * Ebenfalls mit Merkwort (sie tun etwas, sie lesen nicht nur):
+ *   ?refresh=1&token=T -> Werte sofort neu einlesen (dauert bis zu 4 s)
+ *   ?ptest=1&token=T   -> Test-Pushnachricht ausloesen (PTEST=1 fuer 5 Minuten)
  */
 
 require_once __DIR__ . '/mg_lib.php';
 
+/**
+ * Merkwort pruefen. Wird von allen Aufrufen benutzt, die etwas TUN -
+ * nicht nur von ?cmd=.
+ *
+ * Bis 1.0.2 galt die Pruefung allein fuer ?cmd=. Die Begruendung im Kommentar
+ * lautete, lesende Abrufe kosteten nichts. Fuer ?status stimmt das - fuer
+ * diese beiden nicht:
+ *
+ *   ?refresh=1  startet mosquitto_sub mit -W 4. Der Aufruf haelt einen
+ *               PHP-Arbeiter VIER SEKUNDEN fest und erzeugt einen Prozess.
+ *               Wer das im Sekundentakt aufruft, legt die Weboberflaeche des
+ *               LoxBerry lahm, ohne ein einziges Zugangswort zu kennen.
+ *   ?ptest=1    schreibt eine Datei und loest fuer fuenf Minuten eine
+ *               Push-Nachricht aus. Das ist kein Lesen, das ist ein Klingeln
+ *               am Telefon des Besitzers.
+ *
+ * Beides bleibt erreichbar, aber nur mit demselben Merkwort wie ?cmd=.
+ * Fail-closed: ohne gesetztes Merkwort wird nicht durchgelassen.
+ */
+function mg_token_pruefen()
+{
+    $cfg = mg_config();
+    $soll = isset($cfg['aktionstoken']) ? (string) $cfg['aktionstoken'] : '';
+    $ist  = isset($_GET['token']) ? (string) $_GET['token'] : '';
+    if ($soll === '' || !hash_equals($soll, $ist)) {
+        header('Content-Type: text/plain; charset=utf-8');
+        http_response_code(403);
+        echo "MG;OK=0;ERR=TOKEN\n";
+        exit;
+    }
+}
+
 if (isset($_GET['ptest'])) {
+    mg_token_pruefen();
     $p = mg_paths();
     @mkdir($p['tmp'], 0775, true);
-    @file_put_contents($p['tmp'] . '/ptest', time());
+    mg_write_atomic($p['tmp'] . '/ptest', (string) time());
     header('Content-Type: text/plain; charset=utf-8');
     echo "PTEST;OK=1;DAUER=300\nHinweis: Loxone pollt zyklisch - die Push-Nachricht kommt innerhalb von 5 Minuten,\n"
        . "sofern der Test-Benachrichtigungsbaustein laut Anleitung (Schritt 4) verdrahtet ist.\n";
@@ -52,15 +87,7 @@ if (isset($_GET['cmd'])) {
      * Fail-closed: ist noch kein Merkwort gesetzt, wird NICHT durchgelassen.
      * Ein leeres Soll, das alles annimmt, waere die gefaehrlichste Variante.
      */
-    $mg_cfg_tok = mg_config();
-    $mg_soll = isset($mg_cfg_tok['aktionstoken']) ? (string) $mg_cfg_tok['aktionstoken'] : '';
-    $mg_ist  = isset($_GET['token']) ? (string) $_GET['token'] : '';
-    if ($mg_soll === '' || !hash_equals($mg_soll, $mg_ist)) {
-        header('Content-Type: text/plain; charset=utf-8');
-        http_response_code(403);
-        echo "MG;OK=0;ERR=TOKEN\n";
-        exit;
-    }
+    mg_token_pruefen();
     list($mg_ok, $mg_info) = mg_send(preg_replace('/[^a-z0-9_]/', '', (string) $_GET['cmd']));
     $mg_ergebnis = 'CMD;OK=' . $mg_ok . ';INFO=' . $mg_info;
     // Nach einem Befehl lohnt sich ein frischer Blick
@@ -70,6 +97,7 @@ if (isset($_GET['cmd'])) {
     }
 }
 if (isset($_GET['refresh'])) {
+    mg_token_pruefen();
     list($mg_ok, $mg_info) = mg_snapshot(4);
     $mg_ergebnis = 'REFRESH;OK=' . $mg_ok . ';INFO=' . $mg_info;
 }

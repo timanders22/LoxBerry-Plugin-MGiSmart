@@ -1,5 +1,18 @@
 #!/bin/sh
-# Liest die zuletzt vom SAIC-MQTT-Gateway veroeffentlichten Werte ein.
-if [ -f REPLACELBPHTMLDIR/cron.php ]; then
-  /usr/bin/php REPLACELBPHTMLDIR/cron.php >/dev/null 2>&1
+# MG iSmart - liest jede Minute die Werte des SAIC-MQTT-Gateways ein.
+#
+# REPLACELBPBINDIR wird bei der Installation durch <home>/bin/plugins/<ordner>
+# ersetzt.
+#
+# WARUM bin/ UND NICHT webfrontend/html/
+# Bis 1.0.2 stand hier REPLACELBPHTMLDIR/cron.php - das Skript lag also im
+# UNANGEMELDETEN Webordner und war damit fuer jeden erreichbar, der die
+# LoxBerry-Oberflaeche im Netz sieht:
+#     http://loxberry/plugins/mgismart/cron.php
+# Jeder Aufruf startet mosquitto_sub mit -W 3, haelt also drei Sekunden lang
+# einen PHP-Arbeiter fest. Das war ein unbeabsichtigter, unauthentifizierter
+# Endpunkt, den niemand brauchte: Der Cron ruft das Skript ueber das
+# Dateisystem auf, nicht ueber HTTP.
+if [ -f REPLACELBPBINDIR/cron.php ]; then
+  /usr/bin/php REPLACELBPBINDIR/cron.php >/dev/null 2>&1
 fi

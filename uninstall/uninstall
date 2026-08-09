@@ -1,0 +1,101 @@
+#!/bin/bash
+# MG iSmart - uninstall
+# command <TEMPFOLDER> <NAME> <FOLDER> <VERSION> <BASEFOLDER>
+#
+# Wird von LoxBerry als root ausgefuehrt. Rueckgabewert 0 = in Ordnung,
+# 1 = Warnung (die Deinstallation laeuft trotzdem weiter).
+#
+# ===================================================================
+# WARUM ES DIESE DATEI GIBT
+# ===================================================================
+#
+# LoxBerry raeumt die Plugin-Ordner weg und entfernt den Cron-Eintrag.
+# Drei Dinge bleiben sonst liegen, und alle drei sind Zugangsdaten oder
+# Verweise darauf:
+#
+#   1. config/plugins/<ordner>.backup.json
+#      Die Sicherung liegt bewusst NEBEN dem Konfigordner, damit sie
+#      Update und Neuinstallation uebersteht (mg_paths()['backup']).
+#      Beim Deinstallieren ist genau das falsch: darin stehen das
+#      Broker-Passwort und das Merkwort des unangemeldeten Endpunkts.
+#   2. /tmp/mgismart
+#      Zwischenspeicher: letzter Zustand, Meldungen, Push-Test. /tmp ist
+#      auf dem LoxBerry eine Ramdisk, der Ordner verschwindet also
+#      spaetestens beim naechsten Neustart - bis dahin stuende er da.
+#   3. Ein noch laufender mosquitto_sub aus einem Cron-Durchgang.
+#
+# ZUR PROZESSSUCHE: "pkill -f mosquitto_sub" waere grob falsch - so heissen
+# die Aufrufe mehrerer Plugins und moeglicherweise laufende Sitzungen des
+# Anwenders. Beendet wird nur, was auf den Themenbaum DIESES Plugins horcht,
+# und verglichen wird argumentweise.
+
+PDIR=$3
+[ -n "$PDIR" ] || PDIR="mgismart"
+BASE="${5:-$LBHOMEDIR}"
+[ -n "$BASE" ] && [ -d "$BASE" ] || BASE="/opt/loxberry"
+
+PCONFIG="$BASE/config/plugins/$PDIR"
+PDATA="$BASE/data/plugins/$PDIR"
+BK="$BASE/config/plugins/$PDIR.backup.json"
+TMP="/tmp/mgismart"
+
+# Das Themenpraefix steht in der Konfiguration; ohne es wird kein Prozess
+# angefasst.
+PREFIX=""
+if [ -r "$PCONFIG/mg.json" ] && command -v python3 >/dev/null 2>&1; then
+    PREFIX=$(python3 -c 'import json,sys
+try:
+    print(str(json.load(open(sys.argv[1])).get("prefix") or ""))
+except Exception:
+    print("")' "$PCONFIG/mg.json" 2>/dev/null)
+fi
+[ -n "$PREFIX" ] || PREFIX="saic"
+
+GEFUNDEN=0
+for D in /proc/[0-9]*; do
+    P=$(basename "$D")
+    [ -r "$D/cmdline" ] || continue
+    ARGS=$(tr '\0' '\n' < "$D/cmdline" 2>/dev/null)
+    # Erstes Argument muss mosquitto_sub sein UND ein Argument muss genau
+    # unser Themenbaum sein.
+    case "$(printf '%s\n' "$ARGS" | head -1)" in
+        *mosquitto_sub) : ;;
+        *) continue ;;
+    esac
+    if printf '%s\n' "$ARGS" | grep -qxF "$PREFIX/#"; then
+        kill "$P" 2>/dev/null
+        for i in 1 2 3; do
+            kill -0 "$P" 2>/dev/null || break
+            sleep 1
+        done
+        kill -9 "$P" 2>/dev/null
+        GEFUNDEN=1
+        echo "<OK> Laufenden mosquitto_sub beendet (PID $P)."
+    fi
+done
+[ "$GEFUNDEN" -eq 0 ] && echo "<INFO> Es lief kein Abruf."
+
+if [ -f "$BK" ]; then
+    rm -f "$BK" && echo "<OK> Sicherung der Konfiguration entfernt: $PDIR.backup.json"
+    echo "<INFO> Broker-Passwort und Merkwort sind damit vom LoxBerry fort."
+else
+    echo "<INFO> Keine Sicherung ausserhalb des Plugin-Ordners vorhanden."
+fi
+
+# Die Optionsdateien mit den Broker-Zugangsdaten. Der Datenordner wird von
+# LoxBerry ohnehin entfernt; sollte das fehlschlagen, waeren hier Zugangsdaten
+# zurueckgeblieben - deshalb ausdruecklich.
+if [ -d "$PDATA/mosquitto" ]; then
+    rm -rf "$PDATA/mosquitto" && echo "<OK> Zugangsdaten fuer mosquitto entfernt."
+fi
+
+if [ -d "$TMP" ]; then
+    rm -rf "$TMP" && echo "<OK> Zwischenspeicher $TMP entfernt."
+fi
+
+echo "<INFO> Das SAIC-MQTT-Gateway ist ein eigenstaendiger Docker-Container"
+echo "<INFO> und wurde nicht von diesem Plugin angelegt - es bleibt unberuehrt."
+echo "<WARNING> Im MQTT-Broker koennen Werte stehen bleiben."
+echo "<INFO> Sie stammen vom Gateway, nicht von diesem Plugin. Zum Aufraeumen:"
+echo "<INFO> LoxBerry -> System -> MQTT Gateway."
+exit 0
