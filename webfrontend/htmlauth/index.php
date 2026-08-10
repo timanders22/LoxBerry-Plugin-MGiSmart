@@ -150,7 +150,7 @@ function mg_adr($vorlage)
 function mg_z($v, $einheit = '', $ung = '&ndash;') { return $v === null || $v < 0 ? $ung : (rtrim(rtrim(number_format((float) $v, 1, ',', '.'), '0'), ',') . $einheit); }
 
 if (class_exists('LBWeb')) {
-    LBWeb::lbheader('MG iSmart', 'https://github.com/SAIC-iSmart-API/saic-python-mqtt-gateway', '');
+    LBWeb::lbheader('MG iSmart', 'https://github.com/SAIC-iSmart-API/saic-python-mqtt-gateway', 'help.html');
 } else {
     echo '<!DOCTYPE html><html lang="de"><head><meta charset="utf-8"><title>MG iSmart</title></head><body>';
 }
