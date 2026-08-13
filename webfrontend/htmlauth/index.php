@@ -46,7 +46,7 @@ $mg_saved = false; $mg_note = ''; $mg_err = '';
  * Die Positivliste MUSS jeden Reiter enthalten - fehlt einer, ist er sichtbar
  * und anklickbar, aber nach jedem Absenden springt die Seite zurueck auf
  * Einstellungen. */
-$mg_muster = '/^tab-(settings|gateway|loxone|test|log)$/';
+$mg_muster = '/^tab-(settings|mqtt|gateway|loxone|test|log)$/';
 $mg_wunsch = isset($_POST['activetab']) ? (string) $_POST['activetab']
     : (isset($_GET['form']) ? 'tab-' . (string) $_GET['form'] : '');
 $mg_tab = preg_match($mg_muster, $mg_wunsch) ? $mg_wunsch : 'tab-settings';
@@ -76,13 +76,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['sendcmd']) && functio
     $mg_tab = 'tab-test';
 }
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save']) && function_exists('mg_config')) {
+/* Eigener Handler fuer den MQTT-Reiter (seit 1.0.7). NICHT den save-Handler
+ * mitbenutzen: der setzt Haken per isset() und wuerde beim Absenden des
+ * MQTT-Formulars alle Einstellungs-Haken stillschweigend auf 0 stellen. */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mqtt_save']) && function_exists('mg_config')) {
     $mg_new = mg_config();
     $mg_new['broker_host'] = trim((string) (isset($_POST['broker_host']) ? $_POST['broker_host'] : '127.0.0.1'));
     $mg_new['broker_port'] = max(1, min(65535, (int) (isset($_POST['broker_port']) ? $_POST['broker_port'] : 1883)));
     $mg_new['broker_user'] = trim((string) (isset($_POST['broker_user']) ? $_POST['broker_user'] : ''));
     $mg_pw = (string) (isset($_POST['broker_pass']) ? $_POST['broker_pass'] : '');
     if ($mg_pw !== '') { $mg_new['broker_pass'] = $mg_pw; }
+    if (mg_config_save($mg_new)) { $mg_saved = true; } else { $mg_err = 'Konfiguration konnte nicht gespeichert werden.'; }
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save']) && function_exists('mg_config')) {
+    $mg_new = mg_config();
     $mg_new['prefix'] = preg_replace('#[^\w/\-]#', '', (string) (isset($_POST['prefix']) ? $_POST['prefix'] : 'saic')) ?: 'saic';
     $mg_new['saic_user'] = trim((string) (isset($_POST['saic_user']) ? $_POST['saic_user'] : ''));
     $mg_new['vin'] = trim((string) (isset($_POST['vin']) ? $_POST['vin'] : ''));
@@ -202,6 +210,8 @@ if (class_exists('LBWeb')) {
 .sm-wrap .sm-row { display: flex; gap: 14px; flex-wrap: wrap; }
 .sm-wrap .sm-row > div { flex: 1 1 210px; }
 .sm-wrap .sm-small { color: #666; font-size: 0.88em; line-height: 1.45; }
+.sm-hinweis { border: 1px solid #cfe3b0; background: #f2f8ea; border-radius: 6px;
+    padding: 10px 12px; margin: 12px 0; font-size: 0.9em; }
 .sm-wrap .sm-mono { font-family: monospace; background: #f4f4f4; padding: 1px 5px; border-radius: 4px; word-break: break-all; }
 .sm-wrap .sm-btn { background: #6dac20; color: #fff !important; border: 0; border-radius: 8px; padding: 9px 18px;
     cursor: pointer; text-decoration: none; font-size: 0.95em; text-shadow: none !important; display: inline-block; margin: 3px 4px 3px 0; }
@@ -226,6 +236,24 @@ if (class_exists('LBWeb')) {
 .sm-wrap .sm-kacheln { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; }
 .sm-wrap .sm-kachel { border: 1px solid #ddd; border-radius: 10px; padding: 10px 14px; min-width: 130px; }
 .sm-wrap .sm-kachel b { display: block; font-size: 1.35em; color: #33691e; }
+
+/* Nachgetragene Definitionen (CSS-Luecken-Durchgang 13.08.2026):
+   benutzt, aber nie definiert - wortgleich aus der Hausstandard-Vorlage
+   bzw. der Referenzimplementierung uebernommen. */
+.sm-h3 { color: #4f7d17; font-size: 1.0em; font-weight: 700; margin: 16px 0 2px; }
+.sm-knopfreihe { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 4px; align-items: stretch; }
+.sm-legende { display: flex; flex-wrap: wrap; gap: 14px; margin: 10px 0 2px; font-size: 0.86em; color: #555; }
+.sm-legende span { display: inline-flex; align-items: center; gap: 6px; }
+.sm-punkt { width: 13px; height: 13px; border-radius: 3px; display: inline-block; }
+.sm-punkt.sm-b-lesen   { background: #6dac20; }
+.sm-punkt.sm-b-technik { background: #546e7a; }
+.sm-punkt.sm-b-aktion  { background: #e0620d; }
+.sm-wrap .sm-btn.sm-b-lesen   { background: #6dac20 !important; }
+.sm-wrap .sm-btn.sm-b-technik { background: #546e7a !important; }
+.sm-wrap .sm-btn.sm-b-aktion  { background: #e0620d !important; }
+.sm-wrap .sm-btn.sm-b-lesen:hover,   .sm-wrap .sm-btn.sm-b-lesen:focus   { background: #5c9219 !important; color: #fff !important; }
+.sm-wrap .sm-btn.sm-b-technik:hover, .sm-wrap .sm-btn.sm-b-technik:focus { background: #435962 !important; color: #fff !important; }
+.sm-wrap .sm-btn.sm-b-aktion:hover,  .sm-wrap .sm-btn.sm-b-aktion:focus  { background: #b84f0a !important; color: #fff !important; }
 </style>
 <div class="sm-wrap">
 <h1 style="color:#6dac20;text-shadow:none;"><?php echo mg_t('TEXT.MG_ISMART'); ?><?php
@@ -274,6 +302,7 @@ if ($mg_ver !== '') { ?><span class="sm-small" style="font-weight:400;"> <?= mg_
  */
 $mg_reiter = array(
     'tab-settings' => mg_t('REITER.EINSTELLUNGEN'),
+    'tab-mqtt'     => mg_t('REITER.MQTT'),
     'tab-gateway'  => mg_t('REITER.GATEWAY'),
     'tab-loxone'   => mg_t('REITER.LOXONE'),
     'tab-test'     => mg_t('REITER.TEST'),
@@ -292,28 +321,6 @@ $mg_reiter = array(
 <form action="index.php" method="post">
 <input data-role="none" type="hidden" name="save" value="1">
 <input data-role="none" type="hidden" name="activetab" value="tab-settings">
-
-<h2><?php echo mg_t('TEXT.MQTT_BROKER'); ?></h2>
-<?php if (function_exists('mg_mqtt_gateway_autostart') && mg_mqtt_gateway_autostart() === false) { ?><div class="sm-alert sm-warn"><b>MQTT:</b> <?php echo mg_t('TEXT.W_AUTOSTART'); ?></div><?php } ?>
-<div class="sm-row">
-    <div>
-        <label><?php echo mg_t('TEXT.ADRESSE'); ?></label>
-        <input data-role="none" type="text" name="broker_host" value="<?= mg_e($mg_cfg['broker_host']) ?>" placeholder="127.0.0.1">
-    </div>
-    <div>
-        <label><?php echo mg_t('TEXT.PORT'); ?></label>
-        <input data-role="none" type="number" name="broker_port" value="<?= (int) $mg_cfg['broker_port'] ?>" min="1" max="65535">
-    </div>
-    <div>
-        <label><?php echo mg_t('TEXT.BENUTZER_OPTIONAL'); ?></label>
-        <input data-role="none" type="text" name="broker_user" value="<?= mg_e($mg_cfg['broker_user']) ?>">
-    </div>
-    <div>
-        <label><?php echo mg_t('TEXT.PASSWORT_OPTIONAL'); ?></label>
-        <input data-role="none" type="password" name="broker_pass" value="" placeholder="<?= $mg_cfg['broker_pass'] !== '' ? 'gespeichert &mdash; leer lassen = unver&auml;ndert' : 'nur falls der Broker eines verlangt' ?>">
-    </div>
-</div>
-<div class="sm-small"><?php echo mg_t('TEXT.BEI_LOXBERRY_IST_DAS_DER_EINGEBAUT'); ?> <span class="sm-mono">127.0.0.1:1883</span><?php echo mg_t('TEXT.BENUTZER_UND_PASSWORT_STEHEN_UNTER'); ?></div>
 
 <h2><?php echo mg_t('TEXT.FAHRZEUG'); ?></h2>
 <div class="sm-row">
@@ -364,6 +371,38 @@ $mg_reiter = array(
     </div>
 </div>
 <div class="sm-small"><?php echo mg_t('TEXT.TRITT_EINES_DER_EREIGNISSE_EIN_STE'); ?> <span class="sm-mono"><?php echo mg_t('TEXT.PUSHAKTIV_1'); ?></span> <?php echo mg_t('TEXT.FR_DIESE_ZEIT_DEN_PUSH_VERSCHICKT_'); ?></div>
+
+<div style="margin-top:16px;"><button data-role="none" class="sm-btn" type="submit"><?php echo mg_t('TEXT.SPEICHERN'); ?></button></div>
+</form>
+</div>
+
+<!-- ================= MQTT (eigener Reiter seit 1.0.7, Hausstandard) ================= -->
+<div class="sm-pane<?= $mg_tab === 'tab-mqtt' ? ' sm-active' : '' ?>" id="tab-mqtt">
+<form action="index.php" method="post">
+<input data-role="none" type="hidden" name="mqtt_save" value="1">
+<input data-role="none" type="hidden" name="activetab" value="tab-mqtt">
+
+<h2><?php echo mg_t('TEXT.MQTT_BROKER'); ?></h2>
+<?php if (function_exists('mg_mqtt_gateway_autostart') && mg_mqtt_gateway_autostart() === false) { ?><div class="sm-alert sm-warn"><b>MQTT:</b> <?php echo mg_t('TEXT.W_AUTOSTART'); ?></div><?php } ?>
+<div class="sm-row">
+    <div>
+        <label><?php echo mg_t('TEXT.ADRESSE'); ?></label>
+        <input data-role="none" type="text" name="broker_host" value="<?= mg_e($mg_cfg['broker_host']) ?>" placeholder="127.0.0.1">
+    </div>
+    <div>
+        <label><?php echo mg_t('TEXT.PORT'); ?></label>
+        <input data-role="none" type="number" name="broker_port" value="<?= (int) $mg_cfg['broker_port'] ?>" min="1" max="65535">
+    </div>
+    <div>
+        <label><?php echo mg_t('TEXT.BENUTZER_OPTIONAL'); ?></label>
+        <input data-role="none" type="text" name="broker_user" value="<?= mg_e($mg_cfg['broker_user']) ?>">
+    </div>
+    <div>
+        <label><?php echo mg_t('TEXT.PASSWORT_OPTIONAL'); ?></label>
+        <input data-role="none" type="password" name="broker_pass" value="" placeholder="<?= $mg_cfg['broker_pass'] !== '' ? 'gespeichert &mdash; leer lassen = unver&auml;ndert' : 'nur falls der Broker eines verlangt' ?>">
+    </div>
+</div>
+<div class="sm-small"><?php echo mg_t('TEXT.BEI_LOXBERRY_IST_DAS_DER_EINGEBAUT'); ?> <span class="sm-mono">127.0.0.1:1883</span><?php echo mg_t('TEXT.BENUTZER_UND_PASSWORT_STEHEN_UNTER'); ?></div>
 
 <div style="margin-top:16px;"><button data-role="none" class="sm-btn" type="submit"><?php echo mg_t('TEXT.SPEICHERN'); ?></button></div>
 </form>
