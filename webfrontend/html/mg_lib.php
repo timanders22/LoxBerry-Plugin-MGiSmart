@@ -777,3 +777,102 @@ function mg_t($schluessel)
     list($a, $s) = array_pad(explode('.', $schluessel, 2), 2, '');
     return isset($texte[$a][$s]) ? $texte[$a][$s] : $schluessel;
 }
+
+/* ---------------- Loxone-Vorlage (Hausstandard "Alles auf einmal anlegen") ---------------- */
+/** name => array(analog, min, max, einheit, kommentar) */
+function mg_felder() {
+    return array(
+        'OK'         => array(0, 0, 1,     '',     '1 = Fahrzeugdaten gueltig'),
+        'SOC'        => array(1, 0, 100,   '%',    'Ladezustand'),
+        'SOCKWH'     => array(1, 0, 100,   'kWh',  'Energie in der Batterie'),
+        'ZIEL'       => array(1, 0, 100,   '%',    'Ladeziel'),
+        'REICHWEITE' => array(1, 0, 1000,  'km',   'Reichweite'),
+        'LAEDT'      => array(0, 0, 1,     '',     '1 = laedt gerade'),
+        'STECKER'    => array(0, 0, 1,     '',     '1 = Stecker angeschlossen'),
+        'LEISTUNG'   => array(1, 0, 100,   'kW',   'Ladeleistung'),
+        'RESTZEIT'   => array(1, 0, 3000,  'min',  'Restladezeit'),
+        'KM'         => array(1, 0, 1000000,'km',  'Kilometerstand'),
+        'BATT12V'    => array(1, 0, 20,    'V',    '12-V-Batterie'),
+        'ZU'         => array(0, 0, 1,     '',     '1 = verschlossen'),
+        'KOFFER'     => array(0, 0, 1,     '',     '1 = Kofferraum offen'),
+        'INNEN'      => array(1, -40, 80,  'GradC','Innentemperatur'),
+        'AUSSEN'     => array(1, -40, 80,  'GradC','Aussentemperatur'),
+        'VOLL'       => array(0, 0, 1,     '',     '1 = Ladeziel erreicht'),
+        'ALTER'      => array(1, 0, 100000,'min',  'Alter der Daten'),
+        'THEMEN'     => array(1, 0, 1000,  '',     'Anzahl MQTT-Themen (Diagnose)'),
+        'PUSH'       => array(0, 0, 1,     '',     'Push freigegeben'),
+        'PUSHAKTIV'  => array(0, 0, 1,     '',     'Push-Fenster aktiv'),
+        'PTEST'      => array(0, 0, 1,     '',     'Test-Push ausloesen'),
+    );
+}
+/** Gepruefter PHP-Nachbau des LoxoneTemplateBuilder - Attributreihenfolge,
+ *  CRLF und der Tabulator vor den Kindelementen entsprechen dem Original.
+ *  Uebernommen aus LoxBerry-Plugin-APC-UPS, nur das Kuerzel getauscht. */
+function mg_xml_virtual_in_http($kopf, $cmds) {
+    $crlf = "\r\n";
+    $o = '<?xml version="1.0" encoding="utf-8"?>' . $crlf;
+    $o .= '<VirtualInHttp HintText="" ';
+    $o .= 'Title="' . mg_vx($kopf['title']) . '" ';
+    $o .= 'Comment="' . mg_vx(isset($kopf['comment']) ? $kopf['comment'] : '') . '" ';
+    $o .= 'Address="' . mg_vx(isset($kopf['address']) ? $kopf['address'] : '') . '" ';
+    $o .= 'PollingTime="' . mg_vx(isset($kopf['polling']) ? $kopf['polling'] : '300') . '"';
+    $o .= '>' . $crlf;
+    $o .= "\t" . '<Info templateType="2" minVersion="17010727"/>' . $crlf; // wie Original-Export aus Loxone Config 17.1
+    foreach ($cmds as $c) {
+        $o .= "\t" . '<VirtualInHttpCmd ';
+        $o .= 'Title="' . mg_vx($c['title']) . '" ';
+        $o .= 'Comment="' . mg_vx($c['comment']) . '" ';
+        $o .= 'Check="' . mg_vx($c['check']) . '" ';
+        $o .= 'Signed="' . ($c['min'] < 0 ? 'true' : 'false') . '" ';
+        $o .= 'Analog="' . ($c['analog'] ? 'true' : 'false') . '" ';
+        $o .= 'SourceValLow="0" DestValLow="0" SourceValHigh="1" DestValHigh="1" DefVal="0" ';
+        $o .= 'MinVal="' . (int) $c['min'] . '" ';
+        $o .= 'MaxVal="' . (int) $c['max'] . '" ';
+        $o .= 'Unit="' . mg_vx(isset($c['unit']) ? $c['unit'] : '<v>') . '" ';
+        $o .= 'HintText=""';
+        $o .= '/>' . $crlf;
+    }
+    $o .= '</VirtualInHttp>' . $crlf;
+    return $o;
+}
+
+function mg_vx($s) {
+    return htmlspecialchars((string) $s, ENT_QUOTES | ENT_XML1, 'UTF-8');
+}
+
+/** Hausstandard: Gateway-Autostart aus general.json (PLUGIN_HAUSREGELN Abschnitt 3). */
+function mg_mqtt_gateway_autostart() {
+    $home = getenv('LBHOMEDIR') ?: '/opt/loxberry';
+    $gj = $home . '/config/system/general.json';
+    if (!is_file($gj)) { return null; }
+    $d = json_decode((string) @file_get_contents($gj), true);
+    if (!is_array($d) || !isset($d['Mqtt'])) { return null; }
+    return !empty($d['Mqtt']['Gatewayautostart']);
+}
+
+/** Vorlage fuer den Import in Loxone Config. Rueckgabe: array(name, inhalt) */
+function mg_vorlage() {
+    $host = isset($_SERVER['HTTP_HOST']) && $_SERVER['HTTP_HOST'] !== ''
+        ? preg_replace('/[^A-Za-z0-9\.\-:]/', '', (string) $_SERVER['HTTP_HOST'])
+        : (gethostname() ?: 'loxberry');
+    $ordner = getenv('LBPPLUGINDIR') ?: 'mgismart';
+    $cmds = array();
+    foreach (mg_felder() as $name => $f) {
+        list($analog, $min, $max, $einheit, $text) = $f;
+        $cmds[] = array(
+            'title' => 'MG_' . $name,
+            'comment' => $text . ($einheit !== '' ? ' [' . $einheit . ']' : ''),
+            'check' => '\i' . $name . '=\i\v',
+            'unit' => ($einheit !== '' ? '<v.1> ' . $einheit : '<v.1>'),
+            'analog' => $analog, 'min' => $min, 'max' => $max,
+        );
+    }
+    return array('VI_mgismart.xml', mg_xml_virtual_in_http(array(
+        'title' => 'MG iSmart',
+        'address' => 'http://' . $host . '/plugins/' . $ordner . '/mg.php',
+        'polling' => '300',
+        'comment' => 'Erzeugt vom LoxBerry-Plugin MG iSmart (' . date('d.m.Y') . '). '
+                   . 'Loxone Config legt beim Import neu an und ueberschreibt nichts - '
+                   . 'zweimal eingelesen ergibt doppelte Bausteine.',
+    ), $cmds));
+}

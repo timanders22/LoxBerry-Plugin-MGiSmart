@@ -51,6 +51,15 @@ $mg_wunsch = isset($_POST['activetab']) ? (string) $_POST['activetab']
     : (isset($_GET['form']) ? 'tab-' . (string) $_GET['form'] : '');
 $mg_tab = preg_match($mg_muster, $mg_wunsch) ? $mg_wunsch : 'tab-settings';
 
+// ---------- Loxone-Vorlage herunterladen (Hausstandard) ----------
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['vorlage']) && function_exists('mg_vorlage')) {
+    list($mg_vname, $mg_vinhalt) = mg_vorlage();
+    header('Content-Type: application/x-download');
+    header('Content-Disposition: attachment; filename="' . $mg_vname . '"');
+    echo $mg_vinhalt;
+    exit;
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['clearlog'])) {
     @mkdir(dirname($mg_logfile), 0775, true);
     mg_write_atomic($mg_logfile, '[' . date('Y-m-d H:i:s') . "] Protokoll geleert (Admin-Oberflaeche)\n");
@@ -285,6 +294,7 @@ $mg_reiter = array(
 <input data-role="none" type="hidden" name="activetab" value="tab-settings">
 
 <h2><?php echo mg_t('TEXT.MQTT_BROKER'); ?></h2>
+<?php if (function_exists('mg_mqtt_gateway_autostart') && mg_mqtt_gateway_autostart() === false) { ?><div class="sm-alert sm-warn"><b>MQTT:</b> <?php echo mg_t('TEXT.W_AUTOSTART'); ?></div><?php } ?>
 <div class="sm-row">
     <div>
         <label><?php echo mg_t('TEXT.ADRESSE'); ?></label>
@@ -451,6 +461,14 @@ $mg_reiter = array(
 <?php } ?>
 </table>
 </div>
+
+<h2><?php echo mg_t('TEXT.H_VORLAGE'); ?></h2>
+<div class="sm-hinweis"><?php echo mg_t('TEXT.H_VORLAGE_TEXT'); ?></div>
+<form action="index.php" method="post" style="margin-bottom:14px;">
+  <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
+  <input data-role="none" type="hidden" name="vorlage" value="1">
+  <button data-role="none" class="sm-btn" type="submit" style="background:#546e7a;"><?php echo mg_t('TEXT.K_VORLAGE'); ?></button>
+</form>
 
 <div class="sm-step"><b><?php echo mg_t('TEXT.SCHRITT_4_KOMPLETTE_BAUSTEIN_LISTE'); ?></b><br>
 <b><?php echo mg_t('TEXT.4A_KACHELN_UND_GRUNDLOGIK'); ?></b>
