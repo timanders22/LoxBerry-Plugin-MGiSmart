@@ -2,17 +2,24 @@
 /**
  * MG iSmart - gemeinsame Bibliothek
  *
- * Bringt die Daten eines MG-Elektrofahrzeugs (iSMART / SAIC) nach Loxone:
- * Ladestand, Reichweite, Ladeleistung, Tueren, Klima, Standort - und
- * schickt Befehle zurueck (Laden stoppen, Ziel-SoC, Ladestrom, Klima).
+ * Bringt die Daten eines oder mehrerer MG-Elektrofahrzeuge (iSMART / SAIC)
+ * nach Loxone und schickt Befehle zurueck.
  *
  * ARCHITEKTUR
  * Es gibt keine offizielle Schnittstelle von MG/SAIC. Die Daten holt das
  * quelloffene "SAIC MQTT Gateway" (Docker-Container) und veroeffentlicht sie
  * per MQTT. Dieses Plugin liest die Werte vom MQTT-Broker (mosquitto_sub),
- * uebersetzt sie in eine kompakte Loxone-Zeile und schickt Befehle zurueck
- * (mosquitto_pub). Eine Neuimplementierung der verschluesselten SAIC-API in
- * PHP waere aufwaendig und wuerde bei jeder API-Aenderung brechen.
+ * uebersetzt sie in kompakte Loxone-Zeilen, veroeffentlicht sie auf Wunsch
+ * unter eigenen, lesbaren Themen und schickt Befehle zurueck (mosquitto_pub).
+ *
+ * DIE TOPIC-NAMEN SIND GEMESSEN, NICHT GERATEN.
+ * Alle unten benutzten Themen stehen woertlich in src/mqtt_topics.py des
+ * Gateways (Zweig main, Abruf 23.08.2026). Bis 1.0.8 enthielt die Liste neun
+ * Namen, die es dort nie gab (battery/soc, drivetrain/targetSoc,
+ * chargingState, chargingConnected, chargingPower, chargingTimeRemaining,
+ * odometer, batteryVoltage, rangeElectric) - sie sind entfernt. Der einzige
+ * Ersatzname, der wirklich gebraucht wurde, war falsch geschrieben:
+ * drivetrain/soc_kwh, nicht socKwh.
  *
  * Kompatibel mit PHP 7.4 und PHP 8.x (LoxBerry 3.x/4.x).
  * Alle Funktionen tragen das Praefix mg_ (LBWeb::lbheader() setzt SDK-Globals).
@@ -21,18 +28,16 @@
 error_reporting(E_ALL & ~E_DEPRECATED & ~E_NOTICE);
 date_default_timezone_set('Europe/Berlin');
 
+/** Sekunden zwischen dem 01.01.1970 und dem 01.01.2009 (Loxone-Zeitrechnung). */
+if (!defined('MG_LOXONE_EPOCHE')) {
+    define('MG_LOXONE_EPOCHE', 1230768000);
+}
+
 
 /* Den LoxBerry-Wurzelordner ohne festen Systempfad bestimmen.
  *
  * Vom eigenen Ablageort aufwaerts, bis ein Verzeichnis gefunden ist, das
- * config/plugins UND webfrontend enthaelt. Das trifft die uebliche
- * Installation genauso wie eine an einem anderen Ort - und es trifft auch
- * den Fall, dass das Plugin noch als entpacktes Archiv daliegt (dann findet
- * es nichts und gibt einen Leerstring zurueck, was der Aufrufer ohnehin
- * abfangen muss).
- *
- * Der Name traegt kein Plugin-Kuerzel und ist deshalb abgesichert: zwei
- * Bibliotheken landen nie im selben Prozess, aber die Pruefung kostet nichts.
+ * config/plugins UND webfrontend enthaelt.
  */
 if (!function_exists('lb_wurzel_ermitteln')) {
     function lb_wurzel_ermitteln()
@@ -55,7 +60,22 @@ function mg_paths()
     $lbhomedir = getenv('LBHOMEDIR') ?: lb_wurzel_ermitteln();
     $plugindir = getenv('LBPPLUGINDIR') ?: basename(__DIR__);
     if ($lbhomedir && is_dir($lbhomedir . '/config/plugins/' . $plugindir) === false) {
-        $plugindir = 'mgismart';
+        /* Rueckfall auf den vorgesehenen Ordnernamen - aber NUR, wenn dort
+         * auch wirklich unsere Konfiguration liegt.
+         *
+         * Es gibt ein zweites LoxBerry-Plugin fuer dasselbe Fahrzeug
+         * (mschlenstedt/LoxBerry-Plugin-MGiSMART). Es traegt in seiner
+         * plugin.cfg denselben FOLDER=mgismart, aber einen anderen Autor -
+         * LoxBerry haelt beide fuer verschiedene Plugins und haengt beim
+         * zweiten 01, 02 an den Ordnernamen. Ein blinder Rueckfall auf
+         * "mgismart" koennte damit auf das Verzeichnis des FREMDEN Plugins
+         * zeigen und dort eine mg.json anlegen, die niemand liest.
+         * Deshalb: nur uebernehmen, wenn dort schon unsere mg.json liegt
+         * oder der Ordner ueberhaupt noch nicht existiert. */
+        $kand = $lbhomedir . '/config/plugins/mgismart';
+        if (!is_dir($kand) || is_file($kand . '/mg.json')) {
+            $plugindir = 'mgismart';
+        }
     }
     if ($lbhomedir) {
         return array(
@@ -65,6 +85,7 @@ function mg_paths()
             'data' => $lbhomedir . '/data/plugins/' . $plugindir,
             'tmp' => '/tmp/mgismart',
             'lbhome' => $lbhomedir,
+            'plugin' => $plugindir,
         );
     }
     $base = dirname(dirname(__DIR__));
@@ -75,6 +96,7 @@ function mg_paths()
         'data' => sys_get_temp_dir() . '/mgismart/data',
         'tmp' => sys_get_temp_dir() . '/mgismart',
         'lbhome' => '',
+        'plugin' => 'mgismart',
     );
 }
 
@@ -82,24 +104,11 @@ function mg_paths()
  * Atomar schreiben
  *
  * file_put_contents() kuerzt die Datei zuerst auf null und schreibt dann.
- * Wer in diesem Augenblick liest, bekommt eine leere oder halbe Datei. Der
- * Cron schreibt jede Minute, Loxone liest ueber mg.php - die beiden treffen
- * sich frueher oder spaeter.
+ * Wer in diesem Augenblick liest, bekommt eine leere oder halbe Datei.
  *
  * Nachgemessen mit gleichzeitigem Lesen und Schreiben ueber sechs Sekunden:
- *
  *   unmittelbar:  5.490 halbe und 818.249 LEERE Lesevorgaenge
  *   atomar:       0 halbe, 0 leere
- *
- * Die leeren sind der haeufigere Fall und der unangenehmere: mg_raw() liefert
- * dann ein leeres Feld, mg_state() daraufhin soc = -1 und ok = 0 - in Loxone
- * steht eine Sekunde lang "Auto nicht erreichbar", ohne dass etwas war.
- *
- * Die Nebendatei traegt Prozessnummer UND Zufallszahl im Namen: ein fester
- * Name wie werte.tmp waere derselbe Fehler eine Ebene tiefer, sobald zwei
- * Schreiber gleichzeitig laufen (Cron und ein Aufruf von mg.php?refresh=1).
- * rename() ist innerhalb eines Dateisystems unteilbar - der Leser sieht
- * entweder die alte oder die neue Datei, nie etwas dazwischen.
  * ================================================================== */
 
 function mg_write_atomic($datei, $inhalt, $rechte = 0644)
@@ -119,8 +128,7 @@ function mg_write_atomic($datei, $inhalt, $rechte = 0644)
         @unlink($tmp);
         return false;
     }
-    // Rechte VOR dem Umbenennen setzen - danach waere die Datei kurzzeitig
-    // unter dem endgueltigen Namen mit den falschen Rechten sichtbar.
+    // Rechte VOR dem Umbenennen setzen.
     @chmod($tmp, $rechte);
     if (!@rename($tmp, $datei)) {
         @unlink($tmp);
@@ -135,37 +143,157 @@ function mg_write_json($datei, $daten, $rechte = 0644)
         JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), $rechte);
 }
 
-function mg_config()
+function mg_json_lesen($pfad)
 {
-    $p = mg_paths();
-    if ((!is_file($p['config']) || trim((string) @file_get_contents($p['config'])) === ''
-         || trim((string) @file_get_contents($p['config'])) === '{}') && is_file($p['backup'])) {
-        @mkdir(dirname($p['config']), 0775, true);
-        @copy($p['backup'], $p['config']);
-        @chmod($p['config'], 0600);
+    if (!is_file($pfad)) {
+        return array();
     }
-    $cfg = is_file($p['config']) ? (json_decode((string) file_get_contents($p['config']), true) ?: array()) : array();
-    if (!is_array($cfg)) {
-        $cfg = array();
+    $d = json_decode((string) @file_get_contents($pfad), true);
+    return is_array($d) ? $d : array();
+}
+
+/**
+ * Zeichen statt Bytes kuerzen - aber nur, wenn mbstring da ist.
+ *
+ * Bis 1.0.8 stand hier unmittelbar mb_substr(). mbstring ist eine Erweiterung
+ * und steht nicht in dpkg/apt; ohne sie brachen die Debug-Ansicht und der
+ * Rohdatenblock des Reiters Test mit einem Fatal error ab (gemessen). Die
+ * Pflichtpruefung nennt genau diesen Fall.
+ */
+function mg_kuerzen($s, $n)
+{
+    $s = (string) $s;
+    if (function_exists('mb_substr')) {
+        return mb_substr($s, 0, $n);
     }
-    $cfg += array(
-        'broker_host' => '127.0.0.1',   // Mosquitto des LoxBerry
+    return substr($s, 0, $n);
+}
+
+/* ==================================================================
+ * Konfiguration
+ *
+ * ALLE Vorgabewerte stehen in mg_vorgaben(), an genau einer Stelle. Ein
+ * zweiter Vorgabewert im Speicher-Handler ist die klassische Falle: beim
+ * ersten Anlauf wird nur einer von beiden geaendert.
+ * ================================================================== */
+
+function mg_vorgaben()
+{
+    return array(
+        // --- Broker (Reiter MQTT) ---
+        'broker_host' => '127.0.0.1',
         'broker_port' => 1883,
         'broker_user' => '',
         'broker_pass' => '',
         'prefix' => 'saic',             // MQTT_TOPIC des Gateways
         'saic_user' => '',              // Benutzername (Teil des Topic-Pfads)
-        'vin' => '',                    // Fahrzeug-ID / VIN (Teil des Topic-Pfads)
-        'capacity' => 61.1,             // nutzbare Batteriekapazitaet in kWh
-        'notify' => array(),
+        'vins' => array(),              // Fahrzeug-Kennungen, ab 1.1.0 mehrere
+        'vin' => '',                    // Altbestand bis 1.0.8, wird uebernommen
+
+        // --- Fahrzeug ---
+        'capacity' => 61.1,             // nutzbare Kapazitaet, nur Rueckfallebene
+        'namen' => array(),             // Anzeigenamen je Fahrzeug
+
+        // --- Steuerung ---
         'commands' => 1,                // Steuerbefehle erlauben
-        // Schuetzt ?cmd= im UNANGEMELDETEN Endpunkt mg.php. Ohne dieses
-        // Merkwort koennte jeder, der die LoxBerry-Weboberflaeche im Netz
-        // erreicht, Standklima einschalten, die Heckscheibenheizung anwerfen
-        // oder ueber "Auto finden" Licht und Hupe ausloesen. Lesende Abrufe
-        // bleiben frei - die kosten nichts und verraten nichts Schaltbares.
+        // ZWEITER Haken, ab Werk AUS: Befehle, die in den Betrieb eingreifen
+        // (Licht und Hupe, Ver- und Entriegeln). Bis 1.0.8 stand "Auto finden"
+        // hinter demselben Haken wie "Ladestrom 6 A".
+        'gefahr_ein' => 0,
+        // Drosselung. Das Schalten weckt die Fahrzeugelektronik; ein
+        // virtueller Ausgang, der bei jedem Zyklus feuert, sendet sonst bei
+        // jedem Zyklus ans Auto.
+        'befehl_abstand' => 60,         // Sekunden zwischen zwei gleichen Befehlen
+        'strom_abstand' => 300,         // Sekunden fuer die Ladestromgrenze
+        'befehle_stunde' => 30,         // Obergrenze je Stunde ueber alle Befehle
+        'wirkung_pruefen' => 1,         // nach dem Senden nachsehen, ob es wirkte
+        'wartezeit' => 6,               // Sekunden, die dafuer gewartet wird
+
+        // --- Heimzone (Standort) ---
+        'ort_ein' => 1,
+        'heim_breite' => '',
+        'heim_laenge' => '',
+        'heim_radius' => 150,           // Meter
+
+        // --- Benachrichtigungen ---
+        'notify' => array(),
+
+        // --- Eigene MQTT-Veroeffentlichung (Regelweg laut Hausregeln) ---
+        'mqtt_ein' => 0,
+        'mqtt_praefix' => 'mg',
+
+        // --- Vorklimatisierung ueber den Abfahrts-Assistenten ---
+        'abfahrt_ein' => 0,
+        'abfahrt_praefix' => 'abfahrt',
+        'abfahrt_vorlauf' => 20,        // Minuten vor der Abfahrt
+        'abfahrt_temp' => 21,
+        'abfahrt_fahrzeug' => 1,
+
+        // --- Ladeempfehlung aus einem fremden Thema (PV, Spotpreis) ---
+        'ladeempf_ein' => 0,
+        'ladeempf_thema' => '',
+        'ladeempf_grenze' => 0,
+        'ladeempf_unter' => 0,          // 1 = ausloesen, wenn UNTER der Grenze
+        'ladeempf_hoch' => 'strom_max', // Befehl bei "Ueberschuss da"
+        'ladeempf_runter' => 'strom_6', // Befehl bei "kein Ueberschuss"
+        'ladeempf_fahrzeug' => 1,
+
+        /* --- Ladeplan und Batterieheizplan ---
+         *
+         * AB WERK AUS, und das ist kein Zufall. Die Gestalt der Nutzlast ist
+         * belegt (siehe mg_nutzlast()), aber ob das FAHRZEUG sie annimmt, ist
+         * hier nie an einem Auto erprobt worden - und das kann keine Quelle
+         * beantworten. Ein Schalter, der das sagt, ist ehrlicher als eine
+         * Funktion, die so tut, als sei sie gemessen. */
+        'plan_ein' => 0,
+        'plan_von' => '22:00',
+        'plan_bis' => '06:00',
+        'plan_modus' => 'until_configured_soc',
+        'heizplan_von' => '05:30',
+
+        // --- Ladungen mitschreiben ---
+        'ladungen_ein' => 1,
+        'ladungen_max' => 200,
+
+        // --- Endpunkt ---
         'aktionstoken' => '',
     );
+}
+
+function mg_config()
+{
+    $p = mg_paths();
+    /* Erst fragen, dann oeffnen. Ein @file_get_contents() auf eine fehlende
+     * Datei ist stumm, aber nicht folgenlos: ein gesetzter Fehlerbehandler
+     * sieht die Warnung trotzdem - im Pruefstand steht sie dann als Befund
+     * da. Und die Konfigurationsdatei fehlt regelmaessig, naemlich vor dem
+     * ersten Speichern. Dasselbe gilt fuer mkdir() auf einen Ordner, den es
+     * schon gibt. */
+    $roh = is_file($p['config'])
+        ? trim((string) @file_get_contents($p['config'])) : '';
+    if (($roh === '' || $roh === '{}') && is_file($p['backup'])) {
+        if (!is_dir(dirname($p['config']))) {
+            @mkdir(dirname($p['config']), 0775, true);
+        }
+        @copy($p['backup'], $p['config']);
+        @chmod($p['config'], 0600);
+    }
+    $cfg = mg_json_lesen($p['config']);
+    $cfg += mg_vorgaben();
+
+    /* Altbestand: bis 1.0.8 gab es genau eine VIN in 'vin'. Sie wandert in die
+     * Liste, ohne dass jemand etwas anklicken muss - und 'vin' bleibt stehen,
+     * damit eine zurueckgerollte Fassung sie noch findet. */
+    if (!is_array($cfg['vins'])) {
+        $cfg['vins'] = array();
+    }
+    $cfg['vins'] = array_values(array_filter(array_map('trim', $cfg['vins']), 'strlen'));
+    if (!$cfg['vins'] && trim((string) $cfg['vin']) !== '') {
+        $cfg['vins'] = array(trim((string) $cfg['vin']));
+    }
+    if (!is_array($cfg['namen'])) {
+        $cfg['namen'] = array();
+    }
     if (!is_array($cfg['notify'])) {
         $cfg['notify'] = array();
     }
@@ -174,6 +302,8 @@ function mg_config()
         'soc_voll' => 1,      // melden, wenn der Ziel-SoC erreicht ist
         'stecker' => 1,       // melden, wenn der Stecker steckt/gezogen wurde
         'offen' => 1,         // melden, wenn das Auto unverschlossen steht
+        'fenster' => 1,       // melden, wenn ein Fenster offen steht
+        'fehler' => 1,        // melden, wenn ein Befehl scheiterte
         'push_minutes' => 5,
     );
     return $cfg;
@@ -185,17 +315,25 @@ function mg_config_save(array $cfg)
     if (!is_dir(dirname($p['config']))) {
         @mkdir(dirname($p['config']), 0775, true);
     }
+    // 'vin' mitfuehren: siehe mg_config().
+    $cfg['vin'] = isset($cfg['vins'][0]) ? (string) $cfg['vins'][0] : '';
     $json = json_encode($cfg, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    // json_encode liefert bei ungueltigem UTF-8 false, und file_put_contents
-    // schriebe dann eine Datei mit NULL Bytes - und meldete das als Erfolg.
     // 0600, weil das Broker-Passwort darin steht.
     if (!mg_write_atomic($p['config'], $json, 0600)) {
         return false;
     }
-    @copy($p['config'], $p['backup']);
-    @chmod($p['backup'], 0600);
-    // Die Optionsdatei fuer mosquitto traegt dieselben Zugangsdaten und muss
-    // mitwandern, sonst arbeitet der naechste Aufruf mit dem alten Passwort.
+    /* Die Sicherung wird GEPRUEFT geschrieben.
+     *
+     * Bis 1.0.8 stand hier ein blankes @copy() und danach return true. Diese
+     * Sicherung liegt neben dem Konfigordner und ist damit der einzige Weg,
+     * der ein Upgrade uebersteht - ein misslungenes copy() haette dem
+     * Anwender beim naechsten Upgrade stillschweigend Passwort und Merkwort
+     * eines aelteren Standes zurueckgegeben. */
+    if (!mg_write_atomic($p['backup'], $json, 0600)) {
+        mg_log('FEHLER: Sicherung ' . $p['backup'] . ' liess sich nicht schreiben.');
+        return false;
+    }
+    // Die Optionsdatei fuer mosquitto traegt dieselben Zugangsdaten.
     mg_broker_optionsdatei(true);
     return true;
 }
@@ -203,10 +341,9 @@ function mg_config_save(array $cfg)
 /**
  * Ein neues Merkwort erzeugen.
  *
- * random_bytes ist die kryptografisch geeignete Quelle; faellt sie aus (sehr
- * alte PHP-Fassungen ohne Zufallsquelle), wird nicht stillschweigend auf
- * rand() ausgewichen - ein vorhersagbares Merkwort waere schlechter als
- * gar keins, weil es Sicherheit nur vortaeuscht.
+ * random_bytes ist die kryptografisch geeignete Quelle; faellt sie aus, wird
+ * nicht stillschweigend auf rand() ausgewichen - ein vorhersagbares Merkwort
+ * waere schlechter als gar keins.
  */
 function mg_token_erzeugen()
 {
@@ -214,20 +351,45 @@ function mg_token_erzeugen()
 }
 
 /**
+ * Merkmal gegen fremde Absender (Formulartoken).
+ *
+ * Der angemeldete Bereich ist durch die Anmeldung des LoxBerry geschuetzt -
+ * gegen eine fremde Seite schuetzt das nicht: der Browser schickt die
+ * hinterlegten Zugangsdaten bei einer Anfrage von aussen mit. Bis 1.0.8
+ * konnte ein untergeschobenes Formular im angemeldeten Browser "Auto finden"
+ * ausloesen, also Licht und Hupe.
+ *
+ * Fail closed: ohne hinterlegtes Merkwort gibt es nichts zu vergleichen, und
+ * hash_equals('', '') waere wahr.
+ */
+function mg_formtoken($cfg = null)
+{
+    if ($cfg === null) {
+        $cfg = mg_config();
+    }
+    $grund = isset($cfg['aktionstoken']) ? (string) $cfg['aktionstoken'] : '';
+    if ($grund === '') {
+        return '';
+    }
+    return hash_hmac('sha256', 'formular-v1', $grund);
+}
+
+function mg_formtoken_ok($cfg = null)
+{
+    $soll = mg_formtoken($cfg);
+    $ist = isset($_POST['fmt']) && is_string($_POST['fmt']) ? (string) $_POST['fmt'] : '';
+    return ($soll !== '' && hash_equals($soll, $ist));
+}
+
+/**
  * Die laufende Fassung des Plugins.
  *
- * Erste Wahl ist LBSystem::pluginversion(). Sie liest die
- * plugindatabase.json, also das, was LoxBerry TATSAECHLICH installiert hat -
- * nicht das, was in der mitgelieferten plugin.cfg steht. Beides kann
- * auseinandergehen, etwa wenn eine Aktualisierung zur Haelfte durchlief.
- *
- * Zwei Gruende fuer die Rueckfallebene:
- *   - pluginversion() liefert null, solange das Plugin nicht in der Datenbank
- *     steht (Entwicklung, Archiv, erster Lauf von postinstall).
- *   - Sie braucht $lbpplugindir, und das leitet loxberry_system.php aus der
- *     ZUERST eingebundenen Datei ab. Wird diese Bibliothek vom Cron eingebunden,
- *     ohne dass das SDK geladen wurde, gibt es die Klasse gar nicht.
- * Dann wird die VERSION-Zeile der plugin.cfg gelesen.
+ * Erste Wahl ist LBSystem::pluginversion() - sie liest die
+ * plugindatabase.json, also das, was LoxBerry TATSAECHLICH installiert hat.
+ * Rueckfallebene ist die VERSION-Zeile der plugin.cfg, und die wird
+ * ZEILENWEISE gelesen: LoxBerry schreibt '#'-Kommentare, PHP erkennt seit 7.0
+ * nur ';', und das Ausrufezeichen in der zweiten Zeile jeder plugin.cfg
+ * laesst parse_ini_file fuer die GANZE Datei scheitern.
  */
 function mg_pluginversion()
 {
@@ -250,20 +412,6 @@ function mg_pluginversion()
         if (!is_file($kand)) {
             continue;
         }
-        /*
-         * NICHT mit parse_ini_file lesen.
-         *
-         * LoxBerry schreibt seine plugin.cfg mit '#' als Kommentarzeichen -
-         * so steht es in der Vorlage, so machen es alle Plugins. PHP
-         * erkennt seit 7.0 aber nur noch ';' als Kommentar. Die zweite Zeile
-         * jeder plugin.cfg lautet
-         *     # NEVER CHANGE this information in future updates! It is ...
-         * und das Ausrufezeichen darin laesst parse_ini_file mit
-         *     Warning: syntax error, unexpected '!' ... on line 2
-         * scheitern - fuer die GANZE Datei, nicht nur fuer die Zeile.
-         * Nachgeprueft: ohne die '#'-Zeilen liest dieselbe Datei sauber.
-         * Perl (Config::Simple), womit LoxBerry sie liest, kennt '#'.
-         */
         foreach (file($kand, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: array() as $zeile) {
             $zeile = trim($zeile);
             if ($zeile === '' || $zeile[0] === '#' || $zeile[0] === ';') {
@@ -278,6 +426,8 @@ function mg_pluginversion()
     return $v;
 }
 
+/* ---------------- Protokoll ---------------- */
+
 function mg_log($msg)
 {
     $p = mg_paths();
@@ -287,14 +437,12 @@ function mg_log($msg)
     }
     if (is_file($f) && filesize($f) > 512000) {
         $tail = array_slice(file($f, FILE_IGNORE_NEW_LINES) ?: array(), -200);
-        // Auch hier atomar: waehrend der Kuerzung liest die Oberflaeche u. U.
-        // gerade dieselbe Datei fuer den Reiter Protokoll.
         mg_write_atomic($f, implode("\n", $tail) . "\n");
     }
     $cfg = mg_config();
-    foreach (array($cfg['broker_pass']) as $geheim) {
-        if ($geheim !== '') {
-            $msg = str_replace($geheim, '********', $msg);
+    foreach (array($cfg['broker_pass'], $cfg['aktionstoken']) as $geheim) {
+        if ((string) $geheim !== '') {
+            $msg = str_replace((string) $geheim, '********', $msg);
         }
     }
     @file_put_contents($f, '[' . date('Y-m-d H:i:s') . '] ' . $msg . "\n", FILE_APPEND);
@@ -314,80 +462,130 @@ function mg_log_if_changed($key, $line)
     }
 }
 
+/**
+ * Die letzten Zeilen des Protokolls - RUECKWAERTS gelesen.
+ *
+ * Bis 1.0.8 wurde die ganze Datei mit file() eingelesen und umgedreht. Auf
+ * einem LoxBerry mit SD-Karte ist eine halbe Megabyte grosse Datei bei jedem
+ * Seitenaufbau kein Schoenheitsfehler.
+ */
+function mg_log_tail($datei, $anzahl = 300, $block = 8192)
+{
+    if (!is_file($datei)) {
+        return array();
+    }
+    $fh = @fopen($datei, 'rb');
+    if (!$fh) {
+        return array();
+    }
+    fseek($fh, 0, SEEK_END);
+    $pos = ftell($fh);
+    $rest = '';
+    $zeilen = array();
+    while ($pos > 0 && count($zeilen) <= $anzahl) {
+        $lese = (int) min($block, $pos);
+        $pos -= $lese;
+        fseek($fh, $pos, SEEK_SET);
+        $rest = fread($fh, $lese) . $rest;
+        $teile = explode("\n", $rest);
+        $rest = array_shift($teile);   // kann eine halbe Zeile sein
+        $zeilen = array_merge($teile, $zeilen);
+    }
+    fclose($fh);
+    if ($rest !== '') {
+        array_unshift($zeilen, $rest);
+    }
+    $zeilen = array_values(array_filter($zeilen, 'strlen'));
+    return array_slice(array_reverse($zeilen), 0, $anzahl);
+}
+
 /* ---------------- MQTT ---------------- */
 
 function mg_has_mosquitto()
 {
-    $out = array();
-    @exec('command -v mosquitto_sub 2>/dev/null', $out);
-    return !empty($out);
+    static $da = null;
+    if ($da === null) {
+        $out = array();
+        @exec('command -v mosquitto_sub 2>/dev/null', $out);
+        $da = !empty($out);
+    }
+    return $da;
 }
 
-/** Basis-Topic des Fahrzeugs, z. B. saic/user@example.org/vehicles/LSJ… */
-function mg_base_topic()
+/** Die eingerichteten Fahrzeuge als Liste (1-basiert nummeriert). */
+function mg_fahrzeuge($cfg = null)
 {
-    $cfg = mg_config();
+    if ($cfg === null) {
+        $cfg = mg_config();
+    }
+    $aus = array();
+    foreach ($cfg['vins'] as $i => $vin) {
+        $nr = $i + 1;
+        $name = isset($cfg['namen'][$i]) ? trim((string) $cfg['namen'][$i]) : '';
+        $aus[$nr] = array('nr' => $nr, 'vin' => (string) $vin,
+                          'name' => $name !== '' ? $name : ('MG ' . $nr));
+    }
+    return $aus;
+}
+
+function mg_fahrzeug_anzahl($cfg = null)
+{
+    return count(mg_fahrzeuge($cfg));
+}
+
+/** Basis-Topic eines Fahrzeugs, z. B. saic/user@example.org/vehicles/LSJ... */
+function mg_base_topic($nr = 1, $cfg = null)
+{
+    if ($cfg === null) {
+        $cfg = mg_config();
+    }
     $prefix = trim((string) $cfg['prefix']) !== '' ? trim((string) $cfg['prefix']) : 'saic';
     $user = trim((string) $cfg['saic_user']);
-    $vin = trim((string) $cfg['vin']);
-    if ($user === '' || $vin === '') {
+    $fz = mg_fahrzeuge($cfg);
+    if ($user === '' || !isset($fz[(int) $nr])) {
         return '';
     }
-    return $prefix . '/' . $user . '/vehicles/' . $vin;
+    return $prefix . '/' . $user . '/vehicles/' . $fz[(int) $nr]['vin'];
 }
 
 /* ==================================================================
  * Zugangsdaten des Brokers - NICHT ueber die Kommandozeile
  *
- * Bis 1.0.2 stand das Passwort als "-P <passwort>" in der Aufrufzeile von
- * mosquitto_sub und mosquitto_pub. Vier Dinge sprechen dagegen, alle
- * nachgemessen:
+ * Bis 1.0.2 stand das Passwort als "-P <passwort>" in der Aufrufzeile.
+ * /proc/<pid>/cmdline hat die Rechte 444 - jeder lokale Benutzer liest dort
+ * mit, und der minuetliche Cron laesst mosquitto_sub rund 5 % der Zeit
+ * laufen. Dazu verwirft escapeshellarg() Bytes, die im eingestellten
+ * Zeichensatz kein gueltiges Zeichen ergeben: ein Passwort mit Umlaut haette
+ * unter PHP 7.4 mit LC_ALL=C still versagt.
  *
- * 1. /proc/<pid>/cmdline hat die Rechte 444 - JEDER lokale Benutzer liest
- *    dort die vollstaendige Aufrufzeile mit. Das ist kein Augenblick:
- *    mg_snapshot() laesst mosquitto_sub mit -W 3 laufen, jede Minute. Das
- *    Passwort steht damit dauerhaft etwa 5 % der Zeit offen im System.
- *
- * 2. escapeshellarg() VERWIRFT Bytes, die im eingestellten Zeichensatz kein
- *    gueltiges Zeichen ergeben - es maskiert sie nicht. Gemessen mit beiden
- *    PHP-Fassungen:
- *        Byte-Folge ff fe  ->  0 Bytes im Argument (jede Locale)
- *        Byte-Folge c3 28  ->  1 Byte
- *        "ue" (c3 bc) unter PHP 7.4 mit LC_ALL=C  ->  0 Bytes
- *    Der letzte Fall ist der boese: Apache laeuft meist unter einer
- *    UTF-8-Locale, der Cron unter C. Ein Passwort mit Umlaut haette also im
- *    Reiter Test funktioniert und waere im minuetlichen Cron-Lauf still
- *    gescheitert - unter PHP 7.4, also auf jedem heutigen LoxBerry.
- *
- * 3. Ein NULL-Byte im Passwort laesst escapeshellarg() abbrechen: PHP 7.4
- *    mit einem Fatal error, PHP 8 mit einer ValueError, die niemand faengt.
- *
- * 4. Ein sehr langes Passwort sprengt die Argumentliste ("exec(): Unable to
- *    fork", ab etwa 128 kB).
- *
- * KEINE Befehlseinschleusung: In zehn Versuchen mit ';', '$( )', Backticks,
- * Zeilenumbruch, einfachen Anfuehrungszeichen und ungueltigem UTF-8, gegen
- * PHP 7.4 und 8.1 und zwei Locales, wurde NICHTS ausgefuehrt. escapeshellarg
- * verwirft die Bytes, statt sie durchzulassen - das Anfuehrungszeichen laesst
- * sich damit nicht schliessen.
- *
- * Der Weg hier: mosquitto_sub und mosquitto_pub lesen Vorgabeoptionen aus
+ * mosquitto_sub und mosquitto_pub lesen Vorgabeoptionen aus
  * $XDG_CONFIG_HOME/mosquitto_sub bzw. .../mosquitto_pub, eine Option je
- * Zeile (so steht es in ihrer Anleitung). Dort hinein kommen Benutzer und
- * Passwort, Rechte 0600, Ordner 0700. Auf der Kommandozeile steht dann nur
- * noch der PFAD - und der ist kein Geheimnis.
+ * Zeile. Auf der Kommandozeile steht dann nur noch der PFAD.
  * ================================================================== */
 
-/** Ordner mit den Optionsdateien. Liegt unter data/, nicht unter /tmp. */
 function mg_broker_optionsordner()
 {
-    return mg_paths()['data'] . '/mosquitto';
+    $p = mg_paths();
+    return $p['data'] . '/mosquitto';
+}
+
+/**
+ * Eine Zeile fuer die Optionsdatei absichern.
+ *
+ * Die Datei ist zeilenorientiert - ein Zeilenumbruch im Wert erzeugt eine
+ * ZUSAETZLICHE Option. Bis 1.0.8 wurde der Benutzername beschnitten, das
+ * Passwort nicht: ein aus der Zwischenablage eingefuegtes Passwort mit
+ * angehaengtem \r ergab ein stilles Falschpasswort, und das Plugin meldete
+ * danach nur noch "keine Werte vom Broker".
+ */
+function mg_optionswert($v)
+{
+    return trim(str_replace(array("\r", "\n", "\t"), '', (string) $v));
 }
 
 /**
  * Die Optionsdateien schreiben. $erzwingen = true schreibt immer neu,
  * sonst nur, wenn sie fehlen oder aelter als die Konfiguration sind.
- * Rueckgabe: Ordner, oder '' wenn er sich nicht anlegen liess.
  */
 function mg_broker_optionsdatei($erzwingen = false)
 {
@@ -401,11 +599,13 @@ function mg_broker_optionsdatei($erzwingen = false)
 
     $cfg = mg_config();
     $zeilen = '';
-    if (trim((string) $cfg['broker_user']) !== '') {
-        $zeilen .= '-u ' . (string) $cfg['broker_user'] . "\n";
+    $u = mg_optionswert($cfg['broker_user']);
+    $pw = mg_optionswert($cfg['broker_pass']);
+    if ($u !== '') {
+        $zeilen .= '-u ' . $u . "\n";
     }
-    if ((string) $cfg['broker_pass'] !== '') {
-        $zeilen .= '-P ' . (string) $cfg['broker_pass'] . "\n";
+    if ($pw !== '') {
+        $zeilen .= '-P ' . $pw . "\n";
     }
 
     foreach (array('mosquitto_sub', 'mosquitto_pub') as $name) {
@@ -421,10 +621,7 @@ function mg_broker_optionsdatei($erzwingen = false)
     return $ordner;
 }
 
-/**
- * Der Teil der Aufrufzeile, der oeffentlich sein darf: Rechner und Port.
- * Benutzer und Passwort kommen ueber die Optionsdatei dazu.
- */
+/** Der Teil der Aufrufzeile, der oeffentlich sein darf: Rechner und Port. */
 function mg_broker_args()
 {
     $cfg = mg_config();
@@ -440,41 +637,74 @@ function mg_broker_umgebung()
 }
 
 /**
+ * Auf eine Liste von Themen horchen und die empfangenen Werte zurueckgeben.
+ * Gemeinsame Grundlage von mg_snapshot() und mg_horcher_lesen().
+ */
+function mg_sub($themen, $sekunden)
+{
+    if (!mg_has_mosquitto() || !$themen) {
+        return array(array(), 1, 'mosquitto-clients fehlt');
+    }
+    $t = '';
+    foreach ((array) $themen as $thema) {
+        $t .= ' -t ' . escapeshellarg((string) $thema);
+    }
+    $cmd = mg_broker_umgebung() . 'mosquitto_sub' . mg_broker_args() . $t
+         . ' -v -W ' . max(1, min(15, (int) $sekunden)) . ' 2>&1';
+    $out = array();
+    @exec($cmd, $out, $rc);
+    $werte = array();
+    $fehler = array();
+    foreach ($out as $zeile) {
+        $pos = strpos($zeile, ' ');
+        if ($pos === false) {
+            if (trim($zeile) !== '') { $fehler[] = trim($zeile); }
+            continue;
+        }
+        $werte[substr($zeile, 0, $pos)] = trim(substr($zeile, $pos + 1));
+    }
+    return array($werte, $rc, implode(' ', array_slice($fehler, 0, 3)));
+}
+
+/**
  * Alle behaltenen (retained) Werte unterhalb des Prefix einlesen und als
- * Momentaufnahme ablegen. Das SAIC-Gateway veroeffentlicht retained, deshalb
- * liefert ein kurzes Mitlesen sofort den kompletten Stand.
+ * Momentaufnahme ablegen.
+ *
+ * PLAUSIBILITAET (neu in 1.1.0): Bis 1.0.8 genuegte EIN empfangenes Thema,
+ * damit die Momentaufnahme als gelungen galt und die alte vollstaendig
+ * ersetzte. Gemessen mit vier Themen lieferte die Loxone-Zeile danach
+ * OK=1 - also "Fahrzeugdaten gueltig" - waehrend fast alles Platzhalter war.
+ * Bricht die Themenzahl gegenueber dem letzten Stand um mehr als die Haelfte
+ * ein, bleibt die alte Momentaufnahme stehen; ein uebersprungener Lauf ist
+ * kein Fehler, ein halber Datensatz ist einer.
  */
 function mg_snapshot($sekunden = 3)
 {
     $cfg = mg_config();
     if (!mg_has_mosquitto()) {
-        mg_log('FEHLER: mosquitto_sub fehlt - Paket mosquitto-clients nachinstallieren.');
+        mg_log_if_changed('mosquitto', 'FEHLER: mosquitto_sub fehlt - Paket mosquitto-clients nachinstallieren.');
         return array(0, 'mosquitto-clients fehlt');
     }
     $prefix = trim((string) $cfg['prefix']) !== '' ? trim((string) $cfg['prefix']) : 'saic';
-    $cmd = mg_broker_umgebung() . 'mosquitto_sub' . mg_broker_args()
-         . ' -t ' . escapeshellarg($prefix . '/#')
-         . ' -v -W ' . max(1, min(15, (int) $sekunden)) . ' 2>&1';
-    $out = array();
-    @exec($cmd, $out, $rc);
+    // Der letzte Wille des Gateways liegt AUSSERHALB des Benutzerpfads, aber
+    // unterhalb desselben Prefix - "saic/#" deckt ihn mit ab.
+    list($alle, $rc, $fehler) = mg_sub(array($prefix . '/#'), $sekunden);
     $werte = array();
-    foreach ($out as $zeile) {
-        $pos = strpos($zeile, ' ');
-        if ($pos === false) {
-            continue;
-        }
-        $topic = substr($zeile, 0, $pos);
-        $wert = trim(substr($zeile, $pos + 1));
+    foreach ($alle as $topic => $wert) {
         if (strpos($topic, $prefix . '/') === 0) {
             $werte[$topic] = $wert;
         }
     }
     if (!$werte) {
-        $fehler = trim(implode(' ', array_slice($out, 0, 3)));
-        mg_log('Momentaufnahme leer (rc=' . $rc . ')' . ($fehler !== '' ? ': ' . $fehler : ''));
-        return array(0, $fehler !== '' ? $fehler : 'keine Werte empfangen');
+        return array(0, $fehler !== '' ? $fehler : 'keine Werte empfangen (rc=' . $rc . ')');
     }
     $p = mg_paths();
+    $alt = mg_raw();
+    if ((int) $alt['anzahl'] > 4 && count($werte) * 2 < (int) $alt['anzahl']) {
+        mg_log('Momentaufnahme verworfen: nur ' . count($werte) . ' von zuletzt '
+            . (int) $alt['anzahl'] . ' Themen - alter Stand bleibt stehen.');
+        return array(0, 'unvollstaendig (' . count($werte) . ' von ' . (int) $alt['anzahl'] . ')');
+    }
     if (!is_dir($p['data'])) {
         @mkdir($p['data'], 0775, true);
     }
@@ -488,28 +718,34 @@ function mg_snapshot($sekunden = 3)
 function mg_raw()
 {
     $p = mg_paths();
-    $d = @json_decode((string) @file_get_contents($p['data'] . '/werte.json'), true);
-    return is_array($d) ? $d : array('zeit' => '', 'anzahl' => 0, 'werte' => array());
+    $d = mg_json_lesen($p['data'] . '/werte.json');
+    // Nicht nur "ist ein Feld", sondern "hat die erwartete Form".
+    if (!isset($d['werte']) || !is_array($d['werte'])) {
+        return array('zeit' => '', 'anzahl' => 0, 'werte' => array());
+    }
+    $d += array('zeit' => '', 'anzahl' => count($d['werte']));
+    return $d;
 }
 
 /**
- * Einen logischen Wert suchen. Uebergeben wird eine Liste moeglicher
- * Topic-Endungen - so bleibt das Plugin unabhaengig davon, ob das Gateway
- * einen Zweig etwas anders benennt oder ein Fahrzeug ihn gar nicht liefert.
+ * Einen Wert eines Fahrzeugs holen.
+ *
+ * Ab 1.1.0 wird NUR noch unter dem Basispfad des angefragten Fahrzeugs
+ * gesucht. Der Ersatzweg von 1.0.8 - "irgendein Thema, das so endet" - war
+ * bei einem Fahrzeug bequem und bei zweien falsch: er griff willkuerlich
+ * eines heraus.
  */
-function mg_pick($kandidaten, $default = null)
+function mg_pick($suffix, $default = null, $nr = 1)
 {
     $roh = mg_raw();
-    $base = mg_base_topic();
-    foreach ((array) $kandidaten as $suffix) {
-        if ($base !== '' && isset($roh['werte'][$base . '/' . $suffix])) {
-            return $roh['werte'][$base . '/' . $suffix];
-        }
+    $base = mg_base_topic($nr);
+    if ($base === '') {
+        return $default;
     }
-    // Ersatzweg: irgendein Topic, das so endet (falls Benutzer/VIN abweichen)
-    foreach ((array) $kandidaten as $suffix) {
-        foreach ($roh['werte'] as $t => $v) {
-            if (substr($t, -strlen('/' . $suffix)) === '/' . $suffix) {
+    foreach ((array) $suffix as $s) {
+        if (isset($roh['werte'][$base . '/' . $s])) {
+            $v = $roh['werte'][$base . '/' . $s];
+            if (trim((string) $v) !== '') {
                 return $v;
             }
         }
@@ -517,9 +753,16 @@ function mg_pick($kandidaten, $default = null)
     return $default;
 }
 
-function mg_num($kandidaten, $default = -1)
+/** Ein Thema ausserhalb des Fahrzeugpfads, z. B. saic/_internal/lwt. */
+function mg_pick_abs($topic, $default = null)
 {
-    $v = mg_pick($kandidaten, null);
+    $roh = mg_raw();
+    return isset($roh['werte'][$topic]) ? $roh['werte'][$topic] : $default;
+}
+
+function mg_num($suffix, $default = -1, $nr = 1)
+{
+    $v = mg_pick($suffix, null, $nr);
     if ($v === null || $v === '') {
         return $default;
     }
@@ -527,198 +770,1633 @@ function mg_num($kandidaten, $default = -1)
     return is_numeric($v) ? (float) $v : $default;
 }
 
-function mg_bool($kandidaten, $default = -1)
+function mg_bool($suffix, $default = -1, $nr = 1)
 {
-    $v = mg_pick($kandidaten, null);
+    return mg_bool_wert(mg_pick($suffix, null, $nr), $default);
+}
+
+function mg_bool_wert($v, $default = -1)
+{
     if ($v === null || $v === '') {
         return $default;
     }
     $v = strtolower(trim((string) $v));
-    if (in_array($v, array('true', '1', 'on', 'yes', 'locked', 'charging'), true)) {
+    if (in_array($v, array('true', '1', 'on', 'yes', 'locked', 'charging', 'online', 'open'), true)) {
         return 1;
     }
-    if (in_array($v, array('false', '0', 'off', 'no', 'unlocked'), true)) {
+    if (in_array($v, array('false', '0', 'off', 'no', 'unlocked', 'offline', 'closed'), true)) {
         return 0;
     }
     return is_numeric($v) ? ((float) $v > 0 ? 1 : 0) : $default;
 }
 
+function mg_txt($suffix, $default = '', $nr = 1)
+{
+    $v = mg_pick($suffix, null, $nr);
+    return $v === null ? $default : (string) $v;
+}
+
+/**
+ * Wie viele der uebergebenen Themen stehen auf "offen"?
+ * Rueckgabe: array(anzahl, namen) - anzahl -1, wenn KEINES bekannt ist.
+ */
+function mg_zaehle_offen($paare, $nr)
+{
+    $anzahl = 0;
+    $bekannt = 0;
+    $namen = array();
+    foreach ($paare as $suffix => $name) {
+        $b = mg_bool($suffix, -1, $nr);
+        if ($b === -1) {
+            continue;
+        }
+        $bekannt++;
+        if ($b === 1) {
+            $anzahl++;
+            $namen[] = $name;
+        }
+    }
+    return $bekannt === 0 ? array(-1, array()) : array($anzahl, $namen);
+}
+
+/** Entfernung zweier Punkte in Metern (Haversine, PHP-Bordmittel). */
+function mg_entfernung($b1, $l1, $b2, $l2)
+{
+    $r = 6371000.0;
+    $p1 = deg2rad((float) $b1);
+    $p2 = deg2rad((float) $b2);
+    $db = deg2rad((float) $b2 - (float) $b1);
+    $dl = deg2rad((float) $l2 - (float) $l1);
+    $a = sin($db / 2) * sin($db / 2) + cos($p1) * cos($p2) * sin($dl / 2) * sin($dl / 2);
+    return $r * 2 * atan2(sqrt($a), sqrt(1 - $a));
+}
+
+/* ==================================================================
+ * Die Feldliste - EINE Quelle fuer alles
+ *
+ * Aus ihr entstehen: die Loxone-Zeilen, die Vorlage fuer Loxone Config, die
+ * Tabelle der Befehlserkennungen im Reiter "Einbindung in Loxone", die
+ * Themenliste der eigenen MQTT-Veroeffentlichung und die Kacheln im Reiter
+ * Test. Bis 1.0.8 standen die Suchtexte an 39 Stellen woertlich im Bestand.
+ *
+ * 'min' traegt den UNBEKANNT-Wert, wenn es einen gibt. Ein Feld, das -1 als
+ * "nicht bekannt" sendet, braucht MinVal="-1" - sonst zeigt Loxone eine 0,
+ * und 0 heisst bei "verschlossen" das Gegenteil von "unbekannt".
+ *
+ * EIN NEUES FELD GEHOERT ANS ENDE. Die Reihenfolge dieser Liste ist die
+ * Reihenfolge in der Statuszeile; eine Einfuegung in der Mitte verschiebt
+ * jede beim Anwender eingetragene Befehlserkennung.
+ * ================================================================== */
+
+function mg_felder()
+{
+    static $f = null;
+    if ($f !== null) {
+        return $f;
+    }
+    // analog, min, max, Einheit, Zeilen, MQTT-Name
+    $roh = array(
+        // ---- Bestand bis 1.0.8, Reihenfolge unveraendert ----
+        'OK'           => array(0, 0, 1,       '',     'mg,laden,ort,technik', 'ok'),
+        'SOC'          => array(1, -1, 100,    '%',    'mg,laden', 'soc'),
+        'SOCKWH'       => array(1, -1, 200,    'kWh',  'mg,laden', 'energie'),
+        'ZIEL'         => array(1, -1, 100,    '%',    'mg,laden', 'ziel'),
+        'REICHWEITE'   => array(1, -1, 1000,   'km',   'mg', 'reichweite'),
+        'LAEDT'        => array(0, -1, 1,      '',     'mg,laden', 'laedt'),
+        'STECKER'      => array(0, -1, 1,      '',     'mg,laden', 'stecker'),
+        'LEISTUNG'     => array(1, -100, 350,  'kW',   'mg,laden', 'leistung'),
+        'RESTZEIT'     => array(1, -1, 3000,   'min',  'mg,laden', 'restzeit'),
+        'KM'           => array(1, -1, 1000000, 'km',  'mg,ort', 'kilometerstand'),
+        'BATT12V'      => array(1, -1, 20,     'V',    'mg,technik', 'batterie12v'),
+        'ZU'           => array(0, -1, 1,      '',     'mg', 'verschlossen'),
+        'KOFFER'       => array(0, -1, 1,      '',     'mg', 'kofferraum'),
+        'INNEN'        => array(1, -99, 80,    '°C',   'mg', 'innentemperatur'),
+        'AUSSEN'       => array(1, -99, 80,    '°C',   'mg', 'aussentemperatur'),
+        'VOLL'         => array(0, -1, 1,      '',     'mg,laden', 'voll'),
+        'ALTER'        => array(1, -1, 100000, 'min',  'mg,technik', 'alter'),
+        'THEMEN'       => array(1, 0, 1000,    '',     'mg,technik', 'themen'),
+        'PUSH'         => array(0, 0, 1,       '',     'mg', 'push'),
+        'PUSHAKTIV'    => array(0, 0, 1,       '',     'mg', 'push_aktiv'),
+        'PTEST'        => array(0, 0, 1,       '',     'mg', 'push_test'),
+
+        // ---- Neu in 1.1.0: Erreichbarkeit ----
+        'ERREICHBAR'   => array(0, -1, 1,      '',     'mg,technik', 'erreichbar'),
+        'GATEWAY'      => array(0, -1, 1,      '',     'mg,technik', 'gateway'),
+        'FZALTER'      => array(1, -1, 100000, 'min',  'mg,technik', 'fahrzeugalter'),
+        'FEHLER'       => array(0, -1, 1,      '',     'mg,technik', 'fehler'),
+
+        // ---- Neu: Fahrt und Ort ----
+        'LAEUFT'       => array(0, -1, 1,      '',     'mg,ort', 'laeuft'),
+        'TEMPO'        => array(1, -1, 250,    'km/h', 'mg,ort', 'tempo'),
+        'ZUHAUSE'      => array(0, -1, 1,      '',     'mg,ort', 'zuhause'),
+        'ENTFERNUNG'   => array(1, -1, 20000,  'km',   'mg,ort', 'entfernung'),
+        'KMTAG'        => array(1, -1, 3000,   'km',   'mg,ort', 'km_tag'),
+        'KMLADUNG'     => array(1, -1, 3000,   'km',   'mg,ort', 'km_seit_ladung'),
+
+        // ---- Neu: Oeffnungen ----
+        'TUEROFFEN'    => array(1, -1, 5,      '',     'mg', 'tueren_offen'),
+        'FENSTEROFFEN' => array(1, -1, 5,      '',     'mg', 'fenster_offen'),
+
+        // ---- Neu: Reifendruck ----
+        'RDVL'         => array(1, -1, 6,      'bar',  'mg,technik', 'reifen_vl'),
+        'RDVR'         => array(1, -1, 6,      'bar',  'mg,technik', 'reifen_vr'),
+        'RDHL'         => array(1, -1, 6,      'bar',  'mg,technik', 'reifen_hl'),
+        'RDHR'         => array(1, -1, 6,      'bar',  'mg,technik', 'reifen_hr'),
+
+        // ---- Neu: Ladetechnik ----
+        'ACLEISTUNG'   => array(1, -1, 25000,  'W',    'mg,laden', 'ac_leistung'),
+        'ACSTROM'      => array(1, -1, 64,     'A',    'mg,laden', 'ac_strom'),
+        'ACSPANNUNG'   => array(1, -1, 500,    'V',    'mg,laden', 'ac_spannung'),
+        'LADEART'      => array(1, -1, 99,     '',     'mg,laden', 'ladeart'),
+        'KABELVERR'    => array(0, -1, 1,      '',     'mg,laden', 'kabel_verriegelt'),
+        'STROMGRENZE'  => array(1, -1, 64,     'A',    'mg,laden', 'stromgrenze'),
+        'KAPAZITAET'   => array(1, -1, 200,    'kWh',  'mg,laden,technik', 'kapazitaet'),
+        'VERBRTAG'     => array(1, -1, 200,    'kWh',  'mg,laden', 'verbrauch_tag'),
+        'VERBRLADUNG'  => array(1, -1, 200,    'kWh',  'mg,laden', 'verbrauch_seit_ladung'),
+        'FERTIGUM'     => array(1, -1, 2000000000, 's', 'mg,laden', 'fertig_um'),
+        'BATTHEIZ'     => array(0, -1, 1,      '',     'mg,laden', 'batterieheizung'),
+
+        // ---- Neu: Klima ----
+        'KLIMA'        => array(0, -1, 1,      '',     'mg', 'klima'),
+        'KLIMASOLL'    => array(1, -1, 40,     '°C',   'mg', 'klima_soll'),
+        'HECKSCHEIBE'  => array(0, -1, 1,      '',     'mg', 'heckscheibe'),
+        'FRONTSCHEIBE' => array(0, -1, 1,      '',     'mg', 'frontscheibe'),
+        'SITZHL'       => array(1, -1, 3,      '',     'mg', 'sitzheizung_l'),
+        'SITZHR'       => array(1, -1, 3,      '',     'mg', 'sitzheizung_r'),
+
+        // Ein neues Feld gehoert ANS ENDE - eine Einfuegung in der Mitte
+        // verschiebt jede beim Anwender eingetragene Befehlserkennung.
+        'STECKERFZ'    => array(0, -1, 1,      '',     'mg,laden', 'stecker_fahrzeug'),
+        'STECKERSAEULE' => array(0, -1, 1,     '',     'mg,laden', 'stecker_saeule'),
+    );
+    $f = array();
+    foreach ($roh as $name => $r) {
+        $f[$name] = array(
+            'analog' => $r[0], 'min' => $r[1], 'max' => $r[2], 'einheit' => $r[3],
+            'bez' => 'FELD.' . $name, 'zeilen' => explode(',', $r[4]), 'mqtt' => $r[5],
+        );
+    }
+    return $f;
+}
+
+/**
+ * Die Befehlserkennung fuer ein Feld - an GENAU EINER Stelle.
+ *
+ * Das Semikolon gehoert hinein. "\iKM=" trifft in einer Zeile, die auch
+ * "INSPKM=" enthaelt, die falsche Fundstelle - Loxone nimmt die erste. Der
+ * Fehler ist die teuerste Sorte: beide Zahlen sehen aus wie ein
+ * Kilometerstand. In jeder Antwortzeile dieses Plugins steht vor jedem
+ * Feldnamen ein Semikolon, auch vor dem ersten (MG;OK=...).
+ */
+function mg_check($feld)
+{
+    return '\i;' . $feld . '=\i\v';
+}
+
+/** Die Zeilenarten. */
+function mg_zeilen()
+{
+    return array(
+        'mg' => array('kopf' => 'MG', 'bez' => 'ZEILE.MG', 'takt' => 300),
+        'laden' => array('kopf' => 'MGL', 'bez' => 'ZEILE.LADEN', 'takt' => 120),
+        'ort' => array('kopf' => 'MGO', 'bez' => 'ZEILE.ORT', 'takt' => 60),
+        'technik' => array('kopf' => 'MGT', 'bez' => 'ZEILE.TECHNIK', 'takt' => 1800),
+    );
+}
+
+function mg_felder_von($zeile)
+{
+    $aus = array();
+    foreach (mg_felder() as $name => $info) {
+        if (in_array($zeile, $info['zeilen'], true)) {
+            $aus[$name] = $info;
+        }
+    }
+    return $aus;
+}
+
 /* ---------------- Zustand ---------------- */
 
-function mg_state()
+/**
+ * Der vollstaendige Zustand eines Fahrzeugs, mit den Feldnamen als
+ * Schluessel. So gibt es keine zweite Liste, die auseinanderlaufen kann.
+ */
+function mg_state($nr = 1)
 {
     $cfg = mg_config();
     $roh = mg_raw();
-    $soc = mg_num(array('drivetrain/soc', 'drivetrain/socKwh', 'battery/soc'));
-    $ziel = mg_num(array('drivetrain/socTarget', 'drivetrain/targetSoc'), 0);
-    $laedt = mg_bool(array('drivetrain/charging', 'drivetrain/chargingState'), 0);
-    $stecker = mg_bool(array('drivetrain/chargerConnected', 'drivetrain/chargingConnected'), -1);
-    $leistung = mg_num(array('drivetrain/power', 'drivetrain/chargingPower'), 0);
-    $alter = $roh['zeit'] !== '' ? max(0, (int) round((time() - strtotime($roh['zeit'])) / 60)) : -1;
-    $kwh = $soc >= 0 ? round($soc / 100 * (float) $cfg['capacity'], 1) : -1;
-    $st = array(
-        'ok' => ($roh['anzahl'] > 0 && $soc >= 0) ? 1 : 0,
-        'soc' => $soc,
-        'soc_kwh' => $kwh,
-        'soc_ziel' => $ziel,
-        'reichweite' => mg_num(array('drivetrain/range', 'drivetrain/rangeElectric'), -1),
-        'laedt' => $laedt,
-        'stecker' => $stecker,
-        'ladeleistung' => $leistung,
-        'ladestrom_limit' => (string) mg_pick(array('drivetrain/chargeCurrentLimit'), ''),
-        'restzeit_min' => mg_num(array('drivetrain/remainingChargingTime', 'drivetrain/chargingTimeRemaining'), -1),
-        'kilometerstand' => mg_num(array('drivetrain/mileage', 'drivetrain/odometer'), -1),
-        'batterie12v' => mg_num(array('drivetrain/auxiliaryBatteryVoltage', 'drivetrain/batteryVoltage'), -1),
-        'verschlossen' => mg_bool(array('doors/locked'), -1),
-        'kofferraum' => mg_bool(array('doors/boot'), -1),
-        'innentemp' => mg_num(array('climate/interiorTemperature'), -99),
-        'aussentemp' => mg_num(array('climate/exteriorTemperature'), -99),
-        'klima' => (string) mg_pick(array('climate/remoteClimateState'), ''),
-        'themen' => (int) $roh['anzahl'],
-        'alter_min' => $alter,
-        'zeit' => $roh['zeit'],
-    );
-    $st['voll'] = ($ziel > 0 && $soc >= $ziel) ? 1 : 0;
+    $st = array();
+    foreach (mg_felder() as $name => $info) {
+        $st[$name] = -1;
+    }
+
+    $soc = mg_num('drivetrain/soc', -1, $nr);
+    $ziel = mg_num('drivetrain/socTarget', -1, $nr);
+
+    /* Kapazitaet und Energieinhalt kommen vom Auto, wenn es sie liefert.
+     * Bis 1.0.8 wurde beides aus dem Handeintrag gerechnet, und der gesuchte
+     * Name war falsch geschrieben (socKwh statt soc_kwh) - der echte Wert
+     * wurde also nie getroffen. */
+    $kapazitaet = mg_num('drivetrain/totalBatteryCapacity', -1, $nr);
+    if ($kapazitaet <= 0) {
+        $kapazitaet = (float) $cfg['capacity'];
+    }
+    $kwh = mg_num('drivetrain/soc_kwh', -1, $nr);
+    if ($kwh < 0 && $soc >= 0 && $kapazitaet > 0) {
+        $kwh = round($soc / 100 * $kapazitaet, 1);
+    }
+
+    /* Restladezeit: das Gateway veroeffentlicht SEKUNDEN.
+     * Belegt in src/status_publisher/charge/chrg_mgmt_data.py:
+     *     transform=lambda x: x * 60
+     * Der Rohwert des Autos ist in Minuten, veroeffentlicht wird mal 60.
+     * Bis 1.0.8 ging der Wert unveraendert als "min" nach Loxone - eine
+     * Ladezeit von 90 Minuten erschien dort als 5400 min, also 90 Stunden. */
+    $restsek = mg_num('drivetrain/remainingChargingTime', -1, $nr);
+    $restmin = $restsek >= 0 ? (float) round($restsek / 60) : -1;
+
+    $st['SOC'] = $soc;
+    $st['SOCKWH'] = $kwh;
+    $st['ZIEL'] = $ziel;
+    $st['KAPAZITAET'] = $kapazitaet > 0 ? round($kapazitaet, 1) : -1;
+    $st['REICHWEITE'] = mg_num('drivetrain/range', -1, $nr);
+    $st['LAEDT'] = mg_bool('drivetrain/charging', -1, $nr);
+    $st['STECKER'] = mg_bool('drivetrain/chargerConnected', -1, $nr);
+    $st['LEISTUNG'] = mg_num('drivetrain/power', -1, $nr);
+    $st['RESTZEIT'] = $restmin;
+    $st['KM'] = mg_num('drivetrain/mileage', -1, $nr);
+    $st['BATT12V'] = mg_num('drivetrain/auxiliaryBatteryVoltage', -1, $nr);
+    $st['ZU'] = mg_bool('doors/locked', -1, $nr);
+    $st['KOFFER'] = mg_bool('doors/boot', -1, $nr);
+    $st['INNEN'] = mg_num('climate/interiorTemperature', -99, $nr);
+    $st['AUSSEN'] = mg_num('climate/exteriorTemperature', -99, $nr);
+
+    // --- Erreichbarkeit ---
+    $st['ERREICHBAR'] = mg_bool('available', -1, $nr);
+    $prefix = trim((string) $cfg['prefix']) !== '' ? trim((string) $cfg['prefix']) : 'saic';
+    $st['GATEWAY'] = mg_bool_wert(mg_pick_abs($prefix . '/_internal/lwt'), -1);
+    $letzte = mg_txt(array('refresh/lastVehicleState', 'refresh/lastActivity'), '', $nr);
+    $ts = $letzte !== '' ? strtotime($letzte) : false;
+    $st['FZALTER'] = $ts ? max(0, (float) round((time() - $ts) / 60)) : -1;
+    $fehlertext = mg_txt('command/error', '', $nr);
+    $st['FEHLER'] = $fehlertext !== '' ? 1 : (($st['ERREICHBAR'] === -1) ? -1 : 0);
+
+    // --- Fahrt und Ort ---
+    $st['LAEUFT'] = mg_bool('drivetrain/running', -1, $nr);
+    $st['TEMPO'] = mg_num('location/speed', -1, $nr);
+    $st['KMTAG'] = mg_num('drivetrain/mileageOfTheDay', -1, $nr);
+    $st['KMLADUNG'] = mg_num('drivetrain/mileageSinceLastCharge', -1, $nr);
+    if (!empty($cfg['ort_ein']) && (string) $cfg['heim_breite'] !== ''
+        && (string) $cfg['heim_laenge'] !== '') {
+        $b = mg_num('location/latitude', -999, $nr);
+        $l = mg_num('location/longitude', -999, $nr);
+        if ($b > -900 && $l > -900 && !($b == 0 && $l == 0)) {
+            $m = mg_entfernung($cfg['heim_breite'], $cfg['heim_laenge'], $b, $l);
+            $st['ENTFERNUNG'] = round($m / 1000, 2);
+            $st['ZUHAUSE'] = $m <= max(20, (float) $cfg['heim_radius']) ? 1 : 0;
+        }
+    }
+
+    // --- Oeffnungen ---
+    list($ta, $tn) = mg_zaehle_offen(array(
+        'doors/driver' => 'TEIL.TUER_VL', 'doors/passenger' => 'TEIL.TUER_VR',
+        'doors/rearLeft' => 'TEIL.TUER_HL', 'doors/rearRight' => 'TEIL.TUER_HR',
+        'doors/bonnet' => 'TEIL.HAUBE',
+    ), $nr);
+    $st['TUEROFFEN'] = $ta;
+    list($fa, $fn) = mg_zaehle_offen(array(
+        'windows/driver' => 'TEIL.FENSTER_VL', 'windows/passenger' => 'TEIL.FENSTER_VR',
+        'windows/rearLeft' => 'TEIL.FENSTER_HL', 'windows/rearRight' => 'TEIL.FENSTER_HR',
+        'windows/sunRoof' => 'TEIL.SCHIEBEDACH',
+    ), $nr);
+    $st['FENSTEROFFEN'] = $fa;
+
+    // --- Reifendruck (Gateway rechnet bereits in bar: Rohwert mal 0,04) ---
+    $st['RDVL'] = mg_num('tyres/frontLeftPressure', -1, $nr);
+    $st['RDVR'] = mg_num('tyres/frontRightPressure', -1, $nr);
+    $st['RDHL'] = mg_num('tyres/rearLeftPressure', -1, $nr);
+    $st['RDHR'] = mg_num('tyres/rearRightPressure', -1, $nr);
+
+    // --- Ladetechnik ---
+    $ein = mg_num('obc/powerSinglePhase', -1, $nr);
+    $drei = mg_num('obc/powerThreePhase', -1, $nr);
+    $st['ACLEISTUNG'] = $drei > 0 ? $drei : $ein;
+    $st['ACSTROM'] = mg_num('obc/current', -1, $nr);
+    $st['ACSPANNUNG'] = mg_num('obc/voltage', -1, $nr);
+    $st['LADEART'] = mg_num('drivetrain/chargingType', -1, $nr);
+    /* Stecker am Fahrzeug und an der Saeule. Zusammen mit LADEART die Antwort
+     * auf die Frage, ob gerade an einer Gleichstromsaeule geladen wird - eine
+     * Ueberschussregelung darf dort NICHT eingreifen. Die Zuordnung der
+     * Zahlenwerte von chargingType zu Wechsel- und Gleichstrom steht in der
+     * Bibliothek des Gateways, nicht im Gateway selbst; sie ist deshalb
+     * NICHT nachgemessen und wird als Rohwert durchgereicht. */
+    $st['STECKERFZ'] = mg_bool('ccu/onboardChargerPlugStatus', -1, $nr);
+    $st['STECKERSAEULE'] = mg_bool('ccu/offboardChargerPlugStatus', -1, $nr);
+    $st['KABELVERR'] = mg_bool('drivetrain/chargingCableLock', -1, $nr);
+    $grenze = mg_txt('drivetrain/chargeCurrentLimit', '', $nr);
+    $st['STROMGRENZE'] = mg_stromgrenze_zahl($grenze);
+    $st['VERBRTAG'] = mg_num('drivetrain/powerUsageOfDay', -1, $nr);
+    $st['VERBRLADUNG'] = mg_num('drivetrain/powerUsageSinceLastCharge', -1, $nr);
+    $st['BATTHEIZ'] = mg_bool('drivetrain/batteryHeating', -1, $nr);
+    // Fertig um: Loxone rechnet in Sekunden seit dem 01.01.2009.
+    $st['FERTIGUM'] = ($restmin > 0 && (int) $st['LAEDT'] === 1)
+        ? (float) (time() + (int) round($restmin * 60) - MG_LOXONE_EPOCHE) : -1;
+
+    // --- Klima ---
+    $st['KLIMASOLL'] = mg_num('climate/remoteTemperature', -1, $nr);
+    $klima = strtolower(mg_txt('climate/remoteClimateState', '', $nr));
+    $st['KLIMA'] = $klima === '' ? -1 : (in_array($klima, array('off', 'false', '0'), true) ? 0 : 1);
+    $st['HECKSCHEIBE'] = mg_bool('climate/rearWindowDefrosterHeating', -1, $nr);
+    $st['FRONTSCHEIBE'] = mg_bool('climate/frontWindowDefrosterHeating', -1, $nr);
+    $st['SITZHL'] = mg_num('climate/heatedSeatsFrontLeftLevel', -1, $nr);
+    $st['SITZHR'] = mg_num('climate/heatedSeatsFrontRightLevel', -1, $nr);
+
+    // --- Abgeleitetes ---
+    $st['THEMEN'] = (float) mg_themen_anzahl($nr);
+    /* ALTER misst, wie alt die Momentaufnahme des Plugins ist - also den Weg
+     * zum Broker. Es sagt NICHTS darueber, wann das Auto zuletzt geantwortet
+     * hat: die Werte liegen retained auf dem Broker und stehen auch dann noch
+     * da, wenn der Container tot ist. Wer wissen will, wie alt die
+     * FAHRZEUGDATEN sind, nimmt FZALTER. */
+    $st['ALTER'] = $roh['zeit'] !== ''
+        ? max(0, (float) round((time() - strtotime($roh['zeit'])) / 60)) : -1;
+    $st['VOLL'] = ($ziel > 0 && $soc >= 0) ? ($soc >= $ziel ? 1 : 0) : -1;
+    /* OK heisst "Fahrzeugdaten gueltig". Dazu gehoert seit 1.1.0 auch, dass
+     * das Gateway das Fahrzeug ueberhaupt erreicht hat - ERREICHBAR=0 mit
+     * retained Werten von vorgestern ist kein gueltiger Datensatz. */
+    $st['OK'] = ($st['THEMEN'] > 0 && $soc >= 0 && (int) $st['ERREICHBAR'] !== 0) ? 1 : 0;
+
+    $st['PUSH'] = empty($cfg['notify']['push']) ? 0 : 1;
+    $st['PUSHAKTIV'] = mg_push_active($nr);
+    $st['PTEST'] = mg_ptest_active();
+
+    // Nicht-Feld-Angaben tragen einen Unterstrich und landen nie in der Zeile.
+    $st['_nr'] = (int) $nr;
+    $st['_zeit'] = $roh['zeit'];
+    $st['_fehlertext'] = $fehlertext;
+    $st['_klimatext'] = $klima;
+    $st['_grenze'] = $grenze;
+    $st['_tueren'] = $tn;
+    $st['_fenster'] = $fn;
+    /* Drei Textwerte, die in keine Statuszeile gehoeren, aber ueber MQTT und
+     * in ?json=1 brauchbar sind.
+     *
+     * Der Ladeplan wird nur GELESEN. Setzen waere ueber
+     * drivetrain/chargingSchedule/set moeglich, aber die genaue Gestalt der
+     * Nutzlast ({startTime,endTime,mode}) ist in der Anleitung des Gateways
+     * nicht festgelegt und hier NICHT nachgemessen - ein geratener
+     * JSON-Aufbau waere eine Behauptung, keine Funktion. */
+    $st['_ladeplan'] = mg_txt('drivetrain/chargingSchedule', '', $nr);
+    $st['_heizplan'] = mg_txt('drivetrain/batteryHeatingSchedule', '', $nr);
+    $st['_abbruchgrund'] = mg_txt('drivetrain/chargingStopReason', '', $nr);
+    $st['_fahrzeugmeldung'] = mg_txt(array('info/lastMessage/title',
+        'events/vehicleMessage'), '', $nr);
     return $st;
 }
 
-/** Loxone-Zeile. */
-function mg_line($st = null)
+/** Wie viele Themen liegen fuer dieses Fahrzeug vor? */
+function mg_themen_anzahl($nr = 1)
 {
-    if ($st === null) {
-        $st = mg_state();
+    $roh = mg_raw();
+    $base = mg_base_topic($nr);
+    if ($base === '') {
+        return 0;
     }
-    return sprintf(
-        "MG;OK=%d;SOC=%.1f;SOCKWH=%.1f;ZIEL=%.0f;REICHWEITE=%.0f;LAEDT=%d;STECKER=%d;LEISTUNG=%.2f;"
-        . "RESTZEIT=%.0f;KM=%.0f;BATT12V=%.1f;ZU=%d;KOFFER=%d;INNEN=%.1f;AUSSEN=%.1f;VOLL=%d;ALTER=%d;THEMEN=%d\n",
-        $st['ok'], $st['soc'], $st['soc_kwh'], $st['soc_ziel'], $st['reichweite'], $st['laedt'], $st['stecker'],
-        $st['ladeleistung'], $st['restzeit_min'], $st['kilometerstand'], $st['batterie12v'],
-        $st['verschlossen'], $st['kofferraum'], $st['innentemp'], $st['aussentemp'],
-        $st['voll'], $st['alter_min'], $st['themen']
-    );
+    $n = 0;
+    $pfad = $base . '/';
+    $len = strlen($pfad);
+    foreach ($roh['werte'] as $t => $v) {
+        if (strncmp($t, $pfad, $len) === 0) {
+            $n++;
+        }
+    }
+    return $n;
 }
 
-/* ---------------- Befehle ---------------- */
+/** "16A" -> 16, "MAX" -> 32. Fuer Loxone ist eine Zahl brauchbarer als Text. */
+function mg_stromgrenze_zahl($s)
+{
+    $s = strtoupper(trim((string) $s));
+    if ($s === '') {
+        return -1;
+    }
+    if ($s === 'MAX') {
+        return 32;
+    }
+    return preg_match('/^(\d+)\s*A?$/', $s, $t) ? (float) $t[1] : -1;
+}
 
 /**
- * Erlaubte Befehle. Bewusst eine feste Liste - so kann ueber den Endpunkt
- * nichts anderes ins Fahrzeug geschickt werden.
+ * Eine Loxone-Zeile bilden.
+ *
+ * Kopf und Felder kommen aus mg_zeilen() und mg_felder(); es gibt keine
+ * zweite Aufzaehlung. Vor jedem Feldnamen steht ein Semikolon - dieselbe
+ * Bedingung, die mg_check() voraussetzt.
  */
-function mg_commands()
+function mg_line($zeile = 'mg', $nr = 1, $st = null)
+{
+    $zn = mg_zeilen();
+    if (!isset($zn[$zeile])) {
+        $zeile = 'mg';
+    }
+    if ($st === null) {
+        $st = mg_state($nr);
+    }
+    $aus = $zn[$zeile]['kopf'];
+    if ((int) $nr > 1) {
+        $aus .= ';FZ=' . (int) $nr;
+    }
+    foreach (mg_felder_von($zeile) as $name => $info) {
+        $v = isset($st[$name]) ? $st[$name] : -1;
+        $aus .= ';' . $name . '=' . ($info['analog']
+            ? rtrim(rtrim(number_format((float) $v, 2, '.', ''), '0'), '.')
+            : (string) (int) $v);
+    }
+    return $aus . "\n";
+}
+
+/* ==================================================================
+ * Befehle
+ *
+ * Bewusst eine feste Liste - ueber den Endpunkt kann nichts anderes ins
+ * Fahrzeug geschickt werden. 'zusatz' macht aus fuenf festen Zielwerten
+ * einen Befehl mit einem Zahlenwert; die alten Namen bleiben als Aliasse.
+ * 'gefahr' = 1 verlangt den zweiten Haken.
+ * 'pruef' nennt das Thema, an dem sich nachsehen laesst, ob es gewirkt hat.
+ * ================================================================== */
+
+function mg_befehle()
 {
     return array(
-        'laden_stopp' => array('drivetrain/charging/set', 'false', 'Ladevorgang stoppen'),
-        'laden_start' => array('drivetrain/charging/set', 'true', 'Ladevorgang starten (laut Projekt unzuverlaessig)'),
-        'ziel_60' => array('drivetrain/socTarget/set', '60', 'Ziel-Ladestand 60 %'),
-        'ziel_70' => array('drivetrain/socTarget/set', '70', 'Ziel-Ladestand 70 %'),
-        'ziel_80' => array('drivetrain/socTarget/set', '80', 'Ziel-Ladestand 80 %'),
-        'ziel_90' => array('drivetrain/socTarget/set', '90', 'Ziel-Ladestand 90 %'),
-        'ziel_100' => array('drivetrain/socTarget/set', '100', 'Ziel-Ladestand 100 %'),
-        'strom_6' => array('drivetrain/chargeCurrentLimit/set', '6A', 'Ladestrom 6 A (PV-Ueberschuss)'),
-        'strom_8' => array('drivetrain/chargeCurrentLimit/set', '8A', 'Ladestrom 8 A'),
-        'strom_16' => array('drivetrain/chargeCurrentLimit/set', '16A', 'Ladestrom 16 A'),
-        'strom_max' => array('drivetrain/chargeCurrentLimit/set', 'MAX', 'Ladestrom maximal'),
-        'klima_an' => array('climate/remoteClimateState/set', 'on', 'Standklima einschalten'),
-        'klima_aus' => array('climate/remoteClimateState/set', 'off', 'Standklima ausschalten'),
-        'heckscheibe_an' => array('climate/rearWindowDefrosterHeating/set', 'on', 'Heckscheibenheizung ein'),
-        'heckscheibe_aus' => array('climate/rearWindowDefrosterHeating/set', 'off', 'Heckscheibenheizung aus'),
-        'finden' => array('location/findMyCar/set', 'activate', 'Auto finden (Licht und Hupe)'),
-        'finden_licht' => array('location/findMyCar/set', 'lights_only', 'Auto finden (nur Licht)'),
-        'finden_stopp' => array('location/findMyCar/set', 'stop', 'Auto finden beenden'),
-        'auffrischen' => array('refresh/mode/set', 'force', 'Fahrzeugstatus jetzt abfragen'),
+        'auffrischen' => array('topic' => 'refresh/mode/set', 'wert' => 'force',
+            'bez' => 'BEFEHL.AUFFRISCHEN', 'gefahr' => 0, 'gegen' => '',
+            'pruef' => '', 'abstand' => 60),
+        'laden_start' => array('topic' => 'drivetrain/charging/set', 'wert' => 'true',
+            'bez' => 'BEFEHL.LADEN_START', 'gefahr' => 0, 'gegen' => 'laden_stopp',
+            'pruef' => 'drivetrain/charging', 'erwartet' => '1', 'abstand' => 60),
+        'laden_stopp' => array('topic' => 'drivetrain/charging/set', 'wert' => 'false',
+            'bez' => 'BEFEHL.LADEN_STOPP', 'gefahr' => 0, 'gegen' => '',
+            'pruef' => 'drivetrain/charging', 'erwartet' => '0', 'abstand' => 60),
+        'ziel' => array('topic' => 'drivetrain/socTarget/set', 'zusatz' => 'prozent',
+            'werte' => array(40, 50, 60, 70, 80, 90, 100),
+            'bez' => 'BEFEHL.ZIEL', 'gefahr' => 0, 'gegen' => '',
+            'pruef' => 'drivetrain/socTarget', 'abstand' => 60),
+        /* 'norm' => 'ampere': Ein ANALOGER virtueller Ausgang in Loxone sendet
+         * eine Zahl - aus <v> wird also "16", nie "16A". Ohne diese
+         * Umschrift haette die eigene Ausgangsvorlage einen Befehl erzeugt,
+         * den der eigene Endpunkt abweist. Gemessen an der erzeugten
+         * VQ_mgismart.xml, bevor es jemand am Miniserver gemerkt haette. */
+        'strom' => array('topic' => 'drivetrain/chargeCurrentLimit/set', 'zusatz' => 'ampere',
+            'werte' => array('6A', '8A', '16A', 'MAX'), 'norm' => 'ampere',
+            'bez' => 'BEFEHL.STROM', 'gefahr' => 0, 'gegen' => '',
+            'pruef' => 'drivetrain/chargeCurrentLimit', 'abstand' => 300),
+        'klima_an' => array('topic' => 'climate/remoteClimateState/set', 'wert' => 'on',
+            'bez' => 'BEFEHL.KLIMA_AN', 'gefahr' => 0, 'gegen' => 'klima_aus',
+            'pruef' => 'climate/remoteClimateState', 'erwartet' => 'on', 'abstand' => 60),
+        'klima_aus' => array('topic' => 'climate/remoteClimateState/set', 'wert' => 'off',
+            'bez' => 'BEFEHL.KLIMA_AUS', 'gefahr' => 0, 'gegen' => '',
+            'pruef' => 'climate/remoteClimateState', 'erwartet' => 'off', 'abstand' => 60),
+        'klima_vorn' => array('topic' => 'climate/remoteClimateState/set', 'wert' => 'front',
+            'bez' => 'BEFEHL.KLIMA_VORN', 'gefahr' => 0, 'gegen' => '',
+            'pruef' => 'climate/remoteClimateState', 'erwartet' => 'front', 'abstand' => 60),
+        'klima_geblaese' => array('topic' => 'climate/remoteClimateState/set', 'wert' => 'blowingonly',
+            'bez' => 'BEFEHL.KLIMA_GEBLAESE', 'gefahr' => 0, 'gegen' => '',
+            'pruef' => 'climate/remoteClimateState', 'erwartet' => 'blowingonly', 'abstand' => 60),
+        'klimatemp' => array('topic' => 'climate/remoteTemperature/set', 'zusatz' => 'temp',
+            'bereich' => array(16, 30),
+            'bez' => 'BEFEHL.KLIMATEMP', 'gefahr' => 0, 'gegen' => '',
+            'pruef' => 'climate/remoteTemperature', 'abstand' => 60),
+        'sitzheizung_l' => array('topic' => 'climate/heatedSeatsFrontLeftLevel/set', 'zusatz' => 'stufe',
+            'bereich' => array(0, 3),
+            'bez' => 'BEFEHL.SITZHEIZUNG_L', 'gefahr' => 0, 'gegen' => '',
+            'pruef' => 'climate/heatedSeatsFrontLeftLevel', 'abstand' => 60),
+        'sitzheizung_r' => array('topic' => 'climate/heatedSeatsFrontRightLevel/set', 'zusatz' => 'stufe',
+            'bereich' => array(0, 3),
+            'bez' => 'BEFEHL.SITZHEIZUNG_R', 'gefahr' => 0, 'gegen' => '',
+            'pruef' => 'climate/heatedSeatsFrontRightLevel', 'abstand' => 60),
+        'heckscheibe_an' => array('topic' => 'climate/rearWindowDefrosterHeating/set', 'wert' => 'on',
+            'bez' => 'BEFEHL.HECKSCHEIBE_AN', 'gefahr' => 0, 'gegen' => 'heckscheibe_aus',
+            'pruef' => 'climate/rearWindowDefrosterHeating', 'erwartet' => 'on', 'abstand' => 60),
+        'heckscheibe_aus' => array('topic' => 'climate/rearWindowDefrosterHeating/set', 'wert' => 'off',
+            'bez' => 'BEFEHL.HECKSCHEIBE_AUS', 'gefahr' => 0, 'gegen' => '',
+            'pruef' => 'climate/rearWindowDefrosterHeating', 'erwartet' => 'off', 'abstand' => 60),
+        'frontscheibe_an' => array('topic' => 'climate/frontWindowDefrosterHeating/set', 'wert' => 'on',
+            'bez' => 'BEFEHL.FRONTSCHEIBE_AN', 'gefahr' => 0, 'gegen' => 'frontscheibe_aus',
+            'pruef' => 'climate/frontWindowDefrosterHeating', 'erwartet' => 'on', 'abstand' => 60),
+        'frontscheibe_aus' => array('topic' => 'climate/frontWindowDefrosterHeating/set', 'wert' => 'off',
+            'bez' => 'BEFEHL.FRONTSCHEIBE_AUS', 'gefahr' => 0, 'gegen' => '',
+            'pruef' => 'climate/frontWindowDefrosterHeating', 'erwartet' => 'off', 'abstand' => 60),
+        'batterieheizung_an' => array('topic' => 'drivetrain/batteryHeating/set', 'wert' => 'true',
+            'bez' => 'BEFEHL.BATTHEIZ_AN', 'gefahr' => 0, 'gegen' => 'batterieheizung_aus',
+            'pruef' => 'drivetrain/batteryHeating', 'erwartet' => '1', 'abstand' => 300),
+        'batterieheizung_aus' => array('topic' => 'drivetrain/batteryHeating/set', 'wert' => 'false',
+            'bez' => 'BEFEHL.BATTHEIZ_AUS', 'gefahr' => 0, 'gegen' => '',
+            'pruef' => 'drivetrain/batteryHeating', 'erwartet' => '0', 'abstand' => 300),
+        /* 'textwert' => 1: die zulaessigen Werte sind Woerter, keine Zahlen.
+         * Ein analoger Ausgang kann sie nicht senden - die Ausgangsvorlage
+         * macht daraus je Wert einen eigenen DIGITALEN Befehl. */
+        'abfrage_modus' => array('topic' => 'refresh/mode/set', 'zusatz' => 'modus',
+            'werte' => array('periodic', 'off', 'charging_detection'), 'textwert' => 1,
+            'bez' => 'BEFEHL.ABFRAGE_MODUS', 'gefahr' => 0, 'gegen' => '',
+            'pruef' => 'refresh/mode', 'abstand' => 60),
+        'abfrage_ruhe' => array('topic' => 'refresh/period/inActive/set', 'zusatz' => 'sekunden',
+            'bereich' => array(300, 604800),
+            'bez' => 'BEFEHL.ABFRAGE_RUHE', 'gefahr' => 0, 'gegen' => '',
+            'pruef' => 'refresh/period/inActive', 'abstand' => 300),
+        'abfrage_aktiv' => array('topic' => 'refresh/period/active/set', 'zusatz' => 'sekunden',
+            'bereich' => array(30, 86400),
+            'bez' => 'BEFEHL.ABFRAGE_AKTIV', 'gefahr' => 0, 'gegen' => '',
+            'pruef' => 'refresh/period/active', 'abstand' => 300),
+
+        /* ---- Ladeplan und Batterieheizplan ----
+         *
+         * Eigener, dritter Haken (plan_ein). 'pruef' bleibt LEER: das
+         * Zustandsthema traegt JSON, und ein Textvergleich zwischen
+         * Gesendetem und Veroeffentlichtem wuerde zufaellig mal passen und
+         * mal nicht. Diese Befehle melden deshalb ehrlich OK=2 - abgesetzt,
+         * Ergebnis unbekannt - statt einen Erfolg zu behaupten. */
+        'ladeplan' => array('topic' => 'drivetrain/chargingSchedule/set',
+            'nutzlast' => 'ladeplan', 'plan' => 1,
+            'bez' => 'BEFEHL.LADEPLAN', 'gefahr' => 0, 'gegen' => '',
+            'pruef' => '', 'abstand' => 300),
+        'ladeplan_ein' => array('topic' => 'drivetrain/chargingSchedule/set',
+            'nutzlast' => 'ladeplan_config', 'plan' => 1,
+            'bez' => 'BEFEHL.LADEPLAN_EIN', 'gefahr' => 0, 'gegen' => 'ladeplan_aus',
+            'pruef' => '', 'abstand' => 300),
+        'ladeplan_aus' => array('topic' => 'drivetrain/chargingSchedule/set',
+            'nutzlast' => 'ladeplan_aus', 'plan' => 1,
+            'bez' => 'BEFEHL.LADEPLAN_AUS', 'gefahr' => 0, 'gegen' => '',
+            'pruef' => '', 'abstand' => 300),
+        'heizplan' => array('topic' => 'drivetrain/batteryHeatingSchedule/set',
+            'nutzlast' => 'heizplan', 'plan' => 1,
+            'bez' => 'BEFEHL.HEIZPLAN', 'gefahr' => 0, 'gegen' => '',
+            'pruef' => '', 'abstand' => 300),
+        'heizplan_ein' => array('topic' => 'drivetrain/batteryHeatingSchedule/set',
+            'nutzlast' => 'heizplan_config', 'plan' => 1,
+            'bez' => 'BEFEHL.HEIZPLAN_EIN', 'gefahr' => 0, 'gegen' => 'heizplan_aus',
+            'pruef' => '', 'abstand' => 300),
+        'heizplan_aus' => array('topic' => 'drivetrain/batteryHeatingSchedule/set',
+            'nutzlast' => 'heizplan_aus', 'plan' => 1,
+            'bez' => 'BEFEHL.HEIZPLAN_AUS', 'gefahr' => 0, 'gegen' => '',
+            'pruef' => '', 'abstand' => 300),
+
+        // ---- Ab hier: eingreifend. Zweiter Haken noetig. ----
+        'finden' => array('topic' => 'location/findMyCar/set', 'wert' => 'activate',
+            'bez' => 'BEFEHL.FINDEN', 'gefahr' => 1, 'gegen' => 'finden_stopp',
+            'pruef' => '', 'abstand' => 60),
+        'finden_licht' => array('topic' => 'location/findMyCar/set', 'wert' => 'lights_only',
+            'bez' => 'BEFEHL.FINDEN_LICHT', 'gefahr' => 1, 'gegen' => '',
+            'pruef' => '', 'abstand' => 60),
+        'finden_hupe' => array('topic' => 'location/findMyCar/set', 'wert' => 'horn_only',
+            'bez' => 'BEFEHL.FINDEN_HUPE', 'gefahr' => 1, 'gegen' => '',
+            'pruef' => '', 'abstand' => 60),
+        'finden_stopp' => array('topic' => 'location/findMyCar/set', 'wert' => 'stop',
+            'bez' => 'BEFEHL.FINDEN_STOPP', 'gefahr' => 1, 'gegen' => '',
+            'pruef' => '', 'abstand' => 5),
+        'verriegeln' => array('topic' => 'doors/locked/set', 'wert' => 'true',
+            'bez' => 'BEFEHL.VERRIEGELN', 'gefahr' => 1, 'gegen' => 'entriegeln',
+            'pruef' => 'doors/locked', 'erwartet' => '1', 'abstand' => 60),
+        'entriegeln' => array('topic' => 'doors/locked/set', 'wert' => 'false',
+            'bez' => 'BEFEHL.ENTRIEGELN', 'gefahr' => 1, 'gegen' => '',
+            'pruef' => 'doors/locked', 'erwartet' => '0', 'abstand' => 60),
+        'kofferraum_auf' => array('topic' => 'doors/boot/set', 'wert' => 'false',
+            'bez' => 'BEFEHL.KOFFERRAUM_AUF', 'gefahr' => 1, 'gegen' => '',
+            'pruef' => '', 'abstand' => 60),
     );
 }
 
-function mg_send($befehl)
+/**
+ * Die alten Befehlsnamen aus 1.0.8.
+ *
+ * Sie bleiben gueltig, sonst braechen alle beim Anwender eingetragenen
+ * Loxone-Adressen. Jeder loest denselben Befehl mit festem Zusatzwert aus.
+ */
+function mg_aliasse()
+{
+    $a = array();
+    foreach (array(60, 70, 80, 90, 100) as $p) {
+        $a['ziel_' . $p] = array('ziel', (string) $p);
+    }
+    foreach (array('6' => '6A', '8' => '8A', '16' => '16A', 'max' => 'MAX') as $k => $v) {
+        $a['strom_' . $k] = array('strom', $v);
+    }
+    return $a;
+}
+
+/**
+ * Eine Uhrzeit pruefen und auf HH:MM bringen.
+ *
+ * Das Gateway liest sie mit time.fromisoformat(); das nimmt HH:MM und
+ * HH:MM:SS. Alles andere wird ABGEWIESEN, nicht zurechtgebogen - eine still
+ * auf 00:00 gerundete Ladezeit waere eine Falschaussage gegenueber dem, der
+ * sie geschickt hat.
+ */
+function mg_uhrzeit($v)
+{
+    $v = trim((string) $v);
+    if (!preg_match('/^([01][0-9]|2[0-3]):([0-5][0-9])(:[0-5][0-9])?$/', $v, $t)) {
+        return '';
+    }
+    return $t[1] . ':' . $t[2];
+}
+
+/** Die zulaessigen Werte fuer mode des Ladeplans. */
+function mg_planmodi()
+{
+    /* Belegt in saic_ismart_client_ng, api/vehicle_charging/schema.py:
+     *     class ScheduledChargingMode(Enum):
+     *         DISABLED = 2
+     *         UNTIL_CONFIGURED_SOC = 3
+     *         UNTIL_CONFIGURED_TIME = 1
+     * Der Handler des Gateways schreibt den Wert selbst gross
+     * (payload_json["mode"].upper()), Kleinschreibung ist also erlaubt. */
+    return array('disabled', 'until_configured_soc', 'until_configured_time');
+}
+
+/**
+ * Die JSON-Nutzlast fuer Lade- und Heizplan bauen.
+ *
+ * GESTALT BELEGT, WIRKUNG NICHT.
+ * Die Felder stammen aus den Handlern des Gateways:
+ *   src/handlers/command/drivetrain/drivetrain_charging_schedule.py
+ *       time.fromisoformat(payload["startTime"])
+ *       time.fromisoformat(payload["endTime"])
+ *       ScheduledChargingMode[payload["mode"].upper()]
+ *   src/handlers/command/drivetrain/drivetrain_battery_heating_schedule.py
+ *       time.fromisoformat(payload["startTime"])
+ *       payload["mode"].upper() == "ON"
+ * Was NICHT belegt ist: ob das FAHRZEUG den Plan annimmt. Das kann keine
+ * Quelle beantworten, nur ein Auto. Deshalb der eigene Haken plan_ein, ab
+ * Werk aus, und deshalb tragen diese Befehle kein "pruef" - sie melden OK=2
+ * (abgesetzt, Ergebnis unbekannt), statt einen Erfolg zu behaupten.
+ *
+ * Rueckgabe: array(ok, code, jsontext)
+ */
+function mg_nutzlast($art, $wert, $cfg = null)
+{
+    if ($cfg === null) {
+        $cfg = mg_config();
+    }
+    $feld = is_array($wert) ? $wert : array();
+    $hol = function ($name) use ($feld) {
+        return (isset($feld[$name]) && !is_array($feld[$name])) ? (string) $feld[$name] : '';
+    };
+
+    if ($art === 'ladeplan' || $art === 'ladeplan_config' || $art === 'ladeplan_aus') {
+        if ($art === 'ladeplan') {
+            $von = mg_uhrzeit($hol('von'));
+            $bis = mg_uhrzeit($hol('bis'));
+            $modus = strtolower(trim($hol('modus')));
+            if (trim($hol('von')) === '' || trim($hol('bis')) === '' || $modus === '') {
+                return array(0, 'WERT_FEHLT', '');
+            }
+            if ($von === '' || $bis === '') {
+                return array(0, 'WERT_UNZULAESSIG', '');
+            }
+        } else {
+            $von = mg_uhrzeit($cfg['plan_von']);
+            $bis = mg_uhrzeit($cfg['plan_bis']);
+            $modus = ($art === 'ladeplan_aus')
+                ? 'disabled' : strtolower(trim((string) $cfg['plan_modus']));
+            if ($von === '' || $bis === '') {
+                return array(0, 'WERT_UNZULAESSIG', '');
+            }
+        }
+        if (!in_array($modus, mg_planmodi(), true)) {
+            return array(0, 'WERT_UNZULAESSIG', '');
+        }
+        return array(1, '', json_encode(array(
+            'startTime' => $von, 'endTime' => $bis, 'mode' => strtoupper($modus),
+        ), JSON_UNESCAPED_SLASHES));
+    }
+
+    if ($art === 'heizplan' || $art === 'heizplan_config' || $art === 'heizplan_aus') {
+        if ($art === 'heizplan') {
+            $von = mg_uhrzeit($hol('von'));
+            $modus = strtolower(trim($hol('modus')));
+            if (trim($hol('von')) === '' || $modus === '') {
+                return array(0, 'WERT_FEHLT', '');
+            }
+            if ($von === '') {
+                return array(0, 'WERT_UNZULAESSIG', '');
+            }
+        } else {
+            $von = mg_uhrzeit($cfg['heizplan_von']);
+            $modus = ($art === 'heizplan_aus') ? 'off' : 'on';
+            if ($von === '') {
+                return array(0, 'WERT_UNZULAESSIG', '');
+            }
+        }
+        if (!in_array($modus, array('on', 'off'), true)) {
+            return array(0, 'WERT_UNZULAESSIG', '');
+        }
+        return array(1, '', json_encode(array(
+            'startTime' => $von, 'mode' => strtoupper($modus),
+        ), JSON_UNESCAPED_SLASHES));
+    }
+    return array(0, 'UNBEKANNT', '');
+}
+
+/** Aus Befehlsname und Zusatzwert das Paar (Thema, Wert) bilden - oder einen Fehler. */
+function mg_befehl_aufloesen($befehl, $wert = null)
+{
+    $befehl = (string) $befehl;
+    $alias = mg_aliasse();
+    if (isset($alias[$befehl])) {
+        $wert = $alias[$befehl][1];
+        $befehl = $alias[$befehl][0];
+    }
+    $liste = mg_befehle();
+    if (!isset($liste[$befehl])) {
+        return array(0, 'UNBEKANNT', $befehl, '', '');
+    }
+    $b = $liste[$befehl];
+    if (!empty($b['nutzlast'])) {
+        list($nok, $ncode, $njson) = mg_nutzlast($b['nutzlast'], $wert);
+        return $nok ? array(1, '', $befehl, $b['topic'], $njson)
+                    : array(0, $ncode, $befehl, '', '');
+    }
+    /* Kommt der Zusatzwert als Feld (so sammelt ihn der Endpunkt), wird
+     * daraus der Eintrag genommen, den DIESER Befehl braucht. */
+    if (is_array($wert)) {
+        $wert = (!empty($b['zusatz']) && isset($wert[$b['zusatz']])
+                 && !is_array($wert[$b['zusatz']])) ? $wert[$b['zusatz']] : null;
+    }
+    if (empty($b['zusatz'])) {
+        return array(1, '', $befehl, $b['topic'], (string) $b['wert']);
+    }
+    /* Ein Wert ausserhalb der Liste wird ABGEWIESEN, nicht zurechtgebogen.
+     * Ein stillschweigend gerundeter Zielladestand waere eine Falschaussage
+     * gegenueber dem, der ihn geschickt hat. */
+    $wert = trim((string) $wert);
+    if ($wert === '') {
+        return array(0, 'WERT_FEHLT', $befehl, '', '');
+    }
+    if (isset($b['norm']) && $b['norm'] === 'ampere' && preg_match('/^\d+$/', $wert)) {
+        // 32 und mehr heisst MAX; 0 waere kein gueltiger Ladestrom.
+        $wert = ((int) $wert >= 32) ? 'MAX' : ((int) $wert . 'A');
+    }
+    if (isset($b['werte'])) {
+        foreach ($b['werte'] as $zul) {
+            if (strcasecmp((string) $zul, $wert) === 0) {
+                return array(1, '', $befehl, $b['topic'], (string) $zul);
+            }
+        }
+        return array(0, 'WERT_UNZULAESSIG', $befehl, '', '');
+    }
+    if (isset($b['bereich'])) {
+        if (!preg_match('/^-?\d+(\.\d+)?$/', $wert)) {
+            return array(0, 'WERT_UNZULAESSIG', $befehl, '', '');
+        }
+        $z = (float) $wert;
+        if ($z < $b['bereich'][0] || $z > $b['bereich'][1]) {
+            return array(0, 'WERT_AUSSER_BEREICH', $befehl, '', '');
+        }
+        return array(1, '', $befehl, $b['topic'], (string) (int) round($z));
+    }
+    return array(0, 'UNBEKANNT', $befehl, '', '');
+}
+
+/**
+ * Einen Zusatzwert lesbar machen - auch wenn er ein Feld ist.
+ *
+ * WARUM DAS EINE EIGENE FUNKTION IST:
+ * Seit der Endpunkt alle Zusatzwerte als Feld einsammelt, ist $wert bei den
+ * Planbefehlen ein Feld. Ein "(string) $wert" darauf ergibt woertlich "Array"
+ * und unter PHP 8 zusaetzlich eine Warning - und die wird AUSGEGEBEN, bevor
+ * http_response_code() laufen kann. Gemessen: die Abweisung eines falschen
+ * Ladeplans ging ohne Statuscode hinaus, also als HTTP 200.
+ *
+ * Das ist dieselbe Fehlerklasse, die in mg.php schon einmal behoben wurde
+ * (mg_get()). Sie ist hier ein zweites Mal entstanden, weil sich der Typ des
+ * Parameters geaendert hat - und das ist die Lehre: wer einen Typ erweitert,
+ * sucht jede Stelle, die ihn in eine Zeichenkette zwingt.
+ */
+function mg_wert_text($wert)
+{
+    if (!is_array($wert)) {
+        return (string) $wert;
+    }
+    $teile = array();
+    foreach ($wert as $k => $v) {
+        if (!is_array($v)) {
+            $teile[] = $k . '=' . (string) $v;
+        }
+    }
+    return implode(' ', $teile);
+}
+
+/** Merkdatei der zuletzt gesendeten Befehle (fuer die Drosselung). */
+function mg_gesendet_lesen()
+{
+    $d = mg_json_lesen(mg_paths()['tmp'] . '/gesendet.json');
+    return isset($d['liste']) && is_array($d['liste']) ? $d : array('liste' => array());
+}
+
+/**
+ * Darf dieser Befehl jetzt gesendet werden?
+ *
+ * Zwei Bremsen. Erstens ein Mindestabstand je Befehl und Fahrzeug: ein
+ * virtueller Ausgang, der bei jedem Zyklus feuert, sendet sonst bei jedem
+ * Zyklus ans Auto - und jedes Senden weckt die Fahrzeugelektronik.
+ * Zweitens eine Obergrenze je Stunde ueber alle Befehle.
+ *
+ * Rueckgabe: array(darf, restsekunden) - restsekunden -1 heisst
+ * "Stundengrenze erreicht".
+ */
+function mg_drossel_pruefen($befehl, $nr, $cfg = null)
+{
+    if ($cfg === null) {
+        $cfg = mg_config();
+    }
+    $liste = mg_befehle();
+    $abstand = isset($liste[$befehl]['abstand']) ? (int) $liste[$befehl]['abstand'] : 60;
+    if ($befehl === 'strom') {
+        $abstand = max($abstand, (int) $cfg['strom_abstand']);
+    } else {
+        $abstand = max($abstand, (int) $cfg['befehl_abstand']);
+    }
+    $d = mg_gesendet_lesen();
+    $jetzt = time();
+    $schluessel = (int) $nr . ':' . $befehl;
+    if (isset($d['liste'][$schluessel]) && $jetzt - (int) $d['liste'][$schluessel] < $abstand) {
+        return array(0, (int) ($abstand - ($jetzt - (int) $d['liste'][$schluessel])));
+    }
+    $stunde = 0;
+    foreach ($d['liste'] as $z) {
+        if ($jetzt - (int) $z < 3600) { $stunde++; }
+    }
+    if ($stunde >= max(1, (int) $cfg['befehle_stunde'])) {
+        return array(0, -1);
+    }
+    return array(1, 0);
+}
+
+function mg_drossel_merken($befehl, $nr)
+{
+    $d = mg_gesendet_lesen();
+    $jetzt = time();
+    $d['liste'][(int) $nr . ':' . $befehl] = $jetzt;
+    foreach ($d['liste'] as $k => $z) {
+        if ($jetzt - (int) $z > 7200) { unset($d['liste'][$k]); }
+    }
+    $p = mg_paths();
+    if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
+    mg_write_json($p['tmp'] . '/gesendet.json', $d);
+}
+
+/**
+ * Einen Befehl absetzen.
+ *
+ * Rueckgabe array(ok, meldung, code):
+ *   ok = 1  die Wirkung wurde gesehen (oder der Zielzustand lag schon an)
+ *   ok = 2  abgesetzt, Ergebnis in der Wartezeit unbekannt
+ *   ok = 0  abgewiesen oder das Gateway hat einen Fehler gemeldet
+ *
+ * Bis 1.0.8 galt der Rueckgabewert von mosquitto_pub als Erfolg. Der beweist
+ * genau eines: die Nachricht hat den BROKER erreicht. Ob das Gateway sie
+ * angenommen und ob das Auto sie ausgefuehrt hat, sagt er nicht - und die
+ * eigene Anleitung schreibt ausdruecklich, dass "Laden starten" unzuverlaessig
+ * ist. Geprueft wird deshalb die Wirkung am Zustandsthema.
+ */
+function mg_send($befehl, $wert = null, $nr = 1)
 {
     $cfg = mg_config();
     if (empty($cfg['commands'])) {
-        return array(0, 'Steuerbefehle sind in den Einstellungen gesperrt');
+        return array(0, mg_t('MELDUNG.GESPERRT'), 'GESPERRT');
     }
-    $liste = mg_commands();
-    if (!isset($liste[$befehl])) {
-        return array(0, 'Unbekannter Befehl: ' . $befehl);
+    list($ok, $code, $name, $topic, $sendewert) = mg_befehl_aufloesen($befehl, $wert);
+    if (!$ok) {
+        /* Die Meldung nennt, WAS abgewiesen wurde: bei einem unbekannten
+         * Namen den Namen, bei einem unzulaessigen Zusatzwert den Wert.
+         * "nicht zulaessig: ziel" schickt den Leser sonst auf die Suche nach
+         * einem Fehler im Befehlsnamen, den es nicht gibt. */
+        $was = ($code === 'UNBEKANNT') ? $befehl : ($befehl . ' = ' . mg_wert_text($wert));
+        return array(0, mg_t('MELDUNG.' . $code) . ': ' . mg_kuerzen($was, 60), $code);
+    }
+    $liste = mg_befehle();
+    if (!empty($liste[$name]['gefahr']) && empty($cfg['gefahr_ein'])) {
+        return array(0, mg_t('MELDUNG.EINGREIFEND_GESPERRT'), 'EINGREIFEND_GESPERRT');
+    }
+    if (!empty($liste[$name]['plan']) && empty($cfg['plan_ein'])) {
+        return array(0, mg_t('MELDUNG.PLAN_GESPERRT'), 'PLAN_GESPERRT');
     }
     if (!mg_has_mosquitto()) {
-        return array(0, 'mosquitto_pub fehlt (Paket mosquitto-clients)');
+        return array(0, mg_t('MELDUNG.KEIN_MOSQUITTO'), 'KEIN_MOSQUITTO');
     }
-    $base = mg_base_topic();
+    $base = mg_base_topic($nr);
     if ($base === '') {
-        return array(0, 'Benutzername oder VIN fehlt in den Einstellungen');
+        return array(0, mg_t('MELDUNG.NICHT_EINGERICHTET'), 'NICHT_EINGERICHTET');
     }
-    list($topic, $wert, $text) = $liste[$befehl];
+
+    /* Kein erneutes Senden, wenn der Zielzustand schon anliegt. "Ziel 80 %"
+     * an ein Auto, das auf 80 steht, ist eine vermeidbare Weckung. */
+    if (!empty($liste[$name]['pruef'])) {
+        $ist = mg_txt($liste[$name]['pruef'], '', $nr);
+        if ($ist !== '' && mg_wirkung_gleich($ist, $liste[$name], $sendewert)) {
+            return array(1, mg_t('MELDUNG.SCHON_SO'), 'SCHON_SO');
+        }
+    }
+
+    list($darf, $rest) = mg_drossel_pruefen($name, $nr, $cfg);
+    if (!$darf) {
+        return array(0, $rest >= 0
+            ? mg_t('MELDUNG.GEDROSSELT') . ' (' . $rest . ' s)'
+            : mg_t('MELDUNG.STUNDENGRENZE'), 'GEDROSSELT');
+    }
+
     $cmd = mg_broker_umgebung() . 'mosquitto_pub' . mg_broker_args()
          . ' -t ' . escapeshellarg($base . '/' . $topic)
-         . ' -m ' . escapeshellarg($wert) . ' 2>&1';
+         . ' -m ' . escapeshellarg($sendewert) . ' 2>&1';
     $out = array();
     @exec($cmd, $out, $rc);
+    mg_drossel_merken($name, $nr);
     if ($rc !== 0) {
-        mg_log('FEHLER Befehl "' . $text . '": ' . trim(implode(' ', $out)));
-        return array(0, trim(implode(' ', $out)) ?: ('Fehlercode ' . $rc));
+        $text = trim(implode(' ', $out));
+        mg_log('FEHLER Befehl "' . $name . '": ' . ($text !== '' ? $text : 'Fehlercode ' . $rc));
+        return array(0, $text !== '' ? $text : ('Fehlercode ' . $rc), 'BROKER');
     }
-    mg_log('Befehl gesendet: ' . $text . ' (' . $topic . ' = ' . $wert . ')');
-    return array(1, $text);
+    mg_log('Befehl gesendet (Fahrzeug ' . (int) $nr . '): ' . $name
+        . ' -> ' . $topic . ' = ' . $sendewert);
+
+    if (empty($cfg['wirkung_pruefen']) || empty($liste[$name]['pruef'])) {
+        return array(2, mg_t('MELDUNG.ABGESETZT'), 'ABGESETZT');
+    }
+
+    // Die Wirkung nachsehen. Das Gateway braucht dafuer einige Sekunden.
+    sleep(max(2, min(20, (int) $cfg['wartezeit'])));
+    mg_snapshot(3);
+    $fehler = mg_txt('command/error', '', $nr);
+    if ($fehler !== '') {
+        mg_log('Gateway meldet Fehler zu "' . $name . '": ' . $fehler);
+        return array(0, mg_t('MELDUNG.GATEWAY_FEHLER') . ': ' . mg_kuerzen($fehler, 120),
+            'GATEWAY_FEHLER');
+    }
+    $ist = mg_txt($liste[$name]['pruef'], '', $nr);
+    if ($ist !== '' && mg_wirkung_gleich($ist, $liste[$name], $sendewert)) {
+        return array(1, mg_t('MELDUNG.GEWIRKT'), 'OK');
+    }
+    return array(2, mg_t('MELDUNG.ABGESETZT'), 'ABGESETZT');
+}
+
+/** Passt der gelesene Ist-Wert zu dem, was gesendet wurde? */
+function mg_wirkung_gleich($ist, $bdef, $sendewert)
+{
+    $ist = trim((string) $ist);
+    if (isset($bdef['erwartet'])) {
+        $e = (string) $bdef['erwartet'];
+        if ($e === '1' || $e === '0') {
+            return mg_bool_wert($ist, -1) === (int) $e;
+        }
+        return strcasecmp($ist, $e) === 0;
+    }
+    if (is_numeric($ist) && is_numeric($sendewert)) {
+        return abs((float) $ist - (float) $sendewert) < 0.51;
+    }
+    return strcasecmp($ist, (string) $sendewert) === 0;
 }
 
 /* ---------------- Meldungen ---------------- */
 
-function mg_push_active()
+function mg_meldungsdatei($nr = 1)
+{
+    return mg_paths()['tmp'] . '/meldung' . (int) $nr . '.json';
+}
+
+function mg_push_active($nr = 1)
 {
     $cfg = mg_config();
     if (empty($cfg['notify']['push'])) {
         return 0;
     }
-    $p = mg_paths();
-    $f = $p['tmp'] . '/meldung.json';
-    $m = @json_decode((string) @file_get_contents($f), true);
-    if (!is_array($m) || empty($m['zeit'])) {
+    $m = mg_json_lesen(mg_meldungsdatei($nr));
+    if (empty($m['zeit'])) {
         return 0;
     }
     $min = max(1, (int) $cfg['notify']['push_minutes']);
     return (time() - strtotime($m['zeit'])) < $min * 60 ? 1 : 0;
 }
 
-function mg_push_text()
+function mg_push_text($nr = 1)
 {
-    $m = @json_decode((string) @file_get_contents(mg_paths()['tmp'] . '/meldung.json'), true);
-    return is_array($m) && !empty($m['text']) ? (string) $m['text'] : '';
+    $m = mg_json_lesen(mg_meldungsdatei($nr));
+    return !empty($m['text']) ? (string) $m['text'] : '';
 }
 
-/** Ereignisse erkennen (wird vom Cron nach jeder Momentaufnahme aufgerufen). */
-function mg_check_events($st)
+function mg_ptest_ausloesen()
+{
+    $p = mg_paths();
+    @mkdir($p['tmp'], 0775, true);
+    return mg_write_atomic($p['tmp'] . '/ptest', (string) time());
+}
+
+function mg_ptest_active()
+{
+    $f = mg_paths()['tmp'] . '/ptest';
+    if (!is_file($f)) {
+        return 0;
+    }
+    if (time() - (int) file_get_contents($f) > 300) {
+        @unlink($f);
+        return 0;
+    }
+    return 1;
+}
+
+/**
+ * Ereignisse erkennen (wird vom Cron nach jeder Momentaufnahme aufgerufen).
+ *
+ * Jeder Zweig prueft ausdruecklich auf "bekannt". Bis 1.0.8 fiel der
+ * Ladeziel-Zweig auf 0 zurueck, wenn das Zielthema einmal fehlte - "Ziel
+ * unbekannt" und "Ziel nicht erreicht" waren ununterscheidbar, und beim
+ * naechsten vollstaendigen Durchgang stieg die Flanke ein zweites Mal.
+ * Gemessen ueber fuenf Durchgaenge: Meldung in Durchgang 2 und noch einmal
+ * in Durchgang 5.
+ */
+function mg_check_events($st, $nr = 1)
 {
     $cfg = mg_config();
     $p = mg_paths();
     if (!is_dir($p['tmp'])) {
         @mkdir($p['tmp'], 0775, true);
     }
-    $vorher = @json_decode((string) @file_get_contents($p['tmp'] . '/vorher.json'), true);
+    $vf = $p['tmp'] . '/vorher' . (int) $nr . '.json';
+    $vorher = mg_json_lesen($vf);
     $melden = '';
-    if (is_array($vorher)) {
-        if (!empty($cfg['notify']['soc_voll']) && $st['voll'] && empty($vorher['voll'])) {
-            $melden = 'Auto geladen: ' . round($st['soc']) . ' % erreicht.';
-        } elseif (!empty($cfg['notify']['stecker']) && $st['stecker'] === 1 && (int) $vorher['stecker'] === 0) {
-            $melden = 'Ladekabel wurde eingesteckt.';
-        } elseif (!empty($cfg['notify']['stecker']) && $st['stecker'] === 0 && (int) $vorher['stecker'] === 1) {
-            $melden = 'Ladekabel wurde abgezogen.';
-        } elseif (!empty($cfg['notify']['offen']) && $st['verschlossen'] === 0 && (int) $vorher['verschlossen'] === 1) {
-            $melden = 'Das Auto ist unverschlossen.';
+    $n = $cfg['notify'];
+    $fz = mg_fahrzeuge($cfg);
+    $wagen = isset($fz[(int) $nr]) ? $fz[(int) $nr]['name'] : ('MG ' . (int) $nr);
+
+    if ($vorher) {
+        $v = function ($k) use ($vorher) {
+            return isset($vorher[$k]) ? (int) $vorher[$k] : -1;
+        };
+        if (!empty($n['soc_voll']) && (int) $st['VOLL'] === 1 && $v('VOLL') === 0) {
+            $melden = $wagen . ': ' . mg_t('MELDUNG.GELADEN') . ' ' . round($st['SOC']) . ' %.';
+        } elseif (!empty($n['stecker']) && (int) $st['STECKER'] === 1 && $v('STECKER') === 0) {
+            $melden = $wagen . ': ' . mg_t('MELDUNG.KABEL_EIN');
+        } elseif (!empty($n['stecker']) && (int) $st['STECKER'] === 0 && $v('STECKER') === 1) {
+            $melden = $wagen . ': ' . mg_t('MELDUNG.KABEL_AB');
+        } elseif (!empty($n['offen']) && (int) $st['ZU'] === 0 && $v('ZU') === 1) {
+            $melden = $wagen . ': ' . mg_t('MELDUNG.UNVERSCHLOSSEN');
+        } elseif (!empty($n['fenster']) && (int) $st['FENSTEROFFEN'] > 0 && $v('FENSTEROFFEN') === 0) {
+            $melden = $wagen . ': ' . mg_t('MELDUNG.FENSTER_OFFEN');
+        } elseif (!empty($n['fehler']) && (int) $st['FEHLER'] === 1 && $v('FEHLER') === 0) {
+            $melden = $wagen . ': ' . mg_t('MELDUNG.BEFEHL_FEHLER');
         }
     }
-    mg_write_json($p['tmp'] . '/vorher.json', $st);
+    // Nur die Feldwerte merken - der Rest wechselt ohnehin bei jedem Lauf.
+    $merk = array();
+    foreach (mg_felder() as $name => $info) {
+        $merk[$name] = isset($st[$name]) ? $st[$name] : -1;
+    }
+    mg_write_json($vf, $merk);
     if ($melden !== '') {
-        mg_write_json($p['tmp'] . '/meldung.json', array('zeit' => date('c'), 'text' => $melden));
+        mg_write_json(mg_meldungsdatei($nr), array('zeit' => date('c'), 'text' => $melden));
         mg_log('Meldung: ' . $melden);
     }
-    return $melden;
+    return array($melden, $vorher);
+}
+
+/* ==================================================================
+ * Ladungen mitschreiben
+ *
+ * Aus drivetrain/charging/lastStart, .../lastEnd, soc_kwh und
+ * powerUsageSinceLastCharge laesst sich je Ladevorgang eine Zeile bilden.
+ * Wer einen Stromtarif rechnet, braucht kWh je Ladung, nicht Prozentpunkte.
+ * ================================================================== */
+
+function mg_ladungen_datei()
+{
+    return mg_paths()['data'] . '/ladungen.json';
+}
+
+function mg_ladungen_lesen($grenze = 200)
+{
+    $d = mg_json_lesen(mg_ladungen_datei());
+    $l = isset($d['liste']) && is_array($d['liste']) ? $d['liste'] : array();
+    return array_slice(array_reverse($l), 0, max(1, (int) $grenze));
+}
+
+/**
+ * Eine abgeschlossene Ladung erkennen und fortschreiben.
+ * Erkannt wird an der Flanke von LAEDT 1 -> 0.
+ */
+function mg_ladung_pruefen($st, $vorher, $nr = 1)
+{
+    $cfg = mg_config();
+    if (empty($cfg['ladungen_ein']) || !is_array($vorher)) {
+        return false;
+    }
+    $war = isset($vorher['LAEDT']) ? (int) $vorher['LAEDT'] : -1;
+    if ($war !== 1 || (int) $st['LAEDT'] === 1) {
+        return false;
+    }
+    $beginn = mg_num('drivetrain/charging/lastStart', -1, $nr);
+    $ende = mg_num('drivetrain/charging/lastEnd', -1, $nr);
+    $d = mg_json_lesen(mg_ladungen_datei());
+    $liste = isset($d['liste']) && is_array($d['liste']) ? $d['liste'] : array();
+    $kennung = (int) $nr . '-' . (int) $beginn;
+    foreach ($liste as $e) {
+        if (isset($e['id']) && $e['id'] === $kennung) {
+            return false;   // schon eingetragen
+        }
+    }
+    $eintrag = array(
+        'id' => $kennung,
+        'fz' => (int) $nr,
+        'beginn' => $beginn > 0 ? date('c', (int) $beginn) : '',
+        'ende' => $ende > 0 ? date('c', (int) $ende) : date('c'),
+        'dauer_min' => ($beginn > 0 && $ende > $beginn) ? (int) round(($ende - $beginn) / 60) : -1,
+        'soc_start' => isset($vorher['SOC']) ? (float) $vorher['SOC'] : -1,
+        'soc_ende' => isset($st['SOC']) ? (float) $st['SOC'] : -1,
+        'kwh' => mg_num('drivetrain/lastChargeEndingPower', -1, $nr),
+        'km' => isset($st['KM']) ? (float) $st['KM'] : -1,
+        'verbrauch' => isset($vorher['VERBRLADUNG']) ? (float) $vorher['VERBRLADUNG'] : -1,
+        'strecke' => isset($vorher['KMLADUNG']) ? (float) $vorher['KMLADUNG'] : -1,
+    );
+    $liste[] = $eintrag;
+    $liste = array_slice($liste, -max(10, (int) $cfg['ladungen_max']));
+    mg_write_json(mg_ladungen_datei(), array('liste' => $liste));
+    mg_log('Ladung eingetragen: Fahrzeug ' . (int) $nr . ', '
+        . ($eintrag['dauer_min'] >= 0 ? $eintrag['dauer_min'] . ' min' : 'Dauer unbekannt')
+        . ', SoC ' . $eintrag['soc_start'] . ' -> ' . $eintrag['soc_ende'] . ' %');
+    return true;
+}
+
+/* ==================================================================
+ * Fremde Themen: Vorklimatisierung und Ladeempfehlung
+ *
+ * Der Horcher fuehrt seine Themenliste an EINER Stelle. Fuehrte sie zweimal -
+ * einmal im Dienst, einmal in der Oberflaeche -, muesste eine Selbstpruefung
+ * beide vergleichen; ein Abo, das der Dienst nach einer Aenderung nicht
+ * nachgezogen hat, ist sonst unsichtbar.
+ * ================================================================== */
+
+function mg_horcher_themen($cfg = null)
+{
+    if ($cfg === null) {
+        $cfg = mg_config();
+    }
+    $t = array();
+    if (!empty($cfg['abfahrt_ein'])) {
+        $pfad = trim((string) $cfg['abfahrt_praefix'], '/ ');
+        if ($pfad !== '') {
+            $t[] = $pfad . '/ABFAHRT_IN';
+            $t[] = $pfad . '/OK';
+        }
+    }
+    if (!empty($cfg['ladeempf_ein'])) {
+        $th = trim((string) $cfg['ladeempf_thema']);
+        if ($th !== '') {
+            $t[] = $th;
+        }
+    }
+    sort($t);
+    return $t;
+}
+
+/** Die fremden Themen einlesen und ablegen. */
+function mg_horcher_lesen($sekunden = 2)
+{
+    $themen = mg_horcher_themen();
+    if (!$themen) {
+        return array();
+    }
+    list($werte, , ) = mg_sub($themen, $sekunden);
+    $p = mg_paths();
+    if (!is_dir($p['data'])) {
+        @mkdir($p['data'], 0775, true);
+    }
+    mg_write_json($p['data'] . '/fremd.json', array(
+        'zeit' => date('c'), 'werte' => $werte,
+    ));
+    return $werte;
+}
+
+function mg_horcher_zustand()
+{
+    $d = mg_json_lesen(mg_paths()['data'] . '/fremd.json');
+    return array(
+        'zeit' => isset($d['zeit']) ? (string) $d['zeit'] : '',
+        'werte' => isset($d['werte']) && is_array($d['werte']) ? $d['werte'] : array(),
+        'themen' => mg_horcher_themen(),
+    );
+}
+
+/**
+ * Die Automatiken auswerten. Rueckgabe: Liste der Meldungen.
+ *
+ * Beide Automatiken merken sich, was sie zuletzt getan haben - sonst senden
+ * sie bei jedem Cron-Lauf denselben Befehl, und jedes Senden weckt das Auto.
+ */
+function mg_automatik()
+{
+    $cfg = mg_config();
+    $meldungen = array();
+    if (empty($cfg['abfahrt_ein']) && empty($cfg['ladeempf_ein'])) {
+        return $meldungen;
+    }
+    $werte = mg_horcher_lesen(2);
+    $p = mg_paths();
+    $merk = mg_json_lesen($p['tmp'] . '/automatik.json');
+    $jetzt = time();
+
+    // --- Vorklimatisierung ---
+    if (!empty($cfg['abfahrt_ein'])) {
+        $pfad = trim((string) $cfg['abfahrt_praefix'], '/ ');
+        $in = isset($werte[$pfad . '/ABFAHRT_IN'])
+            ? (float) str_replace(',', '.', $werte[$pfad . '/ABFAHRT_IN']) : -1;
+        $ok = isset($werte[$pfad . '/OK']) ? mg_bool_wert($werte[$pfad . '/OK'], 0) : 0;
+        $vorlauf = max(1, (int) $cfg['abfahrt_vorlauf']);
+        $nr = max(1, (int) $cfg['abfahrt_fahrzeug']);
+        $zuletzt = isset($merk['abfahrt']) ? (int) $merk['abfahrt'] : 0;
+        if ($ok === 1 && $in >= 0 && $in <= $vorlauf
+            && $jetzt - $zuletzt > max(600, $vorlauf * 60)) {
+            mg_send('klimatemp', (string) (int) $cfg['abfahrt_temp'], $nr);
+            list($o2, $m2) = mg_send('klima_an', null, $nr);
+            $merk['abfahrt'] = $jetzt;
+            $meldungen[] = 'Vorklimatisierung (' . (int) $in . ' min bis Abfahrt): ' . $m2;
+            mg_log('Automatik Vorklimatisierung: Fahrzeug ' . $nr . ', ' . (int) $in
+                . ' min bis Abfahrt, Zieltemperatur ' . (int) $cfg['abfahrt_temp'] . ' Grad -> ' . $m2);
+        }
+    }
+
+    // --- Ladeempfehlung ---
+    if (!empty($cfg['ladeempf_ein'])) {
+        $th = trim((string) $cfg['ladeempf_thema']);
+        $nr = max(1, (int) $cfg['ladeempf_fahrzeug']);
+        if ($th !== '' && isset($werte[$th])
+            && is_numeric(str_replace(',', '.', $werte[$th]))) {
+            $wert = (float) str_replace(',', '.', $werte[$th]);
+            $grenze = (float) $cfg['ladeempf_grenze'];
+            $hoch = !empty($cfg['ladeempf_unter']) ? ($wert < $grenze) : ($wert > $grenze);
+            $soll = $hoch ? (string) $cfg['ladeempf_hoch'] : (string) $cfg['ladeempf_runter'];
+            $zuletzt = isset($merk['ladeempf']) ? (string) $merk['ladeempf'] : '';
+            if ($soll !== '' && $soll !== $zuletzt) {
+                list($o, $m) = mg_send($soll, null, $nr);
+                if ($o) {
+                    $merk['ladeempf'] = $soll;
+                    $meldungen[] = 'Ladeempfehlung: ' . $soll . ' (' . $wert . ') -> ' . $m;
+                    mg_log('Automatik Ladeempfehlung: ' . $th . ' = ' . $wert
+                        . ' -> ' . $soll . ' -> ' . $m);
+                }
+            }
+        }
+    }
+    if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
+    mg_write_json($p['tmp'] . '/automatik.json', $merk);
+    return $meldungen;
+}
+
+/* ==================================================================
+ * Eigene MQTT-Veroeffentlichung
+ *
+ * Die Hausregeln nennen MQTT den Regelweg. Ein Abo auf saic/# waere zwar
+ * moeglich, aber die Namen der virtuellen Eingaenge traegen dann den
+ * iSMART-Benutzernamen. Hier stehen die UMGESETZTEN Werte unter einem
+ * kurzen, lesbaren Praefix - erzeugt aus derselben Feldliste wie die
+ * Loxone-Zeile, damit die Tabelle im Reiter MQTT nicht davon abweichen kann.
+ * ================================================================== */
+
+function mg_mqtt_themen()
+{
+    $t = array();
+    foreach (mg_felder() as $name => $info) {
+        $t['<n>/' . $info['mqtt']] = $info['bez'];
+    }
+    foreach (array(
+        'name' => 'MQTT.NAME', 'vin' => 'MQTT.VIN',
+        'klima_text' => 'MQTT.KLIMA_TEXT', 'stromgrenze_text' => 'MQTT.GRENZE_TEXT',
+        'tueren_namen' => 'MQTT.TUEREN', 'fenster_namen' => 'MQTT.FENSTER',
+        'fehlertext' => 'MQTT.FEHLERTEXT', 'meldung' => 'MQTT.MELDUNG',
+        'ladeplan' => 'MQTT.LADEPLAN', 'heizplan' => 'MQTT.HEIZPLAN',
+        'abbruchgrund' => 'MQTT.ABBRUCH',
+        'fahrzeugmeldung' => 'MQTT.FAHRZEUGMELDUNG',
+    ) as $k => $b) {
+        $t['<n>/' . $k] = $b;
+    }
+    return $t;
+}
+
+function mg_mqtt_werte($nr, $st)
+{
+    $cfg = mg_config();
+    $fz = mg_fahrzeuge($cfg);
+    $paare = array();
+    foreach (mg_felder() as $name => $info) {
+        $v = isset($st[$name]) ? $st[$name] : -1;
+        $paare[$info['mqtt']] = $info['analog']
+            ? rtrim(rtrim(number_format((float) $v, 2, '.', ''), '0'), '.')
+            : (string) (int) $v;
+    }
+    $teile = function ($liste) {
+        $aus = array();
+        foreach ((array) $liste as $s) { $aus[] = mg_t($s); }
+        return implode(', ', $aus);
+    };
+    $paare['name'] = isset($fz[$nr]) ? $fz[$nr]['name'] : ('MG ' . (int) $nr);
+    $paare['vin'] = isset($fz[$nr]) ? $fz[$nr]['vin'] : '';
+    $paare['klima_text'] = isset($st['_klimatext']) ? (string) $st['_klimatext'] : '';
+    $paare['stromgrenze_text'] = isset($st['_grenze']) ? (string) $st['_grenze'] : '';
+    $paare['tueren_namen'] = isset($st['_tueren']) ? $teile($st['_tueren']) : '';
+    $paare['fenster_namen'] = isset($st['_fenster']) ? $teile($st['_fenster']) : '';
+    $paare['fehlertext'] = isset($st['_fehlertext']) ? mg_kuerzen($st['_fehlertext'], 200) : '';
+    $paare['meldung'] = mg_push_text($nr);
+    $paare['ladeplan'] = isset($st['_ladeplan']) ? mg_kuerzen($st['_ladeplan'], 200) : '';
+    $paare['heizplan'] = isset($st['_heizplan']) ? mg_kuerzen($st['_heizplan'], 200) : '';
+    $paare['abbruchgrund'] = isset($st['_abbruchgrund']) ? mg_kuerzen($st['_abbruchgrund'], 200) : '';
+    $paare['fahrzeugmeldung'] = isset($st['_fahrzeugmeldung'])
+        ? mg_kuerzen($st['_fahrzeugmeldung'], 200) : '';
+    return $paare;
+}
+
+/**
+ * Die Werte eines Fahrzeugs unter dem eigenen Praefix veroeffentlichen.
+ *
+ * mosquitto_pub kann mit -l zwar viele Nachrichten aus der Standardeingabe
+ * senden, aber nur an EIN festes Thema. Deshalb wird die Themenliste in eine
+ * Datei geschrieben und in EINER Shell-Schleife abgearbeitet - ein Prozess
+ * statt eines Aufrufs je Feld aus PHP heraus.
+ */
+function mg_mqtt_senden($nr, $st)
+{
+    $cfg = mg_config();
+    if (empty($cfg['mqtt_ein']) || !mg_has_mosquitto()) {
+        return 0;
+    }
+    $praefix = trim((string) $cfg['mqtt_praefix'], '/ ');
+    if ($praefix === '') {
+        return 0;
+    }
+    $basis = $praefix . '/' . (int) $nr . '/';
+    $paare = mg_mqtt_werte($nr, $st);
+    $zeilen = '';
+    foreach ($paare as $name => $wert) {
+        $zeilen .= $basis . $name . "\t"
+                 . str_replace(array("\r", "\n", "\t"), ' ', (string) $wert) . "\n";
+    }
+    $p = mg_paths();
+    if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
+    $tmp = $p['tmp'] . '/publish.' . getmypid() . '.txt';
+    if (!mg_write_atomic($tmp, $zeilen, 0600)) {
+        return 0;
+    }
+    $cmd = 'while IFS="\t" read -r t v; do ' . mg_broker_umgebung() . 'mosquitto_pub'
+         . mg_broker_args() . ' -r -t "$t" -m "$v" || exit 1; done < '
+         . escapeshellarg($tmp) . ' 2>&1';
+    $out = array();
+    @exec($cmd, $out, $rc);
+    @unlink($tmp);
+    if ($rc !== 0) {
+        mg_log_if_changed('mqtt', 'Veroeffentlichung fehlgeschlagen: '
+            . trim(implode(' ', array_slice($out, 0, 2))));
+        return 0;
+    }
+    mg_log_if_changed('mqtt', 'Veroeffentlichung laeuft (' . count($paare) . ' Themen je Fahrzeug)');
+    return count($paare);
+}
+
+/** Hausstandard: Gateway-Autostart aus general.json. */
+function mg_mqtt_gateway_autostart()
+{
+    $m = mg_mqtt_gateway_info();
+    return $m === null ? null : $m['autostart'];
+}
+
+/**
+ * Zustand und FASSUNG des LoxBerry-MQTT-Gateways.
+ *
+ * Die Fassung steht als Mqtt.Gatewayversion in general.json (ab Werk 1). Sie
+ * entscheidet, was der Anwender eintragen muss:
+ *   V1  Das Abo wird von Hand eingetragen - ohne den Eintrag kommt am
+ *       Miniserver nichts an. Das ist die haeufigste Fehlerursache ueberhaupt.
+ *   V2  Das Gateway erkennt die Themengruppe selbst; in den Subscriptions
+ *       werden nur noch die gewuenschten Datenpunkte angehakt.
+ * Bis 1.1.0 stand hier pauschal der V1-Satz. Wer V2 fahrt, sucht danach einen
+ * Eingabeplatz, den es nicht mehr gibt.
+ *
+ * Rueckgabe: null, wenn general.json nicht lesbar ist - sonst ein Feld mit
+ * autostart (bool) und fassung (int, 0 = unbekannt).
+ */
+function mg_mqtt_gateway_info()
+{
+    $p = mg_paths();
+    if ($p['lbhome'] === '') {
+        return null;
+    }
+    $d = mg_json_lesen($p['lbhome'] . '/config/system/general.json');
+    if (!isset($d['Mqtt']) || !is_array($d['Mqtt'])) {
+        return null;
+    }
+    $auto = isset($d['Mqtt']['Gatewayautostart']) ? $d['Mqtt']['Gatewayautostart'] : '';
+    $fassung = isset($d['Mqtt']['Gatewayversion']) ? (int) $d['Mqtt']['Gatewayversion'] : 0;
+    return array(
+        'autostart' => in_array((string) $auto, array('1', 'true'), true),
+        'fassung' => $fassung,
+    );
+}
+
+/* ==================================================================
+ * Selbstpruefung - beantwortet OHNE Loxone, ob die Einrichtung traegt
+ *
+ * ok = 1 Haken, 0 Kreuz, 2 Strich ("nicht feststellbar"). Ein Strich ist
+ * ausdruecklich KEIN Haken: was nicht gemessen werden konnte, sagt das.
+ * ================================================================== */
+
+function mg_selbsttest()
+{
+    $cfg = mg_config();
+    $z = array();
+    $add = function ($schluessel, $ok, $text) use (&$z) {
+        $z[] = array('bez' => $schluessel, 'ok' => (int) $ok, 'text' => (string) $text);
+    };
+
+    $add('PRUEF.MOSQUITTO', mg_has_mosquitto() ? 1 : 0,
+        mg_has_mosquitto() ? 'mosquitto_sub' : 'mosquitto-clients');
+    $add('PRUEF.MBSTRING', function_exists('mb_substr') ? 1 : 2,
+        function_exists('mb_substr') ? 'mbstring' : 'substr');
+
+    $anzahl = mg_fahrzeug_anzahl($cfg);
+    $add('PRUEF.FAHRZEUGE', $anzahl > 0 ? 1 : 0, (string) $anzahl);
+    $add('PRUEF.BENUTZER', trim((string) $cfg['saic_user']) !== '' ? 1 : 0,
+        trim((string) $cfg['saic_user']));
+
+    $roh = mg_raw();
+    $add('PRUEF.THEMEN', $roh['anzahl'] > 0 ? 1 : 0, (string) (int) $roh['anzahl']);
+    $alter = $roh['zeit'] !== '' ? (int) round((time() - strtotime($roh['zeit'])) / 60) : -1;
+    $add('PRUEF.MOMENTAUFNAHME', ($alter >= 0 && $alter <= 5) ? 1 : ($alter < 0 ? 0 : 2),
+        $alter >= 0 ? ($alter . ' min') : '');
+
+    // Trifft der eingetragene Basispfad wirklich etwas?
+    $treffer = 0;
+    foreach (mg_fahrzeuge($cfg) as $nr => $f) {
+        if (mg_themen_anzahl($nr) > 0) { $treffer++; }
+    }
+    $add('PRUEF.BASISPFAD', ($anzahl > 0 && $treffer === $anzahl) ? 1 : ($treffer > 0 ? 2 : 0),
+        $treffer . '/' . $anzahl);
+
+    $prefix = trim((string) $cfg['prefix']) !== '' ? trim((string) $cfg['prefix']) : 'saic';
+    $lwt = mg_bool_wert(mg_pick_abs($prefix . '/_internal/lwt'), -1);
+    $add('PRUEF.GATEWAY', $lwt === 1 ? 1 : ($lwt === 0 ? 0 : 2),
+        $lwt === 1 ? 'online' : ($lwt === 0 ? 'offline' : ''));
+
+    $erreicht = 0;
+    foreach (mg_fahrzeuge($cfg) as $nr => $f) {
+        if (mg_bool('available', -1, $nr) === 1) { $erreicht++; }
+    }
+    $add('PRUEF.ERREICHBAR', ($anzahl > 0 && $erreicht === $anzahl) ? 1 : ($erreicht > 0 ? 2 : 0),
+        $erreicht . '/' . $anzahl);
+
+    $auto = mg_mqtt_gateway_autostart();
+    $add('PRUEF.AUTOSTART', $auto === true ? 1 : ($auto === false ? 0 : 2), '');
+    $add('PRUEF.MERKWORT', trim((string) $cfg['aktionstoken']) !== '' ? 1 : 0, '');
+
+    // Ein Zustand fuer die beiden folgenden Proben - einmal gebildet.
+    $probe_st = mg_state(1);
+
+    // Die eigene Vorlage: wohlgeformt?
+    if (function_exists('simplexml_load_string')) {
+        list(, $inhalt) = mg_vorlage(1, 'mg');
+        $add('PRUEF.VORLAGE', (@simplexml_load_string($inhalt) === false) ? 0 : 1, '');
+    } else {
+        $add('PRUEF.VORLAGE', 2, '');
+    }
+
+    /* Trifft jede Befehlserkennung genau eine Stelle?
+     *
+     * Geprueft wird die WIRKUNG, nicht die Schreibweise: der Suchtext aus
+     * mg_check() wird auf die ECHTE Antwortzeile losgelassen. Ein Vergleich
+     * der blossen Namen waere zu streng - FZALTER endet zwar auf ALTER, aber
+     * ";ALTER=" kommt in ";FZALTER=" nicht vor, und genau dafuer traegt der
+     * Suchtext das Semikolon. Eine Pruefzeile, die ohne Fehler rot wird, ist
+     * schlimmer als keine. */
+    $eindeutig = 1;
+    $doppelt = '';
+    foreach (mg_zeilen() as $zk => $zi) {
+        $zeile = mg_line($zk, 1, $probe_st);
+        foreach (array_keys(mg_felder_von($zk)) as $feld) {
+            $treffer = substr_count($zeile, ';' . $feld . '=');
+            if ($treffer !== 1) {
+                $eindeutig = 0;
+                $doppelt = $zi['kopf'] . ': ' . $feld . ' = ' . $treffer . 'x';
+            }
+        }
+    }
+    $add('PRUEF.EINDEUTIG', $eindeutig, $doppelt);
+    $add('PRUEF.REITER', mg_reiter_stimmig(), '');
+    list($sa_ok, $sa_txt) = mg_smactive_probe();
+    $add('PRUEF.SMACTIVE', $sa_ok, $sa_txt);
+    list($fo_ok, $fo_txt) = mg_formularprobe();
+    $add('PRUEF.FORMULAR', $fo_ok, $fo_txt);
+
+    if (!empty($cfg['abfahrt_ein']) || !empty($cfg['ladeempf_ein'])) {
+        $h = mg_horcher_zustand();
+        $gefunden = 0;
+        foreach ($h['themen'] as $t) {
+            if (isset($h['werte'][$t])) { $gefunden++; }
+        }
+        $add('PRUEF.HORCHER',
+            ($h['themen'] && $gefunden === count($h['themen'])) ? 1 : ($gefunden ? 2 : 0),
+            $gefunden . '/' . count($h['themen']));
+    }
+    return $z;
+}
+
+/**
+ * Reiterleiste, Bereiche und Positivliste der index.php gegeneinander zaehlen.
+ *
+ * Alle drei Stellen stehen in der index.php ausgeschrieben - das muessen sie,
+ * weil hausstandard_pruefen.py sie als Literal sucht und eine erzeugte Leiste
+ * als "trifft nicht zu" meldet. Ausgeschrieben koennen sie aber auseinander
+ * laufen; genau dafuer gibt es diese Zeile.
+ */
+function mg_reiter_stimmig()
+{
+    $datei = dirname(__DIR__) . '/htmlauth/index.php';
+    if (!is_file($datei)) {
+        return 2;
+    }
+    $q = (string) @file_get_contents($datei);
+    if (!preg_match('/\$mg_reiter\s*=\s*array\((.*?)\);/s', $q, $t)) {
+        return 0;
+    }
+    preg_match_all("/'tab-([a-z]+)'/", $t[1], $n);
+    $liste = $n[1];
+    preg_match_all('/data-ziel="tab-([a-z]+)"/', $q, $l);
+    $leiste = $l[1];
+    preg_match_all('/id="tab-([a-z]+)"/', $q, $b);
+    $bereiche = $b[1];
+    if (!$liste || !$leiste || !$bereiche) {
+        return 0;
+    }
+    sort($liste);
+    sort($leiste);
+    sort($bereiche);
+    return ($liste === $leiste && $liste === $bereiche) ? 1 : 0;
+}
+
+/**
+ * Setzt der SERVER das sm-active - an der Leiste UND an den Bereichen?
+ *
+ * .sm-seite steht auf display:none. Vergibt die Klasse allein das
+ * JavaScript, ist die Seite ohne Skript vollstaendig leer - genau das war
+ * bis 1.0.2 der Fall. Und hausstandard_pruefen.py kann es nicht sehen: eine
+ * zusammengesetzte Klasse meldet es als "nicht pruefbar", und ein
+ * "nicht pruefbar" liest sich beim Ueberfliegen wie ein Haken.
+ */
+function mg_smactive_probe()
+{
+    $datei = dirname(__DIR__) . '/htmlauth/index.php';
+    if (!is_file($datei)) {
+        return array(2, '');
+    }
+    $s = (string) @file_get_contents($datei);
+    $anzahl = preg_match_all('/data-ziel="tab-([a-z]+)"/', $s, $y);
+    $leiste = preg_match_all('/class="sm-tab<\?=[^>]*sm-active/', $s);
+    $bereiche = preg_match_all('/class="sm-seite<\?=[^>]*sm-active/', $s);
+    if ($anzahl > 0 && $leiste >= $anzahl && $bereiche >= $anzahl) {
+        return array(1, $anzahl . '/' . $anzahl);
+    }
+    return array(0, $leiste . ' / ' . $bereiche . ' ' . mg_t('WORT.VON') . ' ' . $anzahl);
+}
+
+/**
+ * Traegt JEDES Formular das Merkmal gegen fremde Absender?
+ *
+ * Der Wachposten am Eingang nuetzt nichts, wenn ein Formular das Merkmal
+ * nicht mitschickt - dann tut es einfach nichts mehr, und der Anwender sucht
+ * den Fehler bei sich. Die leere Menge zuerst: "alle 0 von 0 in Ordnung" ist
+ * kein Haken.
+ */
+function mg_formularprobe()
+{
+    $datei = dirname(__DIR__) . '/htmlauth/index.php';
+    if (!is_file($datei)) {
+        return array(2, '');
+    }
+    $s = (string) @file_get_contents($datei);
+    $gesamt = 0;
+    $ohne = 0;
+    if (preg_match_all('/<form\s/', $s, $y, PREG_OFFSET_CAPTURE)) {
+        foreach ($y[0] as $f) {
+            $gesamt++;
+            $ende = strpos($s, '</form>', $f[1]);
+            $blk = substr($s, $f[1], ($ende === false ? 400 : $ende - $f[1]));
+            if (strpos($blk, 'name="fmt"') === false) { $ohne++; }
+        }
+    }
+    if ($gesamt === 0) {
+        return array(0, '0/0');
+    }
+    return array($ohne > 0 ? 0 : 1, ($gesamt - $ohne) . '/' . $gesamt);
 }
 
 /* ==================================================================
  * Sprache (Pflicht: Deutsch und Englisch)
  *
  * Englisch ist die Rueckfallebene, nicht Deutsch: wer eine dritte Sprache
- * eingestellt hat, versteht eher Englisch. Deshalb muss language_en.ini
- * immer vollstaendig sein.
+ * eingestellt hat, versteht eher Englisch.
  * ================================================================== */
 
 function mg_sprache()
@@ -733,24 +2411,14 @@ function mg_sprache()
     return in_array($sprache, array('de', 'en'), true) ? $sprache : 'en';
 }
 
-/**
- * Text zu einem Schluessel "ABSCHNITT.SCHLUESSEL".
- *
- * Ist der Schluessel unbekannt, wird er selbst zurueckgegeben - so faellt
- * beim Durchsehen sofort auf, was noch fehlt, statt dass die Seite leer
- * bleibt.
- */
 function mg_t($schluessel)
 {
     static $texte = null;
     if ($texte === null) {
-        // Installiert liegen die Dateien unter
-        // <home>/templates/plugins/<ordner>/lang/ - der Ordnername ergibt
-        // sich aus dem Ablageort dieser Datei.
         $home = getenv('LBHOMEDIR');
         if (!$home || !is_dir($home)) {
             foreach (array(lb_wurzel_ermitteln(), '/home/loxberry/loxberry') as $k) {
-                if (is_dir($k)) { $home = $k; break; }
+                if ($k && is_dir($k)) { $home = $k; break; }
             }
         }
         $ordner = basename(dirname(__FILE__));
@@ -764,9 +2432,6 @@ function mg_t($schluessel)
         if (!is_array($texte)) { $texte = array(); }
         $rueck = @parse_ini_file($pfad . '/language_en.ini', true, INI_SCANNER_RAW);
         if (is_array($rueck)) { $texte = array_replace_recursive($rueck, $texte); }
-        // parse_ini_file mit INI_SCANNER_RAW liefert die Werte samt der
-        // Anfuehrungszeichen zurueck, in die sie in der Datei stehen muessen.
-        // Die gehoeren nicht in die Ausgabe.
         foreach ($texte as $ab => $paare) {
             if (!is_array($paare)) { continue; }
             foreach ($paare as $s => $w) {
@@ -778,37 +2443,21 @@ function mg_t($schluessel)
     return isset($texte[$a][$s]) ? $texte[$a][$s] : $schluessel;
 }
 
-/* ---------------- Loxone-Vorlage (Hausstandard "Alles auf einmal anlegen") ---------------- */
-/** name => array(analog, min, max, einheit, kommentar) */
-function mg_felder() {
-    return array(
-        'OK'         => array(0, 0, 1,     '',     '1 = Fahrzeugdaten gueltig'),
-        'SOC'        => array(1, 0, 100,   '%',    'Ladezustand'),
-        'SOCKWH'     => array(1, 0, 100,   'kWh',  'Energie in der Batterie'),
-        'ZIEL'       => array(1, 0, 100,   '%',    'Ladeziel'),
-        'REICHWEITE' => array(1, 0, 1000,  'km',   'Reichweite'),
-        'LAEDT'      => array(0, 0, 1,     '',     '1 = laedt gerade'),
-        'STECKER'    => array(0, 0, 1,     '',     '1 = Stecker angeschlossen'),
-        'LEISTUNG'   => array(1, 0, 100,   'kW',   'Ladeleistung'),
-        'RESTZEIT'   => array(1, 0, 3000,  'min',  'Restladezeit'),
-        'KM'         => array(1, 0, 1000000,'km',  'Kilometerstand'),
-        'BATT12V'    => array(1, 0, 20,    'V',    '12-V-Batterie'),
-        'ZU'         => array(0, 0, 1,     '',     '1 = verschlossen'),
-        'KOFFER'     => array(0, 0, 1,     '',     '1 = Kofferraum offen'),
-        'INNEN'      => array(1, -40, 80,  'GradC','Innentemperatur'),
-        'AUSSEN'     => array(1, -40, 80,  'GradC','Aussentemperatur'),
-        'VOLL'       => array(0, 0, 1,     '',     '1 = Ladeziel erreicht'),
-        'ALTER'      => array(1, 0, 100000,'min',  'Alter der Daten'),
-        'THEMEN'     => array(1, 0, 1000,  '',     'Anzahl MQTT-Themen (Diagnose)'),
-        'PUSH'       => array(0, 0, 1,     '',     'Push freigegeben'),
-        'PUSHAKTIV'  => array(0, 0, 1,     '',     'Push-Fenster aktiv'),
-        'PTEST'      => array(0, 0, 1,     '',     'Test-Push ausloesen'),
-    );
+/* ==================================================================
+ * Loxone-Vorlagen
+ *
+ * Gepruefter PHP-Nachbau des LoxoneTemplateBuilder - Attributreihenfolge,
+ * CRLF und der Tabulator vor den Kindelementen entsprechen dem Original.
+ * templateType: 1 = UDP-Eingang, 2 = HTTP-Eingang, 3 = Ausgang.
+ * ================================================================== */
+
+function mg_vx($s)
+{
+    return htmlspecialchars((string) $s, ENT_QUOTES | ENT_XML1, 'UTF-8');
 }
-/** Gepruefter PHP-Nachbau des LoxoneTemplateBuilder - Attributreihenfolge,
- *  CRLF und der Tabulator vor den Kindelementen entsprechen dem Original.
- *  Uebernommen aus LoxBerry-Plugin-APC-UPS, nur das Kuerzel getauscht. */
-function mg_xml_virtual_in_http($kopf, $cmds) {
+
+function mg_xml_virtual_in_http($kopf, $cmds)
+{
     $crlf = "\r\n";
     $o = '<?xml version="1.0" encoding="utf-8"?>' . $crlf;
     $o .= '<VirtualInHttp HintText="" ';
@@ -817,7 +2466,7 @@ function mg_xml_virtual_in_http($kopf, $cmds) {
     $o .= 'Address="' . mg_vx(isset($kopf['address']) ? $kopf['address'] : '') . '" ';
     $o .= 'PollingTime="' . mg_vx(isset($kopf['polling']) ? $kopf['polling'] : '300') . '"';
     $o .= '>' . $crlf;
-    $o .= "\t" . '<Info templateType="2" minVersion="17010727"/>' . $crlf; // wie Original-Export aus Loxone Config 17.1
+    $o .= "\t" . '<Info templateType="2" minVersion="17010727"/>' . $crlf;
     foreach ($cmds as $c) {
         $o .= "\t" . '<VirtualInHttpCmd ';
         $o .= 'Title="' . mg_vx($c['title']) . '" ';
@@ -836,43 +2485,200 @@ function mg_xml_virtual_in_http($kopf, $cmds) {
     return $o;
 }
 
-function mg_vx($s) {
-    return htmlspecialchars((string) $s, ENT_QUOTES | ENT_XML1, 'UTF-8');
+/**
+ * Ausgangsvorlage.
+ *
+ * Ein analoger VirtualOutCmd traegt vier Attribute mehr als ein digitaler:
+ * SourceValLow, DestValLow, SourceValHigh, DestValHigh zwischen RepeatRate
+ * und HintText. CmdOnMethod="GET" steht auch an einem Ausgang mit
+ * Geraetepfad - das ist an einer echten Ausfuhr gemessen.
+ */
+function mg_xml_virtual_out($kopf, $cmds)
+{
+    $crlf = "\r\n";
+    $o = '<?xml version="1.0" encoding="utf-8"?>' . $crlf;
+    $o .= '<VirtualOut HintText="" ';
+    $o .= 'Title="' . mg_vx($kopf['title']) . '" ';
+    $o .= 'Comment="' . mg_vx(isset($kopf['comment']) ? $kopf['comment'] : '') . '" ';
+    $o .= 'Address="' . mg_vx(isset($kopf['address']) ? $kopf['address'] : '') . '" ';
+    $o .= 'CmdInit="" ';
+    $o .= 'CloseAfterSend="false" ';
+    $o .= 'CmdSep=""';
+    $o .= '>' . $crlf;
+    $o .= "\t" . '<Info templateType="3" minVersion="17010727"/>' . $crlf;
+    foreach ($cmds as $c) {
+        $analog = !empty($c['analog']);
+        $o .= "\t" . '<VirtualOutCmd ';
+        $o .= 'Title="' . mg_vx($c['title']) . '" ';
+        $o .= 'Comment="' . mg_vx(isset($c['comment']) ? $c['comment'] : '') . '" ';
+        $o .= 'CmdOnMethod="GET" ';
+        $o .= 'CmdOffMethod="GET" ';
+        $o .= 'CmdOn="' . mg_vx($c['on']) . '" ';
+        $o .= 'CmdOnHTTP="" CmdOnPost="" ';
+        $o .= 'CmdOff="' . mg_vx(isset($c['off']) ? $c['off'] : '') . '" ';
+        $o .= 'CmdOffHTTP="" CmdOffPost="" ';
+        $o .= 'CmdAnswer="" ';
+        $o .= 'Analog="' . ($analog ? 'true' : 'false') . '" ';
+        $o .= 'Repeat="0" RepeatRate="0" ';
+        if ($analog) {
+            $o .= 'SourceValLow="0" DestValLow="0" SourceValHigh="1" DestValHigh="1" ';
+        }
+        $o .= 'HintText=""';
+        $o .= '/>' . $crlf;
+    }
+    $o .= '</VirtualOut>' . $crlf;
+    return $o;
 }
 
-/** Hausstandard: Gateway-Autostart aus general.json (PLUGIN_HAUSREGELN Abschnitt 3). */
-function mg_mqtt_gateway_autostart() {
-    $home = getenv('LBHOMEDIR') ?: '/opt/loxberry';
-    $gj = $home . '/config/system/general.json';
-    if (!is_file($gj)) { return null; }
-    $d = json_decode((string) @file_get_contents($gj), true);
-    if (!is_array($d) || !isset($d['Mqtt'])) { return null; }
-    return !empty($d['Mqtt']['Gatewayautostart']);
+/** Der Rechnername, unter dem der Miniserver den LoxBerry erreicht. */
+function mg_host()
+{
+    if (isset($_SERVER['HTTP_HOST']) && is_string($_SERVER['HTTP_HOST'])
+        && $_SERVER['HTTP_HOST'] !== '') {
+        return preg_replace('/[^A-Za-z0-9\.\-:]/', '', (string) $_SERVER['HTTP_HOST']);
+    }
+    return gethostname() ?: 'loxberry';
+}
+
+/**
+ * Die Adresse des Endpunkts - an EINER Stelle gebildet.
+ *
+ * Bis 1.0.8 setzten die Oberflaeche und mg_vorlage() sie unabhaengig
+ * voneinander zusammen, mit verschiedenen Rueckfallebenen fuer den
+ * Ordnernamen; die Baustein-Liste zeigte eine dritte, abgeschnittene Form.
+ * Zwei Stellen, die dasselbe zusammensetzen, laufen auseinander.
+ */
+function mg_endpunkt($absolut = true, $parameter = '')
+{
+    $p = mg_paths();
+    $pfad = '/plugins/' . $p['plugin'] . '/mg.php';
+    if ($parameter !== '') {
+        $pfad .= '?' . ltrim($parameter, '?');
+    }
+    return $absolut ? ('http://' . mg_host() . $pfad) : $pfad;
+}
+
+/** Adresse eines schaltenden Aufrufs, samt Merkwort. */
+function mg_aktionsadresse($befehl, $nr = 1, $zusatz = '', $absolut = false)
+{
+    $cfg = mg_config();
+    $q = 'cmd=' . rawurlencode($befehl);
+    if ($zusatz !== '') {
+        $q .= '&' . $zusatz;
+    }
+    if ((int) $nr > 1) {
+        $q .= '&fahrzeug=' . (int) $nr;
+    }
+    $q .= '&token=' . rawurlencode((string) $cfg['aktionstoken']);
+    return mg_endpunkt($absolut, $q);
 }
 
 /** Vorlage fuer den Import in Loxone Config. Rueckgabe: array(name, inhalt) */
-function mg_vorlage() {
-    $host = isset($_SERVER['HTTP_HOST']) && $_SERVER['HTTP_HOST'] !== ''
-        ? preg_replace('/[^A-Za-z0-9\.\-:]/', '', (string) $_SERVER['HTTP_HOST'])
-        : (gethostname() ?: 'loxberry');
-    $ordner = getenv('LBPPLUGINDIR') ?: 'mgismart';
+function mg_vorlage($nr = 1, $zeile = 'mg')
+{
+    $zn = mg_zeilen();
+    if (!isset($zn[$zeile])) {
+        $zeile = 'mg';
+    }
+    $cfg = mg_config();
+    $fz = mg_fahrzeuge($cfg);
+    $name = isset($fz[$nr]) ? $fz[$nr]['name'] : ('MG ' . (int) $nr);
+    /* Fahrzeug 1 behaelt die Titel aus 1.0.8 (MG_SOC), damit eine bestehende
+     * Anlage nach dem erneuten Import nicht zwei Namensfamilien fuehrt. */
+    $praefix = ((int) $nr > 1) ? ('MG' . (int) $nr . '_') : 'MG_';
+    $q = 'zeile=' . $zeile;
+    if ((int) $nr > 1) {
+        $q .= '&fahrzeug=' . (int) $nr;
+    }
     $cmds = array();
-    foreach (mg_felder() as $name => $f) {
-        list($analog, $min, $max, $einheit, $text) = $f;
+    foreach (mg_felder_von($zeile) as $feld => $info) {
+        $einheit = $info['einheit'];
         $cmds[] = array(
-            'title' => 'MG_' . $name,
-            'comment' => $text . ($einheit !== '' ? ' [' . $einheit . ']' : ''),
-            'check' => '\i' . $name . '=\i\v',
+            'title' => $praefix . $feld,
+            'comment' => mg_t($info['bez']) . ($einheit !== '' ? ' [' . $einheit . ']' : ''),
+            'check' => mg_check($feld),
             'unit' => ($einheit !== '' ? '<v.1> ' . $einheit : '<v.1>'),
-            'analog' => $analog, 'min' => $min, 'max' => $max,
+            'analog' => $info['analog'], 'min' => $info['min'], 'max' => $info['max'],
         );
     }
-    return array('VI_mgismart.xml', mg_xml_virtual_in_http(array(
-        'title' => 'MG iSmart',
-        'address' => 'http://' . $host . '/plugins/' . $ordner . '/mg.php',
-        'polling' => '300',
-        'comment' => 'Erzeugt vom LoxBerry-Plugin MG iSmart (' . date('d.m.Y') . '). '
-                   . 'Loxone Config legt beim Import neu an und ueberschreibt nichts - '
-                   . 'zweimal eingelesen ergibt doppelte Bausteine.',
+    $dateiname = 'VI_mgismart_' . $zeile . ((int) $nr > 1 ? '_' . (int) $nr : '') . '.xml';
+    return array($dateiname, mg_xml_virtual_in_http(array(
+        'title' => $name . ' (' . mg_t($zn[$zeile]['bez']) . ')',
+        'address' => mg_endpunkt(true, $q),
+        'polling' => (string) $zn[$zeile]['takt'],
+        'comment' => mg_t('VORLAGE.KOPF') . ' ' . date('d.m.Y') . '. ' . mg_t('VORLAGE.HINWEIS'),
+    ), $cmds));
+}
+
+/**
+ * Vorlage der Steuerbefehle (VirtualOut).
+ *
+ * Ein Zustand gehoert an EINEN Ausgang mit Ein- und Ausbefehl, nicht an zwei
+ * Ausgaenge - "Klima ein/aus" ist genau so ein Fall. Befehle mit Zusatzwert
+ * werden analog und tragen <v> als Platzhalter.
+ */
+function mg_vorlage_vo($nr = 1)
+{
+    $cfg = mg_config();
+    $fz = mg_fahrzeuge($cfg);
+    $name = isset($fz[$nr]) ? $fz[$nr]['name'] : ('MG ' . (int) $nr);
+    $liste = mg_befehle();
+    /* Wer als Gegenstueck eines anderen gefuehrt wird, bekommt keinen eigenen
+     * Ausgang - er steht dort als Ausbefehl. */
+    $gegenstuecke = array();
+    foreach ($liste as $k => $b) {
+        if (!empty($b['gegen'])) {
+            $gegenstuecke[$b['gegen']] = $k;
+        }
+    }
+    $cmds = array();
+    foreach ($liste as $k => $b) {
+        if (isset($gegenstuecke[$k])) {
+            continue;
+        }
+        if (!empty($b['gefahr']) && empty($cfg['gefahr_ein'])) {
+            continue;
+        }
+        if (!empty($b['plan']) && empty($cfg['plan_ein'])) {
+            continue;
+        }
+        /* Die FREIE Form des Plans braucht zwei Uhrzeiten und einen Modus -
+         * das kann ein virtueller Ausgang nicht liefern, weder digital noch
+         * analog. In der Vorlage stehen deshalb nur die beiden Schalter, die
+         * das eingestellte Fenster ein- und ausschalten. */
+        if (isset($b['nutzlast'])
+            && in_array($b['nutzlast'], array('ladeplan', 'heizplan'), true)) {
+            continue;
+        }
+        $titel = (((int) $nr > 1) ? ('MG' . (int) $nr . ' ') : 'MG ') . mg_t($b['bez']);
+        if (!empty($b['textwert'])) {
+            foreach ($b['werte'] as $wert) {
+                $cmds[] = array(
+                    'title' => $titel . ' - ' . $wert,
+                    'comment' => $b['topic'] . ' = ' . $wert,
+                    'on' => mg_aktionsadresse($k, $nr, $b['zusatz'] . '=' . $wert, false),
+                    'off' => '', 'analog' => false,
+                );
+            }
+            continue;
+        }
+        $analog = !empty($b['zusatz']);
+        $zusatz = $analog ? ($b['zusatz'] . '=<v>') : '';
+        $ein = mg_aktionsadresse($k, $nr, $zusatz, false);
+        $aus = '';
+        if (!empty($b['gegen']) && isset($liste[$b['gegen']])) {
+            $aus = mg_aktionsadresse($b['gegen'], $nr, '', false);
+        }
+        $cmds[] = array(
+            'title' => $titel,
+            'comment' => $b['topic'],
+            'on' => $ein, 'off' => $aus, 'analog' => $analog,
+        );
+    }
+    $dateiname = 'VQ_mgismart' . ((int) $nr > 1 ? '_' . (int) $nr : '') . '.xml';
+    return array($dateiname, mg_xml_virtual_out(array(
+        'title' => $name . ' (' . mg_t('VORLAGE.BEFEHLE') . ')',
+        'address' => 'http://' . mg_host(),
+        'comment' => mg_t('VORLAGE.KOPF') . ' ' . date('d.m.Y') . '. ' . mg_t('VORLAGE.HINWEIS'),
     ), $cmds));
 }

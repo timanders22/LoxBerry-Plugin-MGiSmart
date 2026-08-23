@@ -1,167 +1,263 @@
 # LoxBerry-Plugin: MG iSmart
 
-Bringt die Daten eines **MG-Elektrofahrzeugs** (iSMART / SAIC) nach Loxone —
-Ladestand, Reichweite, Ladeleistung, Türen, Klima, Standort — und schickt
-Befehle zurück: Laden stoppen, Ziel-Ladestand, Ladestrombegrenzung, Standklima,
-„Auto finden".
+Version 1.1.0
+
+Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
+nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
+Klima, Standort — und schickt Befehle zurück: Laden stoppen, Ziel-Ladestand,
+Ladestrombegrenzung, Standklima, „Auto finden".
 
 Kompatibel mit LoxBerry 3.x und **LoxBerry 4** (reines PHP, PHP 7.4 und 8.x).
 
-## Was 1.0.3 behebt
+## Was 1.1.0 bringt
 
-Sechs Befunde. Jeder vor der Korrektur nachgemessen — auch die, die sich dabei
-als etwas anderes herausgestellt haben als gemeldet.
+### Vier Werte, die bisher still falsch waren
 
-**1. Das Broker-Passwort stand in der Prozessliste.**
-`mosquitto_sub` und `mosquitto_pub` bekamen es als `-P <passwort>` auf der
-Kommandozeile. `/proc/<pid>/cmdline` hat die Rechte **444** — jeder lokale
-Benutzer liest dort mit. Und das ist kein Augenblick: Der minütliche Cron lässt
-`mosquitto_sub -W 3` laufen, das Passwort steht also dauerhaft rund **5 % der
-Zeit** offen im System.
-*Jetzt*: Benutzer und Passwort stehen in der Optionsdatei, die
-`mosquitto_sub`/`_pub` laut ihrer Anleitung aus `$XDG_CONFIG_HOME` lesen —
-Rechte 0600 im Ordner 0700. Auf der Kommandozeile steht nur noch der Pfad.
+**1. Die Restladezeit war um den Faktor 60 zu groß.**
+Das Gateway veröffentlicht `drivetrain/remainingChargingTime` mit
+`transform=lambda x: x * 60` — der Rohwert des Autos ist in Minuten,
+veröffentlicht wird in **Sekunden**. Das Plugin reichte ihn unverändert als
+`RESTZEIT` mit der Einheit „min" nach Loxone weiter. Neunzig Minuten
+Restladezeit erschienen dort als `5400 min`, also dreieinhalb Tage — und
+zugleich über dem eigenen `MaxVal` von 3000. Kein Wert fehlte, nichts stand
+auf `–`.
 
-**2. Keine Befehlseinschleusung — aber `escapeshellarg()` verstümmelt.**
-Als „RCE / Command Injection" gemeldet. In **zehn** Versuchen mit `;`, `$( )`,
-Backticks, Zeilenumbruch, einfachen Anführungszeichen und ungültigem UTF-8,
-gegen PHP 7.4 **und** 8.1 und zwei Locales, wurde **nichts** ausgeführt.
-`escapeshellarg` verwirft solche Bytes, statt sie durchzulassen — das
-Anführungszeichen lässt sich damit nicht schließen.
+**2. `ALTER` maß den Broker, nicht das Auto.**
+Die Werte des Gateways liegen **retained** auf dem Broker: Sie bleiben dort
+stehen, auch wenn der Container tot ist oder das Auto seit einer Woche nicht
+geantwortet hat. Da der Cron jede Minute neu einliest, stand `ALTER` praktisch
+immer auf 0 — und der Schwellwertschalter „Daten veraltet", den die eigene
+Anleitung vorschlug, konnte nie anschlagen.
+*Jetzt* gibt es drei Felder, die die Frage wirklich beantworten:
+`ERREICHBAR` (aus `available`), `GATEWAY` (aus dem letzten Willen des
+Containers) und `FZALTER` (Minuten seit der letzten echten Statusabfrage).
+`OK` steht außerdem nur noch auf 1, wenn das Gateway das Fahrzeug auch
+erreicht hat.
 
-Die Sorge dahinter war aber berechtigt, nur mit anderer Folge. Gemessen:
+**3. Der Energieinhalt wurde gerechnet, obwohl das Auto ihn liefert.**
+Gesucht wurde `drivetrain/socKwh`; das Gateway veröffentlicht
+`drivetrain/soc_kwh`, mit Unterstrich. Der Kandidat traf also nie. Dasselbe
+galt für die Kapazität: `drivetrain/totalBatteryCapacity` gibt es, das Plugin
+rechnete mit dem Handeintrag. Neun weitere Kandidatennamen
+(`battery/soc`, `drivetrain/targetSoc`, `chargingState`, `chargingConnected`,
+`chargingPower`, `chargingTimeRemaining`, `odometer`, `batteryVoltage`,
+`rangeElectric`) kommen im Gateway überhaupt nicht vor — sie täuschten
+Robustheit vor und sind entfernt.
 
-| Eingabe | Bytes im Argument |
-|---|---|
-| `ff fe` | **0** (jede Locale, beide PHP-Fassungen) |
-| `c3 28` | 1 von 2 |
-| „ü" (`c3 bc`) unter **PHP 7.4** mit `LC_ALL=C` | **0** von 2 |
+**4. Die Loxone-Vorlage konnte „nicht bekannt" nicht transportieren.**
+Zehn Felder senden `-1`, wenn ein Wert fehlt, aber die Vorlage setzte
+`MinVal="0"` und damit `Signed="false"`. Loxone zeigte dann **0** — bei `ZU`
+heißt 0 „unverschlossen", also das Gegenteil von „unbekannt". Bei
+`INNEN`/`AUSSEN` lag der Fehlwert `-99` unterhalb der eigenen Untergrenze.
+Und die Oberfläche riet gleichzeitig, „auf größer 0 zu prüfen" — mit der
+mitgelieferten Vorlage war genau das nicht möglich.
 
-Der letzte Fall ist der böse: Apache läuft meist unter einer UTF-8-Locale, der
-Cron unter `C`. Ein Passwort mit Umlaut hätte im Reiter *Test* funktioniert und
-wäre im minütlichen Lauf still gescheitert — unter PHP 7.4, also auf jedem
-heutigen LoxBerry. Dazu: ein NULL-Byte im Passwort ließ `escapeshellarg`
-abbrechen (PHP 8: ungefangene `ValueError`), ein sehr langes Passwort sprengte
-die Argumentliste (`exec(): Unable to fork`).
-Alle vier Folgen verschwinden mit derselben Korrektur wie Befund 1.
+### Fünf Dinge, die nicht taten, was sie sollten
 
-**3. Nicht atomar geschriebene Zwischenspeicher.**
-`file_put_contents()` kürzt die Datei zuerst auf null. Ein Testlauf mit
-gleichzeitigem Lesen und Schreiben über sechs Sekunden:
+**5. Der Knopf „Test-Pushnachricht" lieferte seit 1.0.3 immer HTTP 403.**
+Er verlinkte `mg.php?ptest=1` ohne Merkwort, während der Endpunkt es seit
+jener Fassung verlangt. Neunzehn Befehlsadressen daneben trugen es.
 
-| | halbe Lesevorgänge | **leere** |
-|---|---|---|
-| unmittelbar | 5.490 | **818.249** |
-| atomar | 0 | 0 |
+**6. Die Oberfläche starb, wenn `LBHOMEDIR` nicht gesetzt war.**
+`index.php` rief in Zeile 14 `lb_wurzel_ermitteln()` auf — 149 Zeilen vor der
+Definition und bevor die Bibliothek geladen war. Der ausdrücklich vorgesehene
+Rückfall endete mit `Fatal error`, unter PHP 7.4 wie unter 8.4.
 
-Die leeren sind der häufigere Fall und der unangenehmere: `mg_raw()` liefert
-dann ein leeres Feld, `mg_state()` daraufhin `SOC=-1` und `OK=0` — in Loxone
-steht kurz „Auto nicht erreichbar", ohne dass etwas war. (Der Test maximiert
-die Überlappung bewusst; im Betrieb schreibt der Cron einmal je Minute, das
-Fenster ist also klein — vorhanden ist es trotzdem, und es kostet nichts, es
-zu schließen.)
+**7. `preupgrade.sh` und `postupgrade.sh` sicherten `mgismart.json`** — gelesen
+wird `mg.json`. Beide waren für ihren Zweck wirkungslos, das Protokoll ging
+bei jedem Upgrade verloren, und `postupgrade` legte danach genau die verwaiste
+Datei mit Passwort und Merkwort wieder an, die `postinstall` aufräumen sollte.
+Der Aufräumblock dort war beim Upgrade ohnehin unerreichbar: Der Installer
+löscht das Konfigverzeichnis eine Zeile vorher.
 
-**4. `cron.php` lag im unangemeldeten Webordner** (eigener Fund).
-`cron/cron.01min` rief `REPLACELBPHTMLDIR/cron.php` auf — das Skript war damit
-über `http://loxberry/plugins/mgismart/cron.php` für jeden erreichbar, der die
-Oberfläche im Netz sieht, und jeder Aufruf band drei Sekunden lang einen
-PHP-Arbeiter. Ein unbeabsichtigter Endpunkt, den niemand brauchte: Der Cron
-ruft über das Dateisystem auf. Liegt jetzt unter `bin/`.
+**8. Eine unvollständige Momentaufnahme galt als gültig.** Ein einziges
+empfangenes Thema genügte, um die alte vollständig zu ersetzen; die Zeile
+meldete danach `OK=1` mit fast lauter Platzhaltern. Bricht die Themenzahl
+jetzt um mehr als die Hälfte ein, bleibt der alte Stand stehen.
 
-**5. `?refresh=1` und `?ptest=1` waren ohne Merkwort erreichbar** (eigener Fund).
-Der Kommentar begründete das damit, lesende Abrufe kosteten nichts. Für
-`?status` stimmt das. `?refresh=1` startet aber `mosquitto_sub -W 4` und hält
-einen PHP-Arbeiter **vier Sekunden** fest — im Sekundentakt aufgerufen legt das
-die Weboberfläche lahm, ohne ein einziges Zugangswort. Und `?ptest=1` löst eine
-Push-Nachricht aus; das ist kein Lesen, das ist ein Klingeln am Telefon des
-Besitzers. Beide brauchen jetzt dasselbe Merkwort wie `?cmd=`.
+**9. „Auto geladen" konnte sich ohne Anlass wiederholen.** Fehlte
+`drivetrain/socTarget` für einen einzigen Durchgang, fiel das Ziel auf 0 und
+damit `voll` auf 0 — „unbekannt" und „nicht erreicht" waren ununterscheidbar.
+Beim nächsten vollständigen Durchgang stieg die Flanke ein zweites Mal.
 
-**6. Zwei Fehler in `postinstall.sh`.**
-Die Schlussmeldung bat darum, „das Bundesland zu wählen" — ein Überbleibsel aus
-*Ferien & Feiertage*. Schwerer: Die Datei hieß dort `mgismart.json`, gelesen
-wird aber `mg.json`. Das Wiederherstellen aus der Sicherung legte also eine
-Datei an, die niemand liest, und meldete trotzdem Erfolg. Dass die Einstellungen
-nach einer Neuinstallation dennoch da waren, lag allein an `mg_config()`, das
-die Sicherung beim ersten Lesen selbst zurückholt. Beides behoben, die verwaiste
-Datei wird beim Aktualisieren aufgeräumt.
+### Was dazugekommen ist
 
-**Erweiterung: `LBSystem::pluginversion()`.**
-Vorgeschlagen mit der Begründung, das Plugin baue eigenes Parsing oder
-hardcodiere die Version. Zutreffend war das hier nicht — die Oberfläche zeigte
-**gar keine** Version (null Fundstellen). Die Anregung ist trotzdem gut und
-umgesetzt: Die Fassung steht jetzt neben dem Titel und kommt aus der
-`plugindatabase.json`, also aus dem, was LoxBerry tatsächlich installiert hat.
-Rückfallebene ist die `plugin.cfg` — und die wird **zeilenweise** gelesen, nicht
-mit `parse_ini_file()`: LoxBerry schreibt `#`-Kommentare, PHP erkennt seit 7.0
-nur `;`, und das Ausrufezeichen in der zweiten Zeile jeder `plugin.cfg`
-(`# NEVER CHANGE this information … updates!`) lässt `parse_ini_file` für die
-**ganze** Datei scheitern.
-
-**Hausstandard.** Die Reiter waren `<div>` ohne Verweis, und `sm-active` vergab
-allein das JavaScript — ohne JavaScript war die Seite leer und die Reiter nicht
-einmal anklickbar. Jetzt echte Verweise mit serverseitigem `sm-active`, alle
-fünf über `?form=…` geprüft. Dazu: Klassenpräfix auf `sm-` vereinheitlicht,
-`uninstall` und `prerelease.cfg` ergänzt (`PRERELEASECFG` war leer bei
-eingeschaltetem Auto-Update), eine PHP-8-Warnung aus `$_SERVER['HTTP_HOST']`
-beseitigt, vier tote Sprachschlüssel entfernt — 250 Schlüssel, deutsch und
-englisch deckungsgleich. Beide PHP-Fassungen liefern zeichengleiche Ausgabe
-ohne eine einzige Meldung.
+* **Erreichbarkeit** — `ERREICHBAR`, `GATEWAY`, `FZALTER`, `FEHLER`.
+* **Standort als Heimzone** — `ZUHAUSE` und `ENTFERNUNG` aus Breite, Länge und
+  Radius. Die *Rohkoordinaten* gehen bewusst nicht in die Loxone-Zeile.
+* **Fahrt** — `LAEUFT` (Zündung), `TEMPO`, `KMTAG`, `KMLADUNG`.
+* **Öffnungen** — `TUEROFFEN` und `FENSTEROFFEN` zählen Türen, Motorhaube,
+  Fenster und Schiebedach; die Namen der offenen Teile gehen über MQTT.
+* **Reifendruck** — vier Felder in bar.
+* **Ladetechnik** — `ACLEISTUNG` (die Wechselstromseite, die eine
+  PV-Überschussregelung wirklich braucht), `ACSTROM`, `ACSPANNUNG`,
+  `LADEART`, `KABELVERR`, `STROMGRENZE`, `KAPAZITAET`, `VERBRTAG`,
+  `VERBRLADUNG`, `FERTIGUM`, `BATTHEIZ`.
+* **Klima vollständig** — `KLIMASOLL`, `HECKSCHEIBE`, `FRONTSCHEIBE`,
+  `SITZHL`, `SITZHR`, dazu die passenden Befehle.
+* **Mehrere Fahrzeuge** je Konto, über `&fahrzeug=<n>`.
+* **Vier Zeilen statt einer** — `mg`, `laden`, `ort`, `technik`, jede mit
+  eigenem Abfragetakt. Die Zeile `mg` enthält weiterhin alles.
+* **Parametrierbare Befehle** — `?cmd=ziel&prozent=80` statt fünf fester
+  Einträge; die alten Namen (`ziel_80`, `strom_16`, …) bleiben gültig.
+* **Zweiter Haken** für eingreifende Befehle (Licht, Hupe, Ver- und
+  Entriegeln), ab Werk aus.
+* **Drosselung** — Mindestabstand je Befehl, Obergrenze je Stunde, und kein
+  Senden, wenn der Zielzustand schon anliegt.
+* **Wirkung statt Rückgabewert** — nach dem Senden liest das Plugin das
+  Zustandsthema noch einmal und unterscheidet „gewirkt" von „abgesetzt,
+  Ergebnis unbekannt".
+* **Eigene MQTT-Veröffentlichung** unter einem kurzen Präfix (`mg/1/soc` …) —
+  MQTT ist der Regelweg.
+* **Vorklimatisierung** über den Abfahrts-Assistenten und **Ladeempfehlung**
+  aus einem fremden MQTT-Thema (Photovoltaik, Spotpreis).
+* **Ladevorgänge** werden mitgeschrieben — Dauer, kWh, SoC, kWh/100 km.
+* **Ladeplan und Batterieheizplan** — hinter einem eigenen, ab Werk
+  ausgeschalteten Haken. Siehe den eigenen Abschnitt unten.
+* **Vorlage der Steuerbefehle** (VirtualOut) neben der Eingangsvorlage.
+* **Selbstprüfung** im Reiter Test: siebzehn Zeilen mit Haken, Kreuz oder
+  Strich. Ein Strich heißt „nicht feststellbar" und ist ausdrücklich kein Haken.
+* **`?selftest=1&token=…`** — das Merkwort prüfen, ohne etwas zu schalten.
+* **Merkmal gegen fremde Absender** in jedem Formular, und ein Knopf für ein
+  neues Merkwort.
+* **`?debug=1` verlangt jetzt das Merkwort.** Dort stehen iSMART-Benutzername,
+  Fahrzeug-Kennung und die Standortthemen; „lesende Abrufe verraten nichts"
+  stimmte dafür nicht.
 
 ## Wie es funktioniert
 
 MG/SAIC bietet keine offene Schnittstelle an; die App spricht über ein
 verschlüsseltes, tokenbasiertes Protokoll mit den Servern. Das quelloffene
-Projekt [SAIC MQTT Gateway](https://github.com/SAIC-iSmart-API/saic-python-mqtt-gateway)
+[SAIC MQTT Gateway](https://github.com/SAIC-iSmart-API/saic-python-mqtt-gateway)
 bildet dieses Protokoll nach und veröffentlicht die Fahrzeugdaten per MQTT.
-
-Dieses Plugin setzt darauf auf:
 
 ```
 Fahrzeug ─ iSMART-Server ─ SAIC-MQTT-Gateway (Docker) ─ MQTT-Broker ─ dieses Plugin ─ Loxone
 ```
 
-Eine Neuimplementierung der SAIC-API in PHP wäre aufwendig und würde bei jeder
-Änderung der Gegenstelle brechen. Der Reiter **Gateway einrichten** enthält den
-kompletten `docker run`-Befehl und die Stolperfallen.
-
-## Funktionen
-
-- **Loxone-Zeile** mit Ladestand (% und kWh), Ziel-SoC, Reichweite, Ladestatus,
-  Stecker, Ladeleistung, Restladezeit, Kilometerstand, 12-V-Spannung,
-  Verriegelung, Innen-/Außentemperatur
-- **Steuerbefehle** aus einer festen, geprüften Liste — nichts anderes nimmt der
-  Endpunkt an: Laden stoppen/starten, Ziel-SoC 60–100 %, Ladestrom 6/8/16 A/MAX,
-  Standklima, Heckscheibenheizung, Auto finden, Status jetzt abfragen
-- **Meldungen** für Loxone: Ziel-Ladestand erreicht, Kabel ein-/ausgesteckt,
-  Auto steht unverschlossen — als `PUSHAKTIV=1` für ein einstellbares Fenster
-- **Robuste Zuordnung**: Das Plugin sucht jeden Wert über mehrere mögliche
-  Themennamen. Liefert ein Modell etwas nicht, kommt `-1` statt eines Fehlers
-- **Debug-Ansicht** mit allen empfangenen MQTT-Themen — dort steht auch die
-  Fahrzeug-ID
-- Reiter: Einstellungen, Gateway einrichten, Einbindung in Loxone (inkl.
-  kompletter Baustein-Liste), Test, Protokoll
+Der Reiter **Gateway einrichten** enthält den kompletten `docker run`-Befehl
+und die Stolperfallen.
 
 ## Endpunkte
 
+Lesend, ohne Merkwort:
+
 | Aufruf | Zweck |
 |---|---|
-| `/plugins/mgismart/mg.php` | Loxone-Zeile `MG;OK=..;SOC=..;ZIEL=..;LAEDT=..;…` |
-| `/plugins/mgismart/mg.php?cmd=ziel_80` | Befehl ans Fahrzeug |
+| `/plugins/mgismart/mg.php` | Loxone-Zeile `MG;OK=..;SOC=..;…` |
+| `/plugins/mgismart/mg.php?zeile=laden` | kürzere Zeile, eigener Abfragetakt |
+| `/plugins/mgismart/mg.php?zeile=ort` | Ort und Fahrt |
+| `/plugins/mgismart/mg.php?zeile=technik` | Diagnose |
+| `/plugins/mgismart/mg.php?fahrzeug=2` | das zweite eingerichtete Fahrzeug |
 | `/plugins/mgismart/mg.php?json=1` | Zustand als JSON |
-| `/plugins/mgismart/mg.php?debug=1` | alle empfangenen MQTT-Themen |
-| `/plugins/mgismart/mg.php?refresh=1` | Werte sofort neu einlesen |
-| `/plugins/mgismart/mg.php?ptest=1` | Test-Pushnachricht auslösen |
+
+Mit Merkwort — sie tun etwas, oder sie geben mehr preis als eine Statuszeile:
+
+| Aufruf | Zweck |
+|---|---|
+| `/plugins/mgismart/mg.php?cmd=ziel&prozent=80&token=T` | Befehl ans Fahrzeug |
+| `/plugins/mgismart/mg.php?cmd=ziel_80&token=T` | derselbe Befehl, alter Name |
+| `/plugins/mgismart/mg.php?cmd=ladeplan&von=22:00&bis=06:00&modus=until_configured_soc&token=T` | Ladefenster setzen (nicht erprobt) |
+| `/plugins/mgismart/mg.php?cmd=ladeplan_ein&token=T` | eingestelltes Ladefenster einschalten |
+| `/plugins/mgismart/mg.php?refresh=1&token=T` | Werte sofort neu einlesen |
+| `/plugins/mgismart/mg.php?ptest=1&token=T` | Test-Pushnachricht auslösen |
+| `/plugins/mgismart/mg.php?debug=1&token=T` | alle empfangenen MQTT-Themen |
+| `/plugins/mgismart/mg.php?ladungen=1&token=T` | die Ladevorgänge als JSON |
+| `/plugins/mgismart/mg.php?selftest=1&token=T` | nur das Merkwort prüfen |
+
+Das Merkwort steht im Reiter *Einbindung in Loxone*; die dort angezeigten
+Adressen enthalten es bereits.
+
+## Ladeplan und Batterieheizplan — belegt, aber nicht erprobt
+
+Diese Gruppe steht hinter einem **eigenen Haken**, und der ist ab Werk aus.
+Der Grund ist eine Unterscheidung, die es wert ist, benannt zu werden.
+
+**Die Gestalt der Nachricht ist belegt.** Sie stammt nicht aus einer
+Vermutung, sondern aus dem Quelltext des Gateways:
+
+```
+drivetrain/chargingSchedule/set
+    {"startTime":"HH:MM","endTime":"HH:MM","mode":"UNTIL_CONFIGURED_SOC"}
+drivetrain/batteryHeatingSchedule/set
+    {"startTime":"HH:MM","mode":"ON"}
+```
+
+`src/handlers/command/drivetrain/drivetrain_charging_schedule.py` liest die
+Zeiten mit `time.fromisoformat()` — also `HH:MM` oder `HH:MM:SS` — und den
+Modus als `ScheduledChargingMode[payload["mode"].upper()]`. Die drei
+zulässigen Werte stehen in `saic_ismart_client_ng`:
+
+| Wert | Bedeutung |
+|---|---|
+| `DISABLED` | Ladeplan aus |
+| `UNTIL_CONFIGURED_SOC` | bis zum Ziel-Ladestand |
+| `UNTIL_CONFIGURED_TIME` | bis zur eingestellten Zeit |
+
+`UNTIL_CONFIGURED_SOC` übergeht das Gateway von sich aus, wenn das Fahrzeug
+keinen Ziel-Ladestand beherrscht — es schreibt dann eine Warnung in sein
+Protokoll und tut nichts.
+
+**Was nicht belegt ist: ob das Fahrzeug den Plan annimmt.** Das kann keine
+Quelle beantworten, nur ein Auto. Deshalb der eigene Haken, deshalb die
+Kennzeichnung *(nicht am Fahrzeug erprobt)* in der Befehlstabelle — und
+deshalb tragen diese Befehle **keine Wirkungsprüfung**: Das Zustandsthema
+trägt JSON, ein Textvergleich zwischen Gesendetem und Veröffentlichtem würde
+zufällig mal passen und mal nicht. Sie melden `OK=2` — *abgesetzt, Ergebnis
+unbekannt*. Ein Erfolg, den niemand geprüft hat, wird hier nicht behauptet.
+
+Sechs Befehle erscheinen, sobald der Haken gesetzt ist:
+
+| Befehl | Nutzlast |
+|---|---|
+| `ladeplan_ein` / `ladeplan_aus` | aus dem in den Einstellungen hinterlegten Fenster |
+| `heizplan_ein` / `heizplan_aus` | aus der hinterlegten Startzeit |
+| `ladeplan` | `&von=HH:MM&bis=HH:MM&modus=…` unmittelbar in der Adresse |
+| `heizplan` | `&von=HH:MM&modus=on|off` |
+
+Nur die vier festen Formen stehen in der Ausgangsvorlage — zwei Uhrzeiten und
+einen Modus kann ein virtueller Ausgang nicht liefern, weder digital noch
+analog. Eine unbrauchbare Uhrzeit wird **abgewiesen**, nicht gerundet:
+`25:99`, `22:0` und `6:00` ergeben `WERT_UNZULAESSIG`, ein fehlendes `bis`
+ergibt `WERT_FEHLT`.
+
+## Es gibt ein zweites Plugin für dasselbe Auto
+
+[mschlenstedt/LoxBerry-Plugin-MGiSMART](https://github.com/mschlenstedt/LoxBerry-Plugin-MGiSMART)
+verfolgt einen anderen Ansatz: Es **installiert und betreibt das Gateway
+selbst** — mit venv, Wächter, Aktualisierung und Healthcheck — und überlässt
+die Anbindung an den Miniserver dann dem MQTT-Gateway. Dieses Plugin hier
+setzt umgekehrt einen bereits laufenden Gateway-Container voraus und legt den
+Schwerpunkt auf die Loxone-Seite: fertige Zeilen, Vorlagen, Bausteinliste,
+Befehle, Automatiken.
+
+Zwei Dinge sind praktisch wichtig:
+
+* **Beide beanspruchen den Ordnernamen `mgismart`.** Die Autorenangaben
+  unterscheiden sich, LoxBerry hält sie also für verschiedene Plugins und
+  hängt beim zweiten `01` an den Ordner. Dieses Plugin fällt deshalb nur dann
+  auf den Namen `mgismart` zurück, wenn dort auch wirklich seine eigene
+  `mg.json` liegt.
+* **Das MQTT-Gateway kennt zwei Fassungen.** V1 verlangt das Abo von Hand —
+  ohne den Eintrag kommt am Miniserver nichts an. **V2 erkennt die
+  Themengruppe selbst**; dort werden nur noch die Datenpunkte angehakt. Der
+  Reiter *Einbindung in Loxone* liest `Mqtt.Gatewayversion` aus der
+  `general.json` und zeigt den passenden Satz, statt pauschal einen von
+  beiden zu behaupten.
 
 ## Wichtige Hinweise
 
 - **12-Volt-Batterie:** Das Abfragen weckt die Fahrzeugelektronik. Das
   Ruheintervall des Gateways (Standard: einmal täglich) sollte man nicht
-  verkürzen. Für frische Werte gezielt `?cmd=auffrischen` verwenden.
-- **Nur eine Sitzung:** Meldet sich die iSMART-App an, pausiert das Gateway rund
-  15 Minuten.
+  verkürzen. Für frische Werte gezielt `?cmd=auffrischen` verwenden — und die
+  Intervalle lassen sich seit 1.1.0 über `?cmd=abfrage_ruhe&sekunden=…`
+  gezielt setzen.
+- **Nur eine Sitzung:** Meldet sich die iSMART-App an, pausiert das Gateway
+  rund 15 Minuten.
 - **„Laden starten" ist unzuverlässig**, „Laden stoppen" funktioniert gut. Wer
   über die Wallbox schaltet, ist auf der sicheren Seite; die
-  Ladestrombegrenzung des Autos wirkt dagegen zuverlässig.
+  Ladestrombegrenzung des Autos wirkt dagegen zuverlässig — deshalb regelt die
+  Ladeempfehlung über sie.
 - Die Schnittstelle ist **inoffiziell** und kann sich jederzeit ändern.
 
 ## Voraussetzungen
@@ -172,10 +268,26 @@ kompletten `docker run`-Befehl und die Stolperfallen.
 
 ## Datenschutz
 
-Das **iSMART-Passwort kennt nur der Gateway-Container** — dieses Plugin braucht
-es nicht. Broker-Zugangsdaten liegen in `config/plugins/mgismart/mg.json`, die
-Datei wird auf `chmod 600` gesetzt. Passwörter werden im Protokoll maskiert.
-Im Plugin sind **keine persönlichen Daten** enthalten.
+Das **iSMART-Passwort kennt nur der Gateway-Container** — dieses Plugin
+braucht es nicht.
+
+Zugangsdaten liegen an **vier** Stellen, und wer das Gerät weitergibt, sollte
+alle vier kennen:
+
+| Datei | Inhalt | Rechte |
+|---|---|---|
+| `config/plugins/mgismart/mg.json` | Broker-Passwort, Merkwort | 0600 |
+| `config/plugins/mgismart.backup.json` | dieselbe Datei, überlebt das Upgrade | 0600 |
+| `data/plugins/mgismart/mosquitto/mosquitto_sub` | Broker-Benutzer und -Passwort im Klartext | 0600 im Ordner 0700 |
+| `data/plugins/mgismart/mosquitto/mosquitto_pub` | dasselbe | 0600 im Ordner 0700 |
+
+Die Deinstallation entfernt alle vier sowie `/tmp/mgismart`; die
+Plugin-Ordner räumt LoxBerry selbst weg. Passwort **und** Merkwort werden im
+Protokoll maskiert. Im Plugin sind keine persönlichen Daten enthalten.
+
+Der **Standort** wird nur als Abstand zum eingetragenen Hausstandort in die
+Loxone-Zeile gegeben. Die Rohkoordinaten stehen ausschließlich im Reiter Test
+und in `?debug=1`, und das verlangt das Merkwort.
 
 ## Lizenz
 

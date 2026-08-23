@@ -1,19 +1,13 @@
 #!/bin/bash
 # MG iSmart - postinstall
+# command <TEMPFOLDER> <NAME> <FOLDER> <VERSION> <BASEFOLDER>
 #
-# ZWEI FEHLER AUS 1.0.2, BEIDE HIER:
-#
-# 1. Die Schlussmeldung bat darum, "das Bundesland zu waehlen". Das ist ein
-#    Ueberbleibsel aus dem Plugin Ferien & Feiertage. MG drosselt seine Autos
-#    nicht nach Bundesland.
-#
-# 2. Schwerer: Die Datei hiess hier mgismart.json, die Bibliothek liest aber
-#    mg.json (mg_paths()). Das Wiederherstellen aus der Sicherung legte also
-#    eine Datei an, die niemand liest, und meldete trotzdem Erfolg. Dass die
-#    Einstellungen nach einer Neuinstallation dennoch wieder da waren, lag
-#    allein an mg_config(), das die Sicherung beim ersten Lesen selbst
-#    zurueckholt - der Umweg hier war wirkungslos, aber nicht folgenlos: Er
-#    hinterliess eine verwaiste mgismart.json neben der echten.
+# Laeuft IMMER, auch beim Upgrade - dort unmittelbar nachdem der Installer
+# config/plugins/<ordner>/ und data/plugins/<ordner>/ geloescht und die
+# mitgelieferte Konfiguration hineinkopiert hat. Alles, was hier von einem
+# frueheren Stand erwartet wird, ist zu diesem Zeitpunkt bereits fort; die
+# einzige Quelle, die den Loeschschritt uebersteht, ist die Sicherung NEBEN
+# dem Konfigordner.
 
 ARGV3=$3
 ARGV5=$5
@@ -27,10 +21,11 @@ fi
 
 CDIR="$BASE/config/plugins/$PFOLDER"
 DDIR="$BASE/data/plugins/$PFOLDER"
+LDIR="$BASE/log/plugins/$PFOLDER"
 CF="$CDIR/mg.json"
 BK="$BASE/config/plugins/$PFOLDER.backup.json"
 
-mkdir -p "$CDIR" "$DDIR" 2>/dev/null
+mkdir -p "$CDIR" "$DDIR" "$LDIR" 2>/dev/null
 
 if [ ! -f "$CF" ]; then
     echo '{}' > "$CF"
@@ -47,20 +42,9 @@ if [ -f "$BK" ]; then
     fi
 fi
 
-# Altlast aus 1.0.2 aufraeumen: die nie gelesene Datei unter falschem Namen.
-if [ -f "$CDIR/mgismart.json" ]; then
-    if [ ! -s "$CF" ] || [ "$(cat "$CF" 2>/dev/null)" = "{}" ]; then
-        # Sie koennte die einzige vorhandene Konfiguration sein.
-        cp -p "$CDIR/mgismart.json" "$CF"
-        chmod 600 "$CF" 2>/dev/null
-        echo "<OK> Einstellungen aus der alten mgismart.json uebernommen."
-    fi
-    rm -f "$CDIR/mgismart.json"
-    echo "<INFO> Verwaiste mgismart.json aus Fassung 1.0.2 entfernt."
-fi
-
 # Ordner fuer die Zugangsdaten von mosquitto_sub/_pub. 0700, denn hier steht
-# das Broker-Passwort - es soll gerade NICHT mehr auf der Kommandozeile stehen.
+# das Broker-Passwort - es soll gerade NICHT auf der Kommandozeile stehen,
+# wo jeder lokale Benutzer es ueber /proc mitlesen koennte.
 mkdir -p "$DDIR/mosquitto" 2>/dev/null
 chmod 700 "$DDIR/mosquitto" 2>/dev/null
 
@@ -70,7 +54,9 @@ if ! command -v mosquitto_sub >/dev/null 2>&1; then
 fi
 
 echo "<OK> Installation abgeschlossen."
-echo "<INFO> Bitte die Plugin-Oberflaeche oeffnen und im Reiter Einstellungen"
-echo "<INFO> die Zugangsdaten des MQTT-Brokers, den SAIC-Benutzernamen und die"
-echo "<INFO> Fahrzeug-Kennung (VIN) eintragen."
+echo "<INFO> Bitte die Plugin-Oberflaeche oeffnen. Im Reiter MQTT gehoeren die"
+echo "<INFO> Zugangsdaten des Brokers, der iSMART-Benutzername und die"
+echo "<INFO> Fahrzeug-Kennung (VIN) hinein - ein Konto darf mehrere Fahrzeuge"
+echo "<INFO> fuehren. Der Reiter Test beantwortet danach mit Haken und Kreuzen,"
+echo "<INFO> ob die Einrichtung traegt."
 exit 0

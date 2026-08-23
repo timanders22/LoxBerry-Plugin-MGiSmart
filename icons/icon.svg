@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  MG Connect - Plugin-Symbol nach Hausstandard.
+  MG iSmart - Plugin-Symbol nach Hausstandard.
 
   Aufbau wie bei den uebrigen Plugins der Reihe: Scheibe r=246 mit
   Radialverlauf, innerer Ring r=232 mit 35 % Deckung, flaches weisses Motiv
@@ -9,6 +9,11 @@
 
   Keine fremden Wortmarken ausser dem Plugin-Namen; das Fahrzeug ist eine
   eigene Silhouette und bildet kein bestimmtes Modell nach.
+
+  Der Schriftzug lautet "MG iSMART" wie der Plugin-Titel. Er ist mit 1.1.0
+  von "MG CONNECT" umgestellt worden - ZUSAMMEN mit den vier PNG, die aus
+  dieser Datei erzeugt werden. Wer den Text hier aendert, ohne die PNG neu zu
+  erzeugen, zeigt unter LoxBerry 3 ein anderes Motiv als unter LoxBerry 4.
 -->
 <svg width="512" height="512" viewBox="0 0 512 512" version="1.1" xmlns="http://www.w3.org/2000/svg">
   <defs>
@@ -79,6 +84,6 @@
        ZUR SCHRIFTGROESSE: 29 px fuer den Plugin-Namen, 20 px fuer LOXBERRY -
        einheitlich ueber alle Plugins. Massgeblich fuer den Rand ist die
        UNTERSTE Bildzeile der Schrift, dort ist der Kreis am schmalsten. -->
-  <text x="256" y="388" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-weight="900" font-size="29" letter-spacing="1">MG CONNECT</text>
+  <text x="256" y="388" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-weight="900" font-size="29" letter-spacing="1">MG iSMART</text>
   <text x="256" y="424" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-weight="bold" font-size="20" letter-spacing="3">LOXBERRY</text>
 </svg>

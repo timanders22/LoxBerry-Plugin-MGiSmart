@@ -19,9 +19,10 @@
 #      Beim Deinstallieren ist genau das falsch: darin stehen das
 #      Broker-Passwort und das Merkwort des unangemeldeten Endpunkts.
 #   2. /tmp/mgismart
-#      Zwischenspeicher: letzter Zustand, Meldungen, Push-Test. /tmp ist
-#      auf dem LoxBerry eine Ramdisk, der Ordner verschwindet also
-#      spaetestens beim naechsten Neustart - bis dahin stuende er da.
+#      Zwischenspeicher: letzter Zustand je Fahrzeug, Meldungen, Push-Test,
+#      die Merkdatei der Drosselung und der Automatiken. /tmp ist auf dem
+#      LoxBerry eine Ramdisk, der Ordner verschwindet also spaetestens beim
+#      naechsten Neustart - bis dahin stuende er da.
 #   3. Ein noch laufender mosquitto_sub aus einem Cron-Durchgang.
 #
 # ZUR PROZESSSUCHE: "pkill -f mosquitto_sub" waere grob falsch - so heissen
