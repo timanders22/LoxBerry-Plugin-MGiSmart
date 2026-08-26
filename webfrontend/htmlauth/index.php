@@ -381,6 +381,54 @@ if (class_exists('LBWeb', false)) {
     echo '<!DOCTYPE html><html lang="de"><head><meta charset="utf-8">'
        . '<title>MG iSmart</title></head><body>';
 }
+
+/* ---------------- Einstellungen sichern ----------------
+ *
+ * Ausgegeben wird die VOLLE Konfiguration - samt Aktionstoken. Ohne ihn
+ * stuenden nach dem Zurueckspielen alle Felder richtig, und das Plugin
+ * kaeme trotzdem nicht an die Anlage; die Datei waere wertlos. Damit
+ * traegt sie ein Geheimnis, und der Hinweis am Knopf sagt das. */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mg_sichern'])) {
+    $mg_js = json_encode(mg_config(),
+        JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if ($mg_js !== false) {
+        header('Content-Type: application/json; charset=utf-8');
+        header('Content-Disposition: attachment; filename="mgismart_einstellungen_'
+               . date('Ymd_His') . '.json"');
+        echo $mg_js;
+        exit;
+    }
+    $mg_fehler[] = mg_t('EINST.SICH_SCHREIBFEHLER');
+}
+
+/* ---------------- Einstellungen zurueckspielen ----------------
+ *
+ * is_uploaded_file() ZUERST: ohne diese Pruefung liesse sich jede Datei des
+ * Servers unterschieben. Dann die Groessengrenze - eine Sicherung dieses
+ * Plugins ist wenige Kilobyte gross; alles darueber wird gar nicht gelesen. */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mg_zurueck'])) {
+    if (!isset($_FILES['mg_sicherung']) || !is_array($_FILES['mg_sicherung'])
+        || !isset($_FILES['mg_sicherung']['tmp_name'])
+        || !@is_uploaded_file($_FILES['mg_sicherung']['tmp_name'])) {
+        $mg_fehler[] = mg_t('EINST.SICH_KEINE_DATEI');
+    } elseif ((int) $_FILES['mg_sicherung']['size'] > 262144) {
+        $mg_fehler[] = mg_t('EINST.SICH_ZU_GROSS');
+    } else {
+        list($mg_neu, $mg_mangel, $mg_n) = mg_sicherung_lesen(
+            (string) @file_get_contents($_FILES['mg_sicherung']['tmp_name']));
+        if ($mg_neu === null) {
+            /* ALLE Beanstandungen, nicht nur die erste - und geaendert wird
+             * nichts. */
+            $mg_fehler[] = mg_t('EINST.SICH_ABGELEHNT') . ' '
+                            . implode(' ', $mg_mangel);
+        } elseif (mg_config_save($mg_neu)) {
+            $mg_meldungen[] = sprintf(mg_t('EINST.SICH_UEBERNOMMEN'), $mg_n);
+        } else {
+            $mg_fehler[] = mg_t('EINST.SICH_SCHREIBFEHLER');
+        }
+    }
+}
+
 ?>
 <style>
 /* Hausstandard: eigener Behaelter, kein Schattenwurf, Reiter im Fluss */
@@ -711,11 +759,33 @@ if (class_exists('LBWeb', false)) {
 
 <div class="sm-legende">
 <span><i class="sm-punkt sm-b-aktion"></i> <?= mg_e(mg_t('LEGENDE.AKTION')) ?></span>
+<span><i class="sm-punkt sm-b-lesen"></i> <?= mg_e(mg_t('LEGENDE.LESEN')) ?></span>
 </div>
 <div class="sm-knopfreihe">
 	<button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= mg_e(mg_t('KNOPF.SPEICHERN')) ?></button>
 </div>
 </form>
+
+<h2><?= mg_t('EINST.H_SICHERUNG') ?></h2>
+<div class="sm-hinweis"><?= mg_t('EINST.SICH_ERKLAERUNG') ?></div>
+<div class="sm-warnung"><?= mg_t('EINST.SICH_WARNUNG') ?></div>
+<div class="sm-knopfreihe">
+  <!-- ZWEI GETRENNTE Formulare. Das Sichern schickt einen Download und ruft
+       exit auf; das Zurueckspielen braucht enctype="multipart/form-data".
+       Wer beides in ein Formular legt, bekommt entweder keinen Upload oder
+       einen Download, der das Speichern verschluckt. -->
+  <form action="index.php" method="post">
+    <input data-role="none" type="hidden" name="activetab" value="tab-settings">
+    <input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
+    <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="mg_sichern" value="1"><?= mg_t('EINST.K_SICHERN') ?></button>
+  </form>
+  <form action="index.php" method="post" enctype="multipart/form-data">
+    <input data-role="none" type="hidden" name="activetab" value="tab-settings">
+    <input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
+    <input data-role="none" type="file" name="mg_sicherung" accept=".json">
+    <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="mg_zurueck" value="1"><?= mg_t('EINST.K_ZURUECK') ?></button>
+  </form>
+</div>
 </div>
 
 <!-- ================= MQTT ================= -->
@@ -788,7 +858,7 @@ if (class_exists('LBWeb', false)) {
 </div>
 <div class="sm-hinweis"><b><?= mg_e(mg_t('MQTTR.ABO_TITEL')) ?></b><br>
 <span class="sm-mono"><?= mg_e(trim((string) $mg_cfg['mqtt_praefix'], '/ ')) ?>/#</span><br>
-<?php echo mg_t('MQTTR.ABO_HINWEIS'); ?></div>
+<?php echo mg_abo_text(); ?></div>
 
 <div class="sm-legende">
 <span><i class="sm-punkt sm-b-aktion"></i> <?= mg_e(mg_t('LEGENDE.AKTION')) ?></span>
