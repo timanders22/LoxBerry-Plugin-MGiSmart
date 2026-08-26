@@ -374,14 +374,28 @@ function mg_jn($v)
     return '&ndash;';
 }
 
-if (class_exists('LBWeb', false)) {
-    LBWeb::lbheader('MG iSmart' . ($mg_ver !== '' ? ' ' . $mg_ver : ''),
-        'https://github.com/SAIC-iSmart-API/saic-python-mqtt-gateway', 'help.html');
-} else {
-    echo '<!DOCTYPE html><html lang="de"><head><meta charset="utf-8">'
-       . '<title>MG iSmart</title></head><body>';
-}
-
+/* ==================================================================
+ * DIE HANDLER STEHEN VOR lbheader() - DAS IST BAUVORSCHRIFT
+ * ==================================================================
+ *
+ * Bis 1.1.1 standen die beiden Sicherungs-Handler DAHINTER. Der
+ * Seitenkopf war damit schon geschrieben, und
+ * header('Content-Type: application/json') kam zu spaet. Gemessen am
+ * 26.08.2026 mit PHP 8.4 und GUELTIGEM Formularmerkmal - also so, wie
+ * ein Bediener den Knopf drueckt:
+ *
+ *   WARNUNG|Cannot modify header information - headers already sent|index.php:395
+ *   WARNUNG|dasselbe|index.php:396
+ *   Antwortkoerper: <!-- lbheader: MG iSmart --> { "broker_host": ... }
+ *
+ * Der Knopf lieferte also keine Datei, sondern eine Seite. Am PHP-CLI
+ * ist der Fehler unsichtbar (header() ist dort wirkungslos), und der
+ * Wachposten wies die erste Messung ohne Merkmal ab - beides hat den
+ * Fehler lange verdeckt.
+ *
+ * Reihenfolge: Bibliothek, Konfiguration, Wachposten, Reiterwahl,
+ * ALLE Handler samt Downloads, dann erst lbheader(), dann HTML.
+ * ================================================================== */
 /* ---------------- Einstellungen sichern ----------------
  *
  * Ausgegeben wird die VOLLE Konfiguration - samt Aktionstoken. Ohne ihn
@@ -427,6 +441,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mg_zurueck'])) {
             $mg_fehler[] = mg_t('EINST.SICH_SCHREIBFEHLER');
         }
     }
+}
+
+
+if (class_exists('LBWeb', false)) {
+    LBWeb::lbheader('MG iSmart' . ($mg_ver !== '' ? ' ' . $mg_ver : ''),
+        'https://github.com/SAIC-iSmart-API/saic-python-mqtt-gateway', 'help.html');
+} else {
+    echo '<!DOCTYPE html><html lang="de"><head><meta charset="utf-8">'
+       . '<title>MG iSmart</title></head><body>';
 }
 
 ?>

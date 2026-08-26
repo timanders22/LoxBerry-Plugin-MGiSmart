@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.1
+Version 1.1.2
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -8,6 +8,34 @@ Klima, Standort — und schickt Befehle zurück: Laden stoppen, Ziel-Ladestand,
 Ladestrombegrenzung, Standklima, „Auto finden".
 
 Kompatibel mit LoxBerry 3.x und **LoxBerry 4** (reines PHP, PHP 7.4 und 8.x).
+
+## Was 1.1.2 behebt
+
+**Der Knopf „Einstellungen sichern" lieferte keine Datei.** Die beiden
+Sicherungs-Handler standen hinter `LBWeb::lbheader()`; der Seitenkopf war damit
+schon geschrieben, und `header('Content-Type: application/json')` kam zu spät.
+Gemessen am 26.08.2026 mit PHP 8.4 und **gültigem Formularmerkmal** — also so,
+wie ein Bediener den Knopf drückt:
+
+```
+WARNUNG|Cannot modify header information - headers already sent|index.php:395
+WARNUNG|dasselbe|index.php:396
+Antwortkoerper: <!-- lbheader: MG iSmart --> { "broker_host": "127.0.0.1", ... }
+```
+
+Statt einer Datei kam eine Seite mit angehängtem JSON. Zwei Dinge haben den
+Fehler lange verdeckt: am PHP-CLI ist `header()` wirkungslos und
+`headers_sent()` immer falsch, weshalb die drei Hauswerkzeuge für die Sicherung
+grün meldeten — und ein Prüflauf **ohne** Merkmal wird vom Wachposten
+abgewiesen, bevor der Handler überhaupt anläuft.
+
+Die Reihenfolge in `index.php` ist deshalb jetzt Bauvorschrift: Bibliothek,
+Konfiguration, Wachposten, Reiterwahl, **alle Handler samt Downloads**, dann
+erst `lbheader()`, dann HTML. Verschoben wurde der Block wörtlich; an seinem
+Inhalt ist nichts geändert.
+
+Gefunden beim Durchsehen des Saugroboter-Plugins, das denselben Block samt
+Fehler übernommen hatte.
 
 ## Was 1.1.0 bringt
 
