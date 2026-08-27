@@ -61,6 +61,7 @@ function mg_e($s) { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); }
  * ================================================================== */
 $mg_meldungen = array();
 $mg_fehler = array();
+$mg_verwaiste = array();
 $mg_fmt = mg_formtoken();
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($mg_fmt === '') {
@@ -123,6 +124,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['clearlog'])) {
     mg_write_atomic($mg_logfile, '[' . date('Y-m-d H:i:s') . '] '
         . mg_t('MELDUNG.LOG_GELEERT') . "\n");
     $mg_tab = 'tab-log';
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['verwaiste_suchen'])) {
+    $mg_verwaiste = mg_mqtt_verwaiste(3);
+    $mg_meldungen[] = sprintf(mg_t('MELDUNG.VERWAISTE_GEFUNDEN'), count($mg_verwaiste));
+    $mg_tab = 'tab-mqtt';
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['verwaiste_loeschen'])) {
+    $mg_liste = mg_mqtt_verwaiste(3);
+    list($mg_n, $mg_f) = mg_mqtt_verwaiste_loeschen(array_keys($mg_liste));
+    if ($mg_f !== '') {
+        $mg_fehler[] = mg_t('MELDUNG.VERWAISTE_FEHLER') . ' ' . $mg_f;
+    } else {
+        $mg_meldungen[] = sprintf(mg_t('MELDUNG.VERWAISTE_GELOESCHT'), $mg_n);
+    }
+    $mg_tab = 'tab-mqtt';
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['clearladungen'])) {
@@ -888,6 +906,34 @@ if (class_exists('LBWeb', false)) {
 </div>
 <div class="sm-knopfreihe">
 	<button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= mg_e(mg_t('KNOPF.SPEICHERN')) ?></button>
+</div>
+</form>
+
+<h2><?= mg_e(mg_t('MQTTR.H_AUFRAEUMEN')) ?></h2>
+<div class="sm-warnung"><?php echo mg_t('MQTTR.AUFRAEUMEN_WARNUNG'); ?></div>
+<?php if (!empty($mg_verwaiste)) { ?>
+<div class="sm-hilfe"><?= mg_e(sprintf(mg_t('MELDUNG.VERWAISTE_GEFUNDEN'), count($mg_verwaiste))) ?></div>
+<div class="sm-log"><?php foreach (array_slice($mg_verwaiste, 0, 200, true) as $mg_vt => $mg_vv) {
+    echo mg_e($mg_vt) . ' = ' . mg_e(mg_kuerzen($mg_vv, 40)) . "\n"; } ?></div>
+<?php } ?>
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-technik"></i> <?= mg_e(mg_t('LEGENDE.TECHNIK')) ?></span>
+<span><i class="sm-punkt sm-b-aktion"></i> <?= mg_e(mg_t('LEGENDE.AKTION')) ?></span>
+</div>
+<form action="index.php" method="post">
+<input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
+<input data-role="none" type="hidden" name="activetab" value="tab-mqtt">
+<input data-role="none" type="hidden" name="verwaiste_suchen" value="1">
+<div class="sm-knopfreihe">
+	<button data-role="none" class="sm-btn sm-b-technik" type="submit"><?= mg_e(mg_t('KNOPF.VERWAISTE_SUCHEN')) ?></button>
+</div>
+</form>
+<form action="index.php" method="post">
+<input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
+<input data-role="none" type="hidden" name="activetab" value="tab-mqtt">
+<input data-role="none" type="hidden" name="verwaiste_loeschen" value="1">
+<div class="sm-knopfreihe">
+	<button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= mg_e(mg_t('KNOPF.VERWAISTE_LOESCHEN')) ?></button>
 </div>
 </form>
 

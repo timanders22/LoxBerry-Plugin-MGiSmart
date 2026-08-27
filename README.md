@@ -37,6 +37,61 @@ Inhalt ist nichts geändert.
 Gefunden beim Durchsehen des Saugroboter-Plugins, das denselben Block samt
 Fehler übernommen hatte.
 
+## Was 1.1.3 behebt
+
+**Die eigene MQTT-Veröffentlichung hat nie ein brauchbares Thema gesendet —
+seit 1.1.0.**
+
+Die Werte wurden in eine Datei mit Tabulatoren geschrieben und von einer
+Schleife zurückgelesen:
+
+```php
+'while IFS="\t" read -r t v; do '
+```
+
+Das ist ein **einfach angeführter** PHP-String. An die Schale ging damit
+wörtlich `IFS="\t"`, und in einer POSIX-Schale sind das die beiden Zeichen
+Backslash und `t` — nicht der Tabulator. Das Trennzeichen war also der
+Buchstabe `t`.
+
+Gemessen mit `dash`, dem `/bin/sh` des LoxBerry, über die echten 68 Themen je
+Fahrzeug:
+
+| | |
+|---|---|
+| Themen mit einem `t` im Namen | brechen am ersten `t` ab — `mg/1/stecker` wird zu `mg/1/s` |
+| Themen ohne `t` | bekommen den ganzen Zeileninhalt als Namen und eine **leere** Nutzlast |
+| richtig angekommen | **0 von 68** |
+
+Leer zusammen mit `-r` **löscht** ein behaltenes Thema im Broker. Die Fassungen
+1.1.0 bis 1.1.2 haben unter dem eigenen Präfix also Müll hinterlassen, der dort
+liegen bleibt.
+
+*Betroffen ist nur, wer die eigene Veröffentlichung eingeschaltet hat — der
+Haken steht ab Werk aus. Der HTTP-Weg nach Loxone war nie betroffen.*
+
+**Was 1.1.3 dagegen tut:**
+
+* **PHP führt die Argumente selbst an.** Statt einer Schleife, die eine Datei
+  zerlegt, schreibt das Plugin eine fertige Befehlsdatei, in der jedes Argument
+  durch `escapeshellarg()` gegangen ist. Es gibt kein Trennzeichen mehr, das
+  falsch verstanden werden könnte.
+* **Eine Prüfzeile, die das misst — ohne Broker.** Der Reiter *Test* lässt die
+  erzeugten Befehlszeilen wirklich durch `sh` laufen, mit einem `set --` statt
+  `mosquitto_pub`, und vergleicht, was am anderen Ende ankommt. Geeicht: der
+  alte Weg ergibt **0 von 68**, der neue **68 von 68**.
+* **Ein Aufräumknopf** im Reiter *MQTT*. Er sucht unter dem eigenen Präfix alle
+  Themen, die es heute nicht mehr gibt, zeigt sie an — und löscht sie erst auf
+  einen zweiten Knopfdruck. Fremde Themen bleiben unberührt.
+* **Nur noch Änderungen werden gesendet.** 68 Themen je Fahrzeug und Minute
+  wären 68 Prozesse je Minute; auf einem LoxBerry mit SD-Karte ist das kein
+  Schönheitsfehler. Alle halbe Stunde geht der vollständige Satz hinaus, damit
+  ein neu gestarteter Broker die behaltenen Werte wiederbekommt.
+
+**Wer 1.1.0 bis 1.1.2 mit eingeschalteter Veröffentlichung betrieben hat**,
+drückt nach dem Update einmal im Reiter *MQTT* auf *Verwaiste Themen suchen*
+und danach auf *Verwaiste Themen löschen*.
+
 ## Was 1.1.0 bringt
 
 ### Vier Werte, die bisher still falsch waren

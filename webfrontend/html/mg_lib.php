@@ -2119,42 +2119,260 @@ function mg_mqtt_werte($nr, $st)
  * Datei geschrieben und in EINER Shell-Schleife abgearbeitet - ein Prozess
  * statt eines Aufrufs je Feld aus PHP heraus.
  */
+/**
+ * Die Argumente je Thema, fertig angefuehrt - ohne sie auszufuehren.
+ *
+ * Dafuer gibt es diese Funktion getrennt: die Veroeffentlichung liess sich bis
+ * 1.1.2 nirgends pruefen, ohne einen Broker zu haben. Der Fehler steckte aber
+ * gar nicht im Broker, sondern in der Zerlegung der Befehlszeile durch die
+ * Schale - und das laesst sich ohne jedes Netz messen (mg_mqtt_probe()).
+ */
+function mg_mqtt_argumente($nr, $st)
+{
+    $cfg = mg_config();
+    $praefix = trim((string) $cfg['mqtt_praefix'], '/ ');
+    if ($praefix === '') {
+        return array();
+    }
+    $basis = $praefix . '/' . (int) $nr . '/';
+    $aus = array();
+    foreach (mg_mqtt_werte($nr, $st) as $name => $wert) {
+        $aus[$basis . $name] = str_replace(array("\r", "\n"), ' ', (string) $wert);
+    }
+    return $aus;
+}
+
+/** Eine vollstaendige mosquitto_pub-Zeile fuer ein Thema. */
+function mg_mqtt_zeile($thema, $wert)
+{
+    return mg_broker_umgebung() . 'mosquitto_pub' . mg_broker_args()
+         . ' -r -t ' . escapeshellarg($thema)
+         . ' -m ' . escapeshellarg($wert);
+}
+
 function mg_mqtt_senden($nr, $st)
 {
     $cfg = mg_config();
     if (empty($cfg['mqtt_ein']) || !mg_has_mosquitto()) {
         return 0;
     }
-    $praefix = trim((string) $cfg['mqtt_praefix'], '/ ');
-    if ($praefix === '') {
+    $paare = mg_mqtt_argumente($nr, $st);
+    if (!$paare) {
         return 0;
     }
-    $basis = $praefix . '/' . (int) $nr . '/';
-    $paare = mg_mqtt_werte($nr, $st);
+
+    /* Nur senden, was sich geaendert hat.
+     *
+     * Achtundsechzig Themen je Fahrzeug und Minute waeren achtundsechzig
+     * Prozesse je Minute - auf einem LoxBerry mit SD-Karte ist das kein
+     * Schoenheitsfehler. Im Beharrungszustand aendert sich fast nichts.
+     * Alle halbe Stunde geht der ganze Satz hinaus, damit ein neu gestarteter
+     * Broker die behaltenen Werte wiederbekommt. */
+    $merk = mg_paths()['tmp'] . '/veroeffentlicht' . (int) $nr . '.json';
+    $alt = mg_json_lesen($merk);
+    $vollstaendig = (!isset($alt['zeit']) || (time() - (int) $alt['zeit']) > 1800
+                     || !isset($alt['werte']) || !is_array($alt['werte'])
+                     || array_keys($alt['werte']) !== array_keys($paare));
+    $zu_senden = array();
+    foreach ($paare as $thema => $wert) {
+        if ($vollstaendig || !isset($alt['werte'][$thema])
+            || (string) $alt['werte'][$thema] !== (string) $wert) {
+            $zu_senden[$thema] = $wert;
+        }
+    }
+    if (!$zu_senden) {
+        return 0;
+    }
+
+    /* DIE ARGUMENTE FUEHRT PHP AN, DIE SCHALE ZERLEGT NICHTS MEHR.
+     *
+     * Bis 1.1.2 stand hier eine Schleife, die eine Datei mit Tabulatoren
+     * zurueckgelesen hat:
+     *
+     *     'while IFS="\t" read -r t v; do ...'
+     *
+     * Das ist ein EINFACH angefuehrter PHP-String - an die Schale ging
+     * woertlich IFS="\t", und in einer POSIX-Schale sind das die beiden
+     * Zeichen Backslash und t, nicht der Tabulator. Gemessen mit dash ueber
+     * die echten 68 Themen: 26 bekamen den ganzen Zeileninhalt als
+     * Themennamen und eine LEERE Nutzlast - und leer zusammen mit -r loescht
+     * ein behaltenes Thema -, die uebrigen 42 brachen am ersten "t" ihres
+     * Namens ab. Kein einziges Thema kam richtig an.
+     *
+     * Jetzt schreibt PHP eine fertige Befehlsdatei: jedes Argument geht durch
+     * escapeshellarg(). Es gibt kein Trennzeichen mehr, das falsch verstanden
+     * werden koennte. */
     $zeilen = '';
-    foreach ($paare as $name => $wert) {
-        $zeilen .= $basis . $name . "\t"
-                 . str_replace(array("\r", "\n", "\t"), ' ', (string) $wert) . "\n";
+    foreach ($zu_senden as $thema => $wert) {
+        $zeilen .= mg_mqtt_zeile($thema, $wert) . ' || exit 1' . "\n";
     }
     $p = mg_paths();
     if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
-    $tmp = $p['tmp'] . '/publish.' . getmypid() . '.txt';
+    $tmp = $p['tmp'] . '/publish.' . getmypid() . '.' . mt_rand(1000, 9999) . '.sh';
     if (!mg_write_atomic($tmp, $zeilen, 0600)) {
         return 0;
     }
-    $cmd = 'while IFS="\t" read -r t v; do ' . mg_broker_umgebung() . 'mosquitto_pub'
-         . mg_broker_args() . ' -r -t "$t" -m "$v" || exit 1; done < '
-         . escapeshellarg($tmp) . ' 2>&1';
     $out = array();
-    @exec($cmd, $out, $rc);
+    @exec('sh ' . escapeshellarg($tmp) . ' 2>&1', $out, $rc);
     @unlink($tmp);
     if ($rc !== 0) {
         mg_log_if_changed('mqtt', 'Veroeffentlichung fehlgeschlagen: '
             . trim(implode(' ', array_slice($out, 0, 2))));
         return 0;
     }
-    mg_log_if_changed('mqtt', 'Veroeffentlichung laeuft (' . count($paare) . ' Themen je Fahrzeug)');
-    return count($paare);
+    mg_write_json($merk, array('zeit' => $vollstaendig ? time() : (int) $alt['zeit'],
+        'werte' => $paare), 0600);
+    mg_log_if_changed('mqtt', 'Veroeffentlichung laeuft (' . count($paare)
+        . ' Themen je Fahrzeug)');
+    return count($zu_senden);
+}
+
+/**
+ * Kommt am Ende der Schale wieder das an, was hineingegeben wurde?
+ *
+ * Geprueft wird die WIRKUNG, nicht die Schreibweise: die erzeugten
+ * Befehlszeilen laufen wirklich durch "sh" - nur steht statt mosquitto_pub
+ * ein "set --", das die Argumente uebernimmt und Thema und Nutzlast
+ * zurueckgibt. Weicht auch nur eines ab, ist die Zeile rot.
+ *
+ * Genau diese Probe haette den Befund von 1.1.2 am ersten Tag gefunden, und
+ * sie braucht keinen Broker, kein Netz und kein Fahrzeug.
+ *
+ * Rueckgabe: array(ok, text)
+ */
+function mg_mqtt_probe($nr = 1)
+{
+    $paare = mg_mqtt_argumente($nr, mg_state($nr));
+    if (!$paare) {
+        return array(2, '');
+    }
+    /* Die Probendatei liegt unter data/, nicht unter /tmp - anders als die
+     * Sendedatei, die jede Minute geschrieben wird und deshalb auf die
+     * Ramdisk gehoert. Grund: /tmp ist nicht ueberall dasselbe Verzeichnis.
+     * Auf einem LoxBerry schon; auf einem Pruefstand sehen PHP und die Schale
+     * unter /tmp unter Umstaenden verschiedene Orte, und dann scheitert die
+     * Probe an der Umgebung statt am Pruefling - gemessen am 27.08.2026, sie
+     * meldete 1 von 68, und die eine war die Fehlermeldung der Schale.
+     * data/ leitet sich aus LBHOMEDIR ab und ist damit ueberall derselbe Ort.
+     * Eine Pruefzeile, die nur auf dem Geraet laufen kann, ist keine. */
+    $p = mg_paths();
+    if (!is_dir($p['data'])) { @mkdir($p['data'], 0775, true); }
+    $datei = $p['data'] . '/probe.' . getmypid() . '.' . mt_rand(1000, 9999) . '.sh';
+    /* Aus "mosquitto_pub … -r -t <thema> -m <wert>" wird "set -- … -r -t
+     * <thema> -m <wert>". Die Argumente sind dann $(n-2) und $n; gedruckt
+     * werden sie mit einem Trennzeichen, das in keinem Thema vorkommen kann. */
+    $zeilen = '';
+    foreach ($paare as $thema => $wert) {
+        $zeilen .= 'set -- -t ' . escapeshellarg($thema) . ' -m ' . escapeshellarg($wert)
+                 . '; printf \'%s\\034%s\\n\' "$2" "$4"' . "\n";
+    }
+    if (!mg_write_atomic($datei, $zeilen, 0600)) {
+        return array(2, '');
+    }
+    $out = array();
+    @exec('sh ' . escapeshellarg($datei) . ' 2>&1', $out, $rc);
+    @unlink($datei);
+    $themen = array_keys($paare);
+    if ($rc !== 0 || count($out) !== count($themen)) {
+        return array(0, count($out) . '/' . count($themen));
+    }
+    $richtig = 0;
+    foreach ($themen as $i => $thema) {
+        $teile = explode(chr(28), $out[$i], 2);
+        if ($teile[0] === $thema
+            && isset($teile[1]) && $teile[1] === (string) $paare[$thema]) {
+            $richtig++;
+        }
+    }
+    return array($richtig === count($themen) ? 1 : 0,
+        $richtig . '/' . count($themen));
+}
+
+
+/* ==================================================================
+ * Verwaiste Themen aus 1.1.0 bis 1.1.2 aufraeumen
+ *
+ * Die kaputte Veroeffentlichung jener Fassungen hat unter dem eigenen Praefix
+ * Themen angelegt, die es nie geben sollte: solche mit einem Tabulator und dem
+ * Wert IM Namen, und solche, deren Name am ersten "t" abbrach. Sie liegen
+ * BEHALTEN im Broker und verschwinden von selbst nicht mehr - auch dann nicht,
+ * wenn das Plugin jetzt richtig sendet.
+ *
+ * Geloescht wird nur, was unterhalb des EIGENEN Praefix liegt und in der
+ * heutigen Themenliste nicht vorkommt. Fremde Themen werden nicht angefasst,
+ * und die Liste wird dem Bediener vorher gezeigt.
+ * ================================================================== */
+
+/** Alle Themen unter dem eigenen Praefix, die heute nicht mehr vorkommen. */
+function mg_mqtt_verwaiste($sekunden = 3)
+{
+    $cfg = mg_config();
+    $praefix = trim((string) $cfg['mqtt_praefix'], '/ ');
+    if ($praefix === '' || !mg_has_mosquitto()) {
+        return array();
+    }
+    list($vorhanden, , ) = mg_sub(array($praefix . '/#'), $sekunden);
+    $soll = array();
+    foreach (mg_fahrzeuge($cfg) as $nr => $f) {
+        foreach (mg_mqtt_argumente($nr, mg_state($nr)) as $thema => $wert) {
+            $soll[$thema] = 1;
+        }
+    }
+    $aus = array();
+    foreach ($vorhanden as $thema => $wert) {
+        if (!isset($soll[$thema])) {
+            $aus[$thema] = $wert;
+        }
+    }
+    ksort($aus);
+    return $aus;
+}
+
+/**
+ * Die uebergebenen Themen im Broker loeschen (leere Nutzlast, behalten).
+ * Rueckgabe: array(anzahl, fehlertext)
+ */
+function mg_mqtt_verwaiste_loeschen($themen)
+{
+    $cfg = mg_config();
+    $praefix = trim((string) $cfg['mqtt_praefix'], '/ ');
+    if ($praefix === '' || !mg_has_mosquitto() || !$themen) {
+        return array(0, '');
+    }
+    $zeilen = '';
+    $n = 0;
+    foreach ((array) $themen as $thema) {
+        // Fail closed: nur unterhalb des eigenen Praefix. Ein Thema, das von
+        // aussen hereingereicht wurde und woanders liegt, wird uebergangen.
+        if (strncmp((string) $thema, $praefix . '/', strlen($praefix) + 1) !== 0) {
+            continue;
+        }
+        $zeilen .= mg_broker_umgebung() . 'mosquitto_pub' . mg_broker_args()
+                 . ' -r -t ' . escapeshellarg((string) $thema) . " -m ''\n";
+        $n++;
+    }
+    if ($n === 0) {
+        return array(0, '');
+    }
+    $p = mg_paths();
+    if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
+    $datei = $p['tmp'] . '/aufraeumen.' . getmypid() . '.sh';
+    if (!mg_write_atomic($datei, $zeilen, 0600)) {
+        return array(0, 'Datei nicht schreibbar');
+    }
+    $out = array();
+    @exec('sh ' . escapeshellarg($datei) . ' 2>&1', $out, $rc);
+    @unlink($datei);
+    if ($rc !== 0) {
+        return array(0, trim(implode(' ', array_slice($out, 0, 2))));
+    }
+    mg_log('Verwaiste MQTT-Themen geloescht: ' . $n);
+    // Der Merker der Veroeffentlichung wird verworfen, damit der naechste
+    // Lauf den ganzen Satz neu sendet.
+    foreach (mg_fahrzeuge($cfg) as $nr => $f) {
+        @unlink($p['tmp'] . '/veroeffentlicht' . (int) $nr . '.json');
+    }
+    return array($n, '');
 }
 
 /** Hausstandard: Gateway-Autostart aus general.json. */
@@ -2284,6 +2502,13 @@ function mg_selbsttest()
         }
     }
     $add('PRUEF.EINDEUTIG', $eindeutig, $doppelt);
+    /* Kommt am Ende der Schale wieder an, was die Veroeffentlichung
+     * hineingegeben hat? Diese Zeile braucht keinen Broker - und genau sie
+     * haette den Befund von 1.1.2 am ersten Tag gefunden. */
+    if (!empty($cfg['mqtt_ein'])) {
+        list($mq_ok, $mq_txt) = mg_mqtt_probe(1);
+        $add('PRUEF.MQTT', $mq_ok, $mq_txt);
+    }
     $add('PRUEF.REITER', mg_reiter_stimmig(), '');
     list($sa_ok, $sa_txt) = mg_smactive_probe();
     $add('PRUEF.SMACTIVE', $sa_ok, $sa_txt);
