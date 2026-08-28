@@ -2967,3 +2967,8 @@ function mg_sicherung_lesen($roh)
     }
     return array($mangel ? null : $neu, $mangel, $anzahl);
 }
+
+/* Der Escape-Helfer gehoert in die Bibliothek, nicht in
+ * index.php: sonst steht er dem Endpunkt und jedem weiteren
+ * Aufrufer nicht zur Verfuegung (Hausform, REGELN_2). */
+function mg_e($s) { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); }

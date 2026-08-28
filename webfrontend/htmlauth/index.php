@@ -46,7 +46,6 @@ if ($mg_p['lbhome'] !== '' && file_exists($mg_p['lbhome'] . '/libs/phplib/loxber
 $mg_logfile = $mg_p['log'];
 $mg_plugin = $mg_p['plugin'];
 
-function mg_e($s) { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); }
 
 /* ==================================================================
  * Wachposten gegen fremde Absender - VOR allen Handlern.
