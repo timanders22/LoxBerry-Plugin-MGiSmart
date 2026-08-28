@@ -82,7 +82,7 @@ function mg_paths()
             'config' => $lbhomedir . '/config/plugins/' . $plugindir . '/mg.json',
             'backup' => $lbhomedir . '/config/plugins/' . $plugindir . '.backup.json',
             'log' => $lbhomedir . '/log/plugins/' . $plugindir . '/mg.log',
-            'data' => $lbhomedir . '/data/plugins/' . $plugindir,
+            'datadir' => $lbhomedir . '/data/plugins/' . $plugindir,
             'tmp' => '/tmp/mgismart',
             'lbhome' => $lbhomedir,
             'plugin' => $plugindir,
@@ -93,7 +93,7 @@ function mg_paths()
         'config' => $base . '/config/mg.json',
         'backup' => $base . '/config/mg.backup.json',
         'log' => sys_get_temp_dir() . '/mgismart/mg.log',
-        'data' => sys_get_temp_dir() . '/mgismart/data',
+        'datadir' => sys_get_temp_dir() . '/mgismart/data',
         'tmp' => sys_get_temp_dir() . '/mgismart',
         'lbhome' => '',
         'plugin' => 'mgismart',
@@ -566,7 +566,7 @@ function mg_base_topic($nr = 1, $cfg = null)
 function mg_broker_optionsordner()
 {
     $p = mg_paths();
-    return $p['data'] . '/mosquitto';
+    return $p['datadir'] . '/mosquitto';
 }
 
 /**
@@ -705,10 +705,10 @@ function mg_snapshot($sekunden = 3)
             . (int) $alt['anzahl'] . ' Themen - alter Stand bleibt stehen.');
         return array(0, 'unvollstaendig (' . count($werte) . ' von ' . (int) $alt['anzahl'] . ')');
     }
-    if (!is_dir($p['data'])) {
-        @mkdir($p['data'], 0775, true);
+    if (!is_dir($p['datadir'])) {
+        @mkdir($p['datadir'], 0775, true);
     }
-    mg_write_json($p['data'] . '/werte.json', array(
+    mg_write_json($p['datadir'] . '/werte.json', array(
         'zeit' => date('c'), 'anzahl' => count($werte), 'werte' => $werte,
     ));
     return array(1, count($werte) . ' Themen');
@@ -718,7 +718,7 @@ function mg_snapshot($sekunden = 3)
 function mg_raw()
 {
     $p = mg_paths();
-    $d = mg_json_lesen($p['data'] . '/werte.json');
+    $d = mg_json_lesen($p['datadir'] . '/werte.json');
     // Nicht nur "ist ein Feld", sondern "hat die erwartete Form".
     if (!isset($d['werte']) || !is_array($d['werte'])) {
         return array('zeit' => '', 'anzahl' => 0, 'werte' => array());
@@ -1868,7 +1868,7 @@ function mg_check_events($st, $nr = 1)
 
 function mg_ladungen_datei()
 {
-    return mg_paths()['data'] . '/ladungen.json';
+    return mg_paths()['datadir'] . '/ladungen.json';
 }
 
 function mg_ladungen_lesen($grenze = 200)
@@ -1965,10 +1965,10 @@ function mg_horcher_lesen($sekunden = 2)
     }
     list($werte, , ) = mg_sub($themen, $sekunden);
     $p = mg_paths();
-    if (!is_dir($p['data'])) {
-        @mkdir($p['data'], 0775, true);
+    if (!is_dir($p['datadir'])) {
+        @mkdir($p['datadir'], 0775, true);
     }
-    mg_write_json($p['data'] . '/fremd.json', array(
+    mg_write_json($p['datadir'] . '/fremd.json', array(
         'zeit' => date('c'), 'werte' => $werte,
     ));
     return $werte;
@@ -1976,7 +1976,7 @@ function mg_horcher_lesen($sekunden = 2)
 
 function mg_horcher_zustand()
 {
-    $d = mg_json_lesen(mg_paths()['data'] . '/fremd.json');
+    $d = mg_json_lesen(mg_paths()['datadir'] . '/fremd.json');
     return array(
         'zeit' => isset($d['zeit']) ? (string) $d['zeit'] : '',
         'werte' => isset($d['werte']) && is_array($d['werte']) ? $d['werte'] : array(),
@@ -2256,8 +2256,8 @@ function mg_mqtt_probe($nr = 1)
      * data/ leitet sich aus LBHOMEDIR ab und ist damit ueberall derselbe Ort.
      * Eine Pruefzeile, die nur auf dem Geraet laufen kann, ist keine. */
     $p = mg_paths();
-    if (!is_dir($p['data'])) { @mkdir($p['data'], 0775, true); }
-    $datei = $p['data'] . '/probe.' . getmypid() . '.' . mt_rand(1000, 9999) . '.sh';
+    if (!is_dir($p['datadir'])) { @mkdir($p['datadir'], 0775, true); }
+    $datei = $p['datadir'] . '/probe.' . getmypid() . '.' . mt_rand(1000, 9999) . '.sh';
     /* Aus "mosquitto_pub … -r -t <thema> -m <wert>" wird "set -- … -r -t
      * <thema> -m <wert>". Die Argumente sind dann $(n-2) und $n; gedruckt
      * werden sie mit einem Trennzeichen, das in keinem Thema vorkommen kann. */
