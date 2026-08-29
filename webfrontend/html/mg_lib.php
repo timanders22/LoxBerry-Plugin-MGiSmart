@@ -435,6 +435,7 @@ function mg_log($msg)
     if (!is_dir(dirname($f))) {
         @mkdir(dirname($f), 0775, true);
     }
+    clearstatcache(true, $f);
     if (is_file($f) && filesize($f) > 512000) {
         $tail = array_slice(file($f, FILE_IGNORE_NEW_LINES) ?: array(), -200);
         mg_write_atomic($f, implode("\n", $tail) . "\n");
