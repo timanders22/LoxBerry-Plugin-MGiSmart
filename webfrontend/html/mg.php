@@ -28,6 +28,12 @@
 
 require_once __DIR__ . '/mg_lib.php';
 
+/* Diese Datei ist der UNANGEMELDETE Endpunkt. Sie darf lesen und
+ * senden, aber nichts anlegen - auch nicht mittelbar ueber eine der
+ * Bibliotheksfunktionen, die ihrerseits mg_config() rufen. Einmal hier
+ * gesetzt gilt das fuer den ganzen Vorgang. */
+mg_nur_lesen(true);
+
 /**
  * Einen GET-Parameter als Zeichenkette holen.
  *

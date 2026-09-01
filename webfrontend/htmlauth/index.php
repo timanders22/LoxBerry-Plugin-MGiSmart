@@ -228,7 +228,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mqtt_save'])) {
         $mg_v = trim(preg_replace('/[\x00-\x1F\x7F"\'\s]/', '', (string) $mg_v));
         if ($mg_v === '') { continue; }
         if (!preg_match('/^[A-Za-z0-9]{6,32}$/', $mg_v)) {
-            $mg_fehler[] = mg_t('FEHLER.VIN') . ' ' . mg_e(mg_kuerzen($mg_v, 24));
+            $mg_fehler[] = mg_t('FEHLER.VIN') . ' ' . mg_kuerzen($mg_v, 24);
             continue;
         }
         $mg_vins[] = $mg_v;
@@ -242,6 +242,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mqtt_save'])) {
     $mg_neu['mqtt_praefix'] = trim(preg_replace('#[^\w/\-]#', '',
         (string) (isset($_POST['mqtt_praefix']) ? $_POST['mqtt_praefix'] : 'mg')));
     if ($mg_neu['mqtt_praefix'] === '') { $mg_neu['mqtt_praefix'] = 'mg'; }
+
+    /* Zwei verschiedene Praefixe: unter 'prefix' HORCHT das Plugin auf
+     * das Gateway, unter 'mqtt_praefix' SENDET es selbst. Fallen beide
+     * zusammen, loescht der Aufraeumknopf die behaltenen Themen des
+     * Gateways - er raeumt ja "nur unterhalb des eigenen Praefix" auf,
+     * und das ist dann derselbe Baum. Der zuletzt gespeicherte Wert
+     * bleibt in diesem Fall stehen. */
+    $mg_gw = trim((string) $mg_neu['prefix'], '/ ');
+    $mg_ep = trim((string) $mg_neu['mqtt_praefix'], '/ ');
+    if ($mg_gw !== '' && ($mg_gw === $mg_ep
+            || strncmp($mg_gw, $mg_ep . '/', strlen($mg_ep) + 1) === 0)) {
+        $mg_fehler[] = sprintf(mg_t('FEHLER.PRAEFIX_KOLLISION'),
+                               mg_kuerzen($mg_ep, 40));
+        $mg_neu['mqtt_praefix'] = (string) $mg_cfg['mqtt_praefix'];
+    }
 
     if (mg_config_save($mg_neu)) {
         $mg_meldungen[] = mg_t('MELDUNG.GESPEICHERT');
@@ -276,7 +291,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
         } elseif (preg_match('/^-?\d{1,3}(\.\d{1,8})?$/', $mg_w) && abs((float) $mg_w) <= $mg_max) {
             $mg_neu[$mg_f] = $mg_w;
         } else {
-            $mg_fehler[] = mg_t('FEHLER.KOORDINATE') . ' ' . mg_e(mg_kuerzen($mg_w, 20));
+            $mg_fehler[] = mg_t('FEHLER.KOORDINATE') . ' ' . mg_kuerzen($mg_w, 20);
         }
     }
     $mg_neu['heim_radius'] = max(20, min(20000,
@@ -305,7 +320,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
         if ($mg_u !== '') {
             $mg_neu[$mg_f] = $mg_u;
         } elseif (trim($mg_w) !== '') {
-            $mg_fehler[] = mg_t('FEHLER.UHRZEIT') . ' ' . mg_e(mg_kuerzen($mg_w, 20));
+            $mg_fehler[] = mg_t('FEHLER.UHRZEIT') . ' ' . mg_kuerzen($mg_w, 20);
         }
     }
     $mg_w = strtolower((string) (isset($_POST['plan_modus']) ? $_POST['plan_modus'] : ''));
@@ -348,6 +363,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
     $mg_tab = 'tab-settings';
 }
 
+/* Dieser Zweig stand frueher HINTER dem Ableitungsblock weiter unten -
+ * als einziger der Speicherzweige. Deshalb zeigte die Seite nach einer
+ * erfolgreich eingespielten Sicherung weiter die ALTEN Felder und das
+ * ALTE Aktionstoken, waehrend auf der Platte schon das neue lag. Wer das
+ * Token abschrieb, trug ein totes in den Miniserver ein; wer die Felder
+ * fuer "nicht uebernommen" hielt, speicherte erneut und ueberschrieb die
+ * eben eingespielte Sicherung. Er gehoert vor die Ableitung, nicht
+ * dahinter - dann zieht sie von selbst nach. */
+/* ---------------- Einstellungen zurueckspielen ----------------
+ *
+ * is_uploaded_file() ZUERST: ohne diese Pruefung liesse sich jede Datei des
+ * Servers unterschieben. Dann die Groessengrenze - eine Sicherung dieses
+ * Plugins ist wenige Kilobyte gross; alles darueber wird gar nicht gelesen. */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mg_zurueck'])) {
+    if (!isset($_FILES['mg_sicherung']) || !is_array($_FILES['mg_sicherung'])
+        || !isset($_FILES['mg_sicherung']['tmp_name'])
+        || !@is_uploaded_file($_FILES['mg_sicherung']['tmp_name'])) {
+        $mg_fehler[] = mg_t('EINST.SICH_KEINE_DATEI');
+    } elseif ((int) $_FILES['mg_sicherung']['size'] > 262144) {
+        $mg_fehler[] = mg_t('EINST.SICH_ZU_GROSS');
+    } else {
+        list($mg_neu, $mg_mangel, $mg_n) = mg_sicherung_lesen(
+            (string) @file_get_contents($_FILES['mg_sicherung']['tmp_name']));
+        if ($mg_neu === null) {
+            /* ALLE Beanstandungen, nicht nur die erste - und geaendert wird
+             * nichts. */
+            $mg_fehler[] = mg_t('EINST.SICH_ABGELEHNT') . ' '
+                            . implode(' ', $mg_mangel);
+        } elseif (mg_config_save($mg_neu)) {
+            $mg_meldungen[] = sprintf(mg_t('EINST.SICH_UEBERNOMMEN'), $mg_n);
+        } else {
+            $mg_fehler[] = mg_t('EINST.SICH_SCHREIBFEHLER');
+        }
+    }
+}
 /* ---------------- Anzeige vorbereiten ---------------- */
 
 $mg_token = (string) $mg_cfg['aktionstoken'];
@@ -432,33 +482,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mg_sichern'])) {
     $mg_fehler[] = mg_t('EINST.SICH_SCHREIBFEHLER');
 }
 
-/* ---------------- Einstellungen zurueckspielen ----------------
- *
- * is_uploaded_file() ZUERST: ohne diese Pruefung liesse sich jede Datei des
- * Servers unterschieben. Dann die Groessengrenze - eine Sicherung dieses
- * Plugins ist wenige Kilobyte gross; alles darueber wird gar nicht gelesen. */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mg_zurueck'])) {
-    if (!isset($_FILES['mg_sicherung']) || !is_array($_FILES['mg_sicherung'])
-        || !isset($_FILES['mg_sicherung']['tmp_name'])
-        || !@is_uploaded_file($_FILES['mg_sicherung']['tmp_name'])) {
-        $mg_fehler[] = mg_t('EINST.SICH_KEINE_DATEI');
-    } elseif ((int) $_FILES['mg_sicherung']['size'] > 262144) {
-        $mg_fehler[] = mg_t('EINST.SICH_ZU_GROSS');
-    } else {
-        list($mg_neu, $mg_mangel, $mg_n) = mg_sicherung_lesen(
-            (string) @file_get_contents($_FILES['mg_sicherung']['tmp_name']));
-        if ($mg_neu === null) {
-            /* ALLE Beanstandungen, nicht nur die erste - und geaendert wird
-             * nichts. */
-            $mg_fehler[] = mg_t('EINST.SICH_ABGELEHNT') . ' '
-                            . implode(' ', $mg_mangel);
-        } elseif (mg_config_save($mg_neu)) {
-            $mg_meldungen[] = sprintf(mg_t('EINST.SICH_UEBERNOMMEN'), $mg_n);
-        } else {
-            $mg_fehler[] = mg_t('EINST.SICH_SCHREIBFEHLER');
-        }
-    }
-}
 
 
 if (class_exists('LBWeb', false)) {

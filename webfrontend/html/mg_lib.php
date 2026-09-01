@@ -124,12 +124,17 @@ function mg_write_atomic($datei, $inhalt, $rechte = 0644)
         return false;
     }
     $tmp = $datei . '.' . getmypid() . '.' . mt_rand(1000, 9999) . '.tmp';
+    /* Rechte VOR dem Inhalt setzen, nicht erst danach. Sonst liegt das
+     * Aktionstoken einen Augenblick lang mit 0644 im Ordner - kurz, aber
+     * lesbar. Erst anlegen, dann beschraenken, dann fuellen. */
+    if (@file_put_contents($tmp, '') === false) {
+        return false;
+    }
+    @chmod($tmp, $rechte);
     if (@file_put_contents($tmp, $inhalt) !== strlen($inhalt)) {
         @unlink($tmp);
         return false;
     }
-    // Rechte VOR dem Umbenennen setzen.
-    @chmod($tmp, $rechte);
     if (!@rename($tmp, $datei)) {
         @unlink($tmp);
         return false;
@@ -260,6 +265,34 @@ function mg_vorgaben()
     );
 }
 
+/**
+ * Nur-Lesen fuer den ganzen Vorgang an- oder abfragen.
+ *
+ * mg.php - der unangemeldete Endpunkt - setzt das einmal ganz oben.
+ * Danach legt mg_config() nichts mehr an, gleich ueber welchen der
+ * 27 Aufrufwege es erreicht wird. Ein Beiwert an einzelnen
+ * Aufrufstellen haette die 25 mittelbaren nicht gedeckt und waere beim
+ * naechsten Umbau vergessen worden.
+ */
+function mg_nur_lesen($setzen = null)
+{
+    static $an = false;
+    if ($setzen !== null) {
+        $an = (bool) $setzen;
+    }
+    return $an;
+}
+
+/**
+ * Die Konfiguration lesen.
+ *
+ * Fehlt die mg.json, aber es liegt eine Zweitschrift vor, wird sie
+ * daraus wiederhergestellt - AUSSER im Nur-Lesen-Betrieb. Eine einzige
+ * tokenlose Anfrage hat sonst auf jeder Anlage, die schon einmal
+ * gespeichert hat, die mg.json angelegt. Gelesen wird dann die
+ * Zweitschrift unmittelbar; die Tokenpruefung bleibt also moeglich,
+ * nur der Schreibzugriff faellt weg.
+ */
 function mg_config()
 {
     $p = mg_paths();
@@ -271,14 +304,19 @@ function mg_config()
      * schon gibt. */
     $roh = is_file($p['config'])
         ? trim((string) @file_get_contents($p['config'])) : '';
+    $quelle = $p['config'];
     if (($roh === '' || $roh === '{}') && is_file($p['backup'])) {
-        if (!is_dir(dirname($p['config']))) {
-            @mkdir(dirname($p['config']), 0775, true);
+        if (!mg_nur_lesen()) {
+            if (!is_dir(dirname($p['config']))) {
+                @mkdir(dirname($p['config']), 0775, true);
+            }
+            @copy($p['backup'], $p['config']);
+            @chmod($p['config'], 0600);
+        } else {
+            $quelle = $p['backup'];
         }
-        @copy($p['backup'], $p['config']);
-        @chmod($p['config'], 0600);
     }
-    $cfg = mg_json_lesen($p['config']);
+    $cfg = mg_json_lesen($quelle);
     $cfg += mg_vorgaben();
 
     /* Altbestand: bis 1.0.8 gab es genau eine VIN in 'vin'. Sie wandert in die
@@ -617,7 +655,15 @@ function mg_broker_optionsdatei($erzwingen = false)
         }
         // Auch wenn nichts drinsteht, wird die Datei geschrieben (leer) -
         // sonst bliebe eine alte mit den vorherigen Zugangsdaten liegen.
-        mg_write_atomic($datei, $zeilen, 0600);
+        //
+        // Der Rueckgabewert wurde frueher verworfen. Schlaegt das
+        // Schreiben fehl, bleibt genau die alte Datei mit den
+        // VORHERIGEN Zugangsdaten liegen - der Fall, den der Absatz
+        // darueber verhindern soll. Das gehoert ins Protokoll.
+        if (!mg_write_atomic($datei, $zeilen, 0600)) {
+            mg_log('Zugangsdatei nicht schreibbar: ' . $datei
+                   . ' - es gilt weiter der vorherige Stand');
+        }
     }
     return $ordner;
 }
@@ -2337,7 +2383,25 @@ function mg_mqtt_verwaiste_loeschen($themen)
 {
     $cfg = mg_config();
     $praefix = trim((string) $cfg['mqtt_praefix'], '/ ');
-    if ($praefix === '' || !mg_has_mosquitto() || !$themen) {
+    if ($praefix === '') {
+        return array(0, '');
+    }
+    /* Fail closed gegen die Selbstkollision. Gesendet wird unter
+     * mqtt_praefix, GEHORCHT wird unter prefix - dem Themenbaum des
+     * Gateways. Sind beide gleich, oder liegt der des Gateways
+     * unterhalb des eigenen, dann trifft "nur unterhalb des eigenen
+     * Praefix" genau die behaltenen Themen des Gateways, und ein Klick
+     * auf Aufraeumen loescht sie. Aeltere Konfigurationen koennen so
+     * eingestellt sein - deshalb wird hier geprueft und nicht nur beim
+     * Speichern. */
+    $gw = trim((string) $cfg['prefix'], '/ ');
+    if ($gw !== '' && ($gw === $praefix
+            || strncmp($gw, $praefix . '/', strlen($praefix) + 1) === 0)) {
+        return array(0, 'Eigenes MQTT-Praefix und Gateway-Praefix'
+                        . ' kollidieren (' . $praefix . ') -'
+                        . ' es wurde nichts geloescht');
+    }
+    if (!mg_has_mosquitto() || !$themen) {
         return array(0, '');
     }
     $zeilen = '';
@@ -2537,10 +2601,46 @@ function mg_selbsttest()
  * als "trifft nicht zu" meldet. Ausgeschrieben koennen sie aber auseinander
  * laufen; genau dafuer gibt es diese Zeile.
  */
+/**
+ * Die Admin-Oberflaeche finden - auch im INSTALLIERTEN Aufbau.
+ *
+ * Im entpackten Archiv liegen html/ und htmlauth/ nebeneinander,
+ * installiert aber in getrennten Baeumen mit einer plugins-Ebene
+ * dazwischen:
+ *     <home>/webfrontend/html/plugins/<ordner>/mg_lib.php
+ *     <home>/webfrontend/htmlauth/plugins/<ordner>/index.php
+ * dirname(__DIR__) traf deshalb NUR im Archiv. Die drei
+ * Selbstpruefungen darunter lieferten am Geraet dauerhaft den Strich
+ * "nicht feststellbar", waehrend die Pruefkette im Archiv gruene Haken
+ * sah - der Fehler war also gerade dort unsichtbar, wo gemessen wurde.
+ *
+ * Rueckgabe: der Pfad, oder '' wenn die Datei nirgends liegt.
+ */
+function mg_htmlauth_index()
+{
+    $p = mg_paths();
+    $kandidaten = array(dirname(__DIR__) . '/htmlauth/index.php');
+    if (!empty($p['lbhome'])) {
+        $wurzel = $p['lbhome'] . '/webfrontend/htmlauth/plugins/';
+        $kandidaten[] = $wurzel . basename(__DIR__) . '/index.php';
+        $ordner = getenv('LBPPLUGINDIR');
+        if ($ordner) {
+            $kandidaten[] = $wurzel . $ordner . '/index.php';
+        }
+        $kandidaten[] = $wurzel . 'mgismart/index.php';
+    }
+    foreach ($kandidaten as $k) {
+        if (is_file($k)) {
+            return $k;
+        }
+    }
+    return '';
+}
+
 function mg_reiter_stimmig()
 {
-    $datei = dirname(__DIR__) . '/htmlauth/index.php';
-    if (!is_file($datei)) {
+    $datei = mg_htmlauth_index();
+    if ($datei === '') {
         return 2;
     }
     $q = (string) @file_get_contents($datei);
@@ -2573,8 +2673,8 @@ function mg_reiter_stimmig()
  */
 function mg_smactive_probe()
 {
-    $datei = dirname(__DIR__) . '/htmlauth/index.php';
-    if (!is_file($datei)) {
+    $datei = mg_htmlauth_index();
+    if ($datei === '') {
         return array(2, '');
     }
     $s = (string) @file_get_contents($datei);
@@ -2597,8 +2697,8 @@ function mg_smactive_probe()
  */
 function mg_formularprobe()
 {
-    $datei = dirname(__DIR__) . '/htmlauth/index.php';
-    if (!is_file($datei)) {
+    $datei = mg_htmlauth_index();
+    if ($datei === '') {
         return array(2, '');
     }
     $s = (string) @file_get_contents($datei);
@@ -2643,9 +2743,12 @@ function mg_t($schluessel)
     if ($texte === null) {
         $home = getenv('LBHOMEDIR');
         if (!$home || !is_dir($home)) {
-            foreach (array(lb_wurzel_ermitteln(), '/home/loxberry/loxberry') as $k) {
-                if ($k && is_dir($k)) { $home = $k; break; }
-            }
+            /* Kein fest verdrahteter Systempfad. LoxBerry laesst sich
+             * anderswohin installieren, und das Deinstallationsskript
+             * dieses Plugins haelt es ausdruecklich ebenso.
+             * lb_wurzel_ermitteln() steigt vom eigenen Ablageort auf. */
+            $k = lb_wurzel_ermitteln();
+            if ($k && is_dir($k)) { $home = $k; }
         }
         $ordner = basename(dirname(__FILE__));
         $pfad = $home . '/templates/plugins/' . $ordner . '/lang';
