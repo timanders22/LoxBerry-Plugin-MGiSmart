@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.9
+Version 1.1.10
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -345,7 +345,7 @@ Zwei Dinge sind praktisch wichtig:
 
 ## Voraussetzungen
 
-- LoxBerry-Plugin **Docker** (für den Gateway-Container)
+- LoxBerry-Plugin **Docker NG** für den Gateway-Container (`github.com/timanders22/LoxBerry-Plugin-Docker-NG`); das ältere **Docker** von Michael Miklis tut es ebenso
 - Paket **mosquitto-clients** (wird bei der Installation mitinstalliert)
 - iSMART-Konto mit registriertem Fahrzeug
 
