@@ -677,11 +677,11 @@ if (class_exists('LBWeb', false)) {
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.HEIM_BREITE')) ?></label>
-	<input data-role="none" type="text" name="heim_breite" value="<?= mg_e($mg_cfg['heim_breite']) ?>" placeholder="51.1634">
+	<input data-role="none" type="text" name="heim_breite" value="<?= mg_e($mg_cfg['heim_breite']) ?>" placeholder="51.3183">
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.HEIM_LAENGE')) ?></label>
-	<input data-role="none" type="text" name="heim_laenge" value="<?= mg_e($mg_cfg['heim_laenge']) ?>" placeholder="10.4477">
+	<input data-role="none" type="text" name="heim_laenge" value="<?= mg_e($mg_cfg['heim_laenge']) ?>" placeholder="9.4896">
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.HEIM_RADIUS')) ?></label>
