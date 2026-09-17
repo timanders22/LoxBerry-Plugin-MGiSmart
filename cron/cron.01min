@@ -1,11 +1,11 @@
 #!/bin/sh
 # MG iSmart - liest jede Minute die Werte des SAIC-MQTT-Gateways ein.
 #
-# REPLACELBPBINDIR wird bei der Installation durch <home>/bin/plugins/<ordner>
-# ersetzt.
+# Den bin-Pfad <home>/bin/plugins/<ordner> setzt der Installer in der
+# Befehlszeile ein.
 #
 # WARUM bin/ UND NICHT webfrontend/html/
-# Bis 1.0.2 stand hier REPLACELBPHTMLDIR/cron.php - das Skript lag also im
+# Bis 1.0.2 stand hier <HTML-Ordner des Plugins>/cron.php - das Skript lag also im
 # UNANGEMELDETEN Webordner und war damit fuer jeden erreichbar, der die
 # LoxBerry-Oberflaeche im Netz sieht:
 #     http://loxberry/plugins/mgismart/cron.php

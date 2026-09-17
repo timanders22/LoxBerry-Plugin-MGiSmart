@@ -436,7 +436,12 @@ function mg_pluginversion()
         return $v;
     }
     if (class_exists('LBSystem', false) && method_exists('LBSystem', 'pluginversion')) {
-        $aus = @LBSystem::pluginversion();
+        /* Ueber den Ordnernamen fragen (Regeln/03): ohne Argument haengt die
+         * Antwort am ersten eingebundenen Skript - am Geraet gemessen
+         * 17.09.2026: aus einem fremden Einstieg (php -r) NULL, mit dem
+         * Ordnernamen die installierte Fassung. Installiert liegt diese Datei
+         * unter webfrontend/html(auth)/plugins/<ordner>/. */
+        $aus = @LBSystem::pluginversion(basename(__DIR__));
         if ($aus !== null && trim((string) $aus) !== '') {
             $v = trim((string) $aus);
             return $v;
@@ -2189,11 +2194,41 @@ function mg_mqtt_argumente($nr, $st)
     return $aus;
 }
 
+/**
+ * Textthemen, die REGELMAESSIG leer werden - sie gehen nie mit -r hinaus.
+ *
+ * Eine leere Nutzlast mit -r loescht das behaltene Thema im Broker
+ * (Regeln/07, am Broker belegt 14.09.2026); bis 1.1.11 gingen diese Themen
+ * bei jedem Leerwerden so hinaus. Nur den leeren Wert ohne -r zu schicken
+ * genuegt aber nicht: dann bliebe der LETZTE Text behalten stehen - die
+ * offene Tuer von gestern, ein laengst behobener Fehler - und kaeme nach
+ * einem Neustart des Gateways als frisch beim Miniserver an. Deshalb gehen
+ * diese Themen gar nicht behalten hinaus (Regeln/07: "Ein Thema, das im
+ * Regelfall leer ist, darf nicht retained sein").
+ */
+function mg_mqtt_fluechtig()
+{
+    return array('tueren_namen', 'fenster_namen', 'fehlertext', 'meldung',
+                 'ladeplan', 'heizplan', 'abbruchgrund', 'fahrzeugmeldung');
+}
+
+/** Geht dieser Wert behalten (-r) hinaus?
+ *  Nie bei einem leeren Wert, nie bei einem Thema aus mg_mqtt_fluechtig(). */
+function mg_mqtt_behalten($thema, $wert)
+{
+    if ((string) $wert === '') {
+        return false;
+    }
+    $name = substr((string) $thema, strrpos('/' . $thema, '/'));
+    return !in_array($name, mg_mqtt_fluechtig(), true);
+}
+
 /** Eine vollstaendige mosquitto_pub-Zeile fuer ein Thema. */
 function mg_mqtt_zeile($thema, $wert)
 {
     return mg_broker_umgebung() . 'mosquitto_pub' . mg_broker_args()
-         . ' -r -t ' . escapeshellarg($thema)
+         . (mg_mqtt_behalten($thema, $wert) ? ' -r' : '')
+         . ' -t ' . escapeshellarg($thema)
          . ' -m ' . escapeshellarg($wert);
 }
 
@@ -2249,11 +2284,27 @@ function mg_mqtt_senden($nr, $st)
      * Jetzt schreibt PHP eine fertige Befehlsdatei: jedes Argument geht durch
      * escapeshellarg(). Es gibt kein Trennzeichen mehr, das falsch verstanden
      * werden koennte. */
+    /* Einmal nach jeder Installation: die Themen aus mg_mqtt_fluechtig()
+     * gingen bis 1.1.11 behalten hinaus, ihr letzter Text liegt noch im
+     * Broker. Er wird geloescht, der aktuelle Wert folgt in derselben Datei
+     * ohne -r. Der Merker liegt unter data/ - den raeumt der Installer bei
+     * jedem Update ab, also laeuft das Abraeumen nach jedem Update einmal. */
+    $p = mg_paths();
+    $abgeraeumt = $p['datadir'] . '/mqtt_fluechtig_abgeraeumt';
     $zeilen = '';
+    if (!is_file($abgeraeumt)) {
+        foreach ($paare as $thema => $wert) {
+            $name = substr((string) $thema, strrpos('/' . $thema, '/'));
+            if (in_array($name, mg_mqtt_fluechtig(), true)) {
+                $zeilen .= mg_broker_umgebung() . 'mosquitto_pub' . mg_broker_args()
+                         . ' -r -t ' . escapeshellarg((string) $thema) . " -m '' || exit 1\n";
+                $zu_senden[$thema] = $wert;
+            }
+        }
+    }
     foreach ($zu_senden as $thema => $wert) {
         $zeilen .= mg_mqtt_zeile($thema, $wert) . ' || exit 1' . "\n";
     }
-    $p = mg_paths();
     if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
     $tmp = $p['tmp'] . '/publish.' . getmypid() . '.' . mt_rand(1000, 9999) . '.sh';
     if (!mg_write_atomic($tmp, $zeilen, 0600)) {
@@ -2269,6 +2320,10 @@ function mg_mqtt_senden($nr, $st)
     }
     mg_write_json($merk, array('zeit' => $vollstaendig ? time() : (int) $alt['zeit'],
         'werte' => $paare), 0600);
+    if (!is_file($abgeraeumt)) {
+        if (!is_dir($p['datadir'])) { @mkdir($p['datadir'], 0775, true); }
+        @file_put_contents($abgeraeumt, date('c') . "\n");
+    }
     mg_log_if_changed('mqtt', 'Veroeffentlichung laeuft (' . count($paare)
         . ' Themen je Fahrzeug)');
     return count($zu_senden);
