@@ -20,13 +20,33 @@
 
 error_reporting(E_ALL & ~E_DEPRECATED & ~E_NOTICE);
 
-$mg_ordner = getenv('LBPPLUGINDIR') ?: basename(__DIR__);
+/* Die Bibliothek: die Wurzel wird GELESEN, der Ordnername kommt aus dem
+ * eigenen Ablageort.
+ *
+ * Bis 1.1.14 stand hier als zweiter Kandidat der FESTE Ordnername des
+ * Plugins, und der erste nahm den Ordner aus der Umgebung (LBPPLUGINDIR ist
+ * am Geraet nie gesetzt, Regeln/03). Gemessen am 18.09.2026 in WSL
+ * (Pruefung-MGiSmart-1.1.14, Faelle H2/H3; Bestand-2026-09-18/klasse-H,
+ * M6b): als Zweitinstallation mgismart01 ohne eigene Bibliothek lud die
+ * Oberflaeche die des FREMDEN gleichnamigen Plugins und arbeitete danach auf
+ * dessen Konfiguration. Ohne eigene Bibliothek endet die Seite jetzt mit der
+ * Meldung darunter.
+ *
+ * Die erste Stufe fragt $LBHOMEDIR (Regeln/03, Hausform dreistufig; wie
+ * Raumklima 0.11.10): liegt die Oberflaeche in einem zweiten Baum, laedt sie
+ * die Bibliothek der Anlage, die die Umgebung nennt (Fall H6). Ein
+ * ausgepacktes Archiv traegt hier den Ordnernamen "htmlauth", findet unter
+ * $LBHOMEDIR also nichts und laedt seine eigene (Faelle H4/H5). */
+$mg_ordner = basename(__DIR__);
+$mg_home = getenv('LBHOMEDIR');
 foreach (array(
+    ($mg_home && is_dir($mg_home))
+        ? rtrim($mg_home, '/') . '/webfrontend/html/plugins/' . $mg_ordner . '/mg_lib.php'
+        : '',
     dirname(dirname(dirname(__DIR__))) . '/html/plugins/' . $mg_ordner . '/mg_lib.php',
-    dirname(dirname(dirname(__DIR__))) . '/html/plugins/mgismart/mg_lib.php',
     dirname(__DIR__) . '/html/mg_lib.php',
 ) as $mg_kandidat) {
-    if (is_file($mg_kandidat)) {
+    if ($mg_kandidat !== '' && is_file($mg_kandidat)) {
         require_once $mg_kandidat;
         break;
     }

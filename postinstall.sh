@@ -66,6 +66,27 @@ PYEOF
     return 1
 }
 
+# Kopieren ueber eine Nebendatei: umbenannt wird erst, wenn die Nebendatei
+# byteweise der Quelle gleicht. Ein cp unmittelbar aufs Ziel kuerzt es zuerst
+# auf null; scheitert das Schreiben danach (volle Karte), ist der alte Stand
+# fort und der neue halb. Bis 1.1.14 stand hier genau das, und gemeldet wurde
+# ohne Blick auf die Wirkung - gemessen am 18.09.2026 in WSL unter
+# "ulimit -f 0" (Pruefung-MGiSmart-1.1.14, Faelle K2/K4): mg.json danach
+# 0 Byte, gemeldet "wiederhergestellt" und "liegt unter ...kaputt".
+# Rueckgabe 0 nur, wenn das Ziel danach der Quelle gleicht.
+mg_kopieren() {   # $1 Quelle, $2 Ziel, $3 Rechte
+    mg_neu="$2.neu.$$"
+    if ( umask 077 && cp -p "$1" "$mg_neu" ) 2>/dev/null \
+       && cmp -s "$1" "$mg_neu" \
+       && chmod "$3" "$mg_neu" 2>/dev/null \
+       && mv -f "$mg_neu" "$2" 2>/dev/null \
+       && cmp -s "$1" "$2"; then
+        return 0
+    fi
+    rm -f "$mg_neu" 2>/dev/null
+    return 1
+}
+
 if [ ! -f "$CF" ]; then
     echo '{}' > "$CF"
 fi
@@ -77,13 +98,19 @@ if [ -f "$BK" ] && ! hat_inhalt "$CF" && hat_inhalt "$BK"; then
     # Was verdraengt wird, bleibt liegen - es koennen Zugangsdaten darin
     # stehen, und "{}" ist nichts wert.
     if [ -s "$CF" ] && [ "$(tr -d ' \t\r\n' < "$CF" 2>/dev/null)" != "{}" ]; then
-        cp -p "$CF" "$CF.kaputt" 2>/dev/null
-        chmod 600 "$CF.kaputt" 2>/dev/null
-        echo "<INFO> Der vorherige Inhalt liegt unter $CF.kaputt"
+        if mg_kopieren "$CF" "$CF.kaputt" 600; then
+            echo "<INFO> Der vorherige Inhalt liegt unter $CF.kaputt"
+        else
+            echo "<WARNING> Der vorherige Inhalt liess sich nicht nach $CF.kaputt legen."
+        fi
     fi
-    cp -p "$BK" "$CF"
-    chmod 600 "$CF" 2>/dev/null
-    echo "<OK> Konfiguration aus der Sicherung wiederhergestellt."
+    if mg_kopieren "$BK" "$CF" 600; then
+        echo "<OK> Konfiguration aus der Sicherung wiederhergestellt."
+    else
+        echo "<WARNING> Die Sicherung liess sich nicht nach $CF zurueckspielen."
+        echo "<WARNING> Sie liegt unveraendert unter $BK; die Bibliothek versucht es"
+        echo "<WARNING> beim naechsten Lesen der Konfiguration erneut."
+    fi
 fi
 
 # Ordner fuer die Zugangsdaten von mosquitto_sub/_pub. 0700, denn hier steht

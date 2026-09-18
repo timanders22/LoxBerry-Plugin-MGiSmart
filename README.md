@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.13
+Version 1.1.14
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -441,6 +441,50 @@ Was sich geändert hat:
   Zweitschrift kann älter sein als das Verlorene, und die Ursache besteht fort.
 
 An der Anbindung ans MQTT-Gateway ist nichts geändert worden.
+
+## Fassung 1.1.14 — Wurzel gelesen, Meldungen nach Wirkung
+
+Gemessen am 18.09.2026 in WSL/Ubuntu (PHP 8.3.6, bash 5.2) mit 28 Fällen:
+vorher 27 rote Prüfzeilen, nachher keine; die geänderten PHP-Pfade zusätzlich
+unter PHP 7.4.33 und 8.4.24. Nicht am Gerät gemessen.
+
+* **Die Oberfläche lädt nie mehr die Bibliothek eines fremden Plugins.** Bis
+  1.1.13 stand in `webfrontend/htmlauth/index.php` der feste Ordnername als
+  Rückfall. LoxBerry installiert dieses Plugin als `mgismart01`, wenn das
+  gleichnamige Plugin eines anderen Autors schon als `mgismart` liegt; fehlte
+  dann die eigene Bibliothek, lud die Oberfläche die fremde und arbeitete auf
+  deren Konfiguration. Die Wurzel kommt jetzt aus `$LBHOMEDIR`, der
+  Ordnername aus dem eigenen Ablageort. Ein ausgepacktes Archiv lädt weiterhin
+  seine eigene Bibliothek, auch wenn es neben einer Installation liegt.
+* **Die Wurzelsuche verlangt `config/system/general.json`.** Ohne `$LBHOMEDIR`
+  hielt die Bibliothek jedes Verzeichnis mit `config/plugins` und
+  `webfrontend` für die LoxBerry-Wurzel und legte dort Konfiguration und
+  Zweitschrift an. Dasselbe gilt für den Rückfall in `uninstall/uninstall`:
+  ohne brauchbare Wurzel wird dort jetzt nichts gelöscht.
+* **In der Upgrade-Lücke bleibt der eigene Ordnername.** Fehlte
+  `config/plugins/<ordner>/`, weil der Installer ihn gerade gelöscht hatte,
+  nahm eine Zweitinstallation den festen Namen, würfelte beim ersten Öffnen
+  ein neues Merkwort und legte es samt Zweitschrift unter diesem Namen ab.
+* **Die Hakenskripte melden, was sie nachgesehen haben.** Bei voller Karte
+  meldete `postinstall.sh` „wiederhergestellt", während `mg.json` danach
+  0 Byte groß war. Kopiert wird jetzt über eine Nebendatei, die erst nach dem
+  byteweisen Vergleich umbenannt wird; scheitert es, steht eine Warnung da.
+  Ebenso meldete `postupgrade.sh` die alte, über HTTP erreichbare `cron.php`
+  als „entfernt", auch wenn `rm` scheiterte.
+* **Die Ladevorgänge gehen im Upgrade nicht mehr verloren.** Endete eine
+  Ladung in der Minute, in der der Minutentakt schon läuft, aber
+  `postupgrade.sh` noch nicht, blieben nur diese eine und alle gesicherten
+  fielen weg. Beide Stände werden jetzt über die Kennung zusammengeführt; eine
+  unlesbare Sicherung wird nicht übernommen, sondern liegt als
+  `ladungen.json.kaputt` daneben.
+* **Die Deinstallation räumt auch `<ordner>.backup.json.kaputt` weg** — dort
+  können Broker-Passwort und Merkwort stehen — und sagt nur noch „fort", wenn
+  nichts mehr liegt.
+* Ein schon liegendes `mg.json.kaputt` wird über eine Nebendatei ersetzt, nicht
+  mehr mit `copy()`; bei voller Karte blieb sonst ein halber Stand.
+
+An der Anbindung ans MQTT-Gateway und an den MQTT-Themen ist nichts geändert
+worden.
 
 ## Lizenz
 

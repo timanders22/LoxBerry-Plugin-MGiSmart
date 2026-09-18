@@ -40,8 +40,32 @@ BASE="${5:-$LBHOMEDIR}"
 # ab und uebergibt die LoxBerry-Wurzel als fuenftes Argument
 # (plugininstall.pl:1158 und :1577, am Geraet nachgesehen 17.09.2026);
 # dieser Zweig greift nur, wenn beides fehlt.
+#
+# Wurzel ist, was config/plugins, data/plugins UND config/system/general.json
+# traegt (Regeln/06). Bis 1.1.14 wurden hier drei Ebenen hinauf gerechnet und
+# nichts geprueft: gemessen am 18.09.2026 in WSL (Pruefung-MGiSmart-1.1.14,
+# Fall U1) loeschte das Skript, drei Ebenen unter einem fremden Baum ohne
+# general.json abgelegt, dessen mgismart.backup.json und meldete Erfolg.
+# Ohne brauchbare Wurzel wird jetzt nichts entfernt.
+lb_wurzel_suchen() {
+    v=$(cd "$(dirname "$(readlink -f "$0")")" 2>/dev/null && pwd)
+    i=0
+    while [ -n "$v" ] && [ "$v" != "/" ] && [ $i -lt 8 ]; do
+        if [ -d "$v/config/plugins" ] && [ -d "$v/data/plugins" ] \
+           && [ -f "$v/config/system/general.json" ]; then
+            echo "$v"; return 0
+        fi
+        v=$(dirname "$v"); i=$((i + 1))
+    done
+    return 1
+}
 if [ -z "$BASE" ] || [ ! -d "$BASE" ]; then
-    BASE=$(cd "$(dirname "$(readlink -f "$0")")/../../.." 2>/dev/null && pwd)
+    BASE=$(lb_wurzel_suchen)
+fi
+if [ -z "$BASE" ] || [ ! -d "$BASE" ]; then
+    echo "<WARNING> Das LoxBerry-Wurzelverzeichnis liess sich nicht bestimmen - nichts entfernt."
+    echo "<WARNING> Liegen bleiben kann config/plugins/$PDIR.backup.json mit Broker-Passwort und Merkwort."
+    exit 1
 fi
 
 PCONFIG="$BASE/config/plugins/$PDIR"
@@ -85,8 +109,28 @@ for D in /proc/[0-9]*; do
 done
 [ "$GEFUNDEN" -eq 0 ] && echo "<INFO> Es lief kein Abruf."
 
-if [ -f "$BK" ]; then
-    rm -f "$BK" && echo "<OK> Sicherung der Konfiguration entfernt: $PDIR.backup.json"
+# Die Zweitschrift UND ihr beiseitegelegter Stand: mg_kaputt_beiseite()
+# (mg_lib.php) legt eine beschaedigte Zweitschrift als
+# <ordner>.backup.json.kaputt daneben - ausserhalb des Plugin-Ordners, also
+# raeumt LoxBerry sie nicht weg. Bis 1.1.14 blieb sie liegen, und das Skript
+# meldete trotzdem, Broker-Passwort und Merkwort seien fort; ebenso, wenn rm
+# scheiterte (gemessen 18.09.2026 in WSL, Pruefung-MGiSmart-1.1.14, Faelle
+# U3/U4). Gemeldet wird jetzt, was nachgesehen wurde.
+MG_ENTFERNT=0; MG_BLEIBT=0
+for MG_F in "$BK" "$BK.kaputt"; do
+    [ -e "$MG_F" ] || continue
+    rm -f "$MG_F" 2>/dev/null
+    if [ -e "$MG_F" ]; then
+        MG_BLEIBT=$((MG_BLEIBT + 1))
+        echo "<WARNING> Liess sich nicht entfernen: $MG_F"
+    else
+        MG_ENTFERNT=$((MG_ENTFERNT + 1))
+        echo "<OK> Entfernt: $(basename "$MG_F")"
+    fi
+done
+if [ "$MG_BLEIBT" -gt 0 ]; then
+    echo "<WARNING> Darin stehen Broker-Passwort und Merkwort - bitte von Hand entfernen."
+elif [ "$MG_ENTFERNT" -gt 0 ]; then
     echo "<INFO> Broker-Passwort und Merkwort sind damit vom LoxBerry fort."
 else
     echo "<INFO> Keine Sicherung ausserhalb des Plugin-Ordners vorhanden."

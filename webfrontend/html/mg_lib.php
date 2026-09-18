@@ -37,14 +37,20 @@ if (!defined('MG_LOXONE_EPOCHE')) {
 /* Den LoxBerry-Wurzelordner ohne festen Systempfad bestimmen.
  *
  * Vom eigenen Ablageort aufwaerts, bis ein Verzeichnis gefunden ist, das
- * config/plugins UND webfrontend enthaelt.
+ * config/plugins, data/plugins UND config/system/general.json enthaelt
+ * (Regeln/06). Bis 1.1.14 genuegten config/plugins und webfrontend: gemessen
+ * am 18.09.2026 in WSL (Pruefung-MGiSmart-1.1.14, Fall P1) hielt die
+ * Bibliothek eines ausgepackten Archivs einen fremden Baum mit diesen beiden
+ * Ordnern fuer die Wurzel und legte dort beim ersten Oeffnen der Oberflaeche
+ * Konfiguration und Zweitschrift an. Ein LoxBerry hat immer general.json.
  */
 if (!function_exists('lb_wurzel_ermitteln')) {
     function lb_wurzel_ermitteln()
     {
         $d = __DIR__;
         for ($i = 0; $i < 8; $i++) {
-            if (is_dir($d . '/config/plugins') && is_dir($d . '/webfrontend')) {
+            if (is_dir($d . '/config/plugins') && is_dir($d . '/data/plugins')
+                && is_file($d . '/config/system/general.json')) {
                 return $d;
             }
             $eltern = dirname($d);
@@ -59,7 +65,18 @@ function mg_paths()
 {
     $lbhomedir = getenv('LBHOMEDIR') ?: lb_wurzel_ermitteln();
     $plugindir = getenv('LBPPLUGINDIR') ?: basename(__DIR__);
-    if ($lbhomedir && is_dir($lbhomedir . '/config/plugins/' . $plugindir) === false) {
+    /* Installiert liegt diese Datei unter webfrontend/html/plugins/<ordner>/;
+     * dann IST basename(__DIR__) der Ordnername, auch wenn
+     * config/plugins/<ordner>/ gerade fehlt - in der Upgrade-Luecke hat
+     * purge_installation ihn geloescht (Regeln/06). Bis 1.1.14 griff der
+     * Rueckfall darunter auch hier: gemessen am 18.09.2026 in WSL
+     * (Pruefung-MGiSmart-1.1.14, Fall P3) nahm die Zweitinstallation mgismart01
+     * in der Luecke den festen Namen, fand dort keine Zweitschrift, wuerfelte
+     * beim ersten Oeffnen der Oberflaeche ein NEUES Merkwort und legte es samt
+     * Zweitschrift unter dem festen Namen ab - wo es keine Deinstallation
+     * wegraeumt. Der Rueckfall bleibt fuer das ausgepackte Archiv. */
+    if ($lbhomedir && is_dir($lbhomedir . '/config/plugins/' . $plugindir) === false
+        && basename(dirname(__DIR__)) !== 'plugins') {
         /* Rueckfall auf den vorgesehenen Ordnernamen - aber NUR, wenn dort
          * auch wirklich unsere Konfiguration liegt.
          *
@@ -345,15 +362,23 @@ function mg_kaputt_beiseite($datei)
     if (!is_file($datei)) {
         return '';
     }
-    $rest = preg_replace('/\s+/', '', (string) @file_get_contents($datei));
+    $roh = @file_get_contents($datei);
+    if ($roh === false) {
+        return '';
+    }
+    $rest = preg_replace('/\s+/', '', $roh);
     if ($rest === '' || $rest === '{}' || $rest === '[]') {
         return '';
     }
+    /* Ueber eine Nebendatei, nicht mit copy(): copy() kuerzt ein schon
+     * liegendes .kaputt zuerst auf null. Scheitert das Schreiben danach
+     * (volle Karte), bleibt ein HALBER Stand - gemessen am 18.09.2026 in WSL
+     * unter "ulimit -f 1" (Pruefung-MGiSmart-1.1.14, Fall L1: 1024 von 3000
+     * Byte). mg_write_atomic() setzt die Rechte vor dem Inhalt. */
     $ziel = $datei . '.kaputt';
-    if (!@copy($datei, $ziel)) {
+    if (!mg_write_atomic($ziel, $roh, 0600)) {
         return '';
     }
-    @chmod($ziel, 0600);
     return $ziel;
 }
 
@@ -2934,7 +2959,11 @@ function mg_htmlauth_index()
         if ($ordner) {
             $kandidaten[] = $wurzel . $ordner . '/index.php';
         }
-        $kandidaten[] = $wurzel . 'mgismart/index.php';
+        /* Kein fester Ordnername als letzter Kandidat: bis 1.1.14 las die
+         * Selbstpruefung sonst die Oberflaeche des FREMDEN gleichnamigen
+         * Plugins, sobald die eigene fehlte (gemessen 18.09.2026 in WSL,
+         * Pruefung-MGiSmart-1.1.14, Fall P5). "nicht feststellbar" ist dann
+         * die richtige Antwort. */
     }
     foreach ($kandidaten as $k) {
         if (is_file($k)) {

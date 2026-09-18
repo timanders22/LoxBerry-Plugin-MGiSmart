@@ -67,26 +67,122 @@ PYEOF
     return 1
 }
 
+# Kopieren ueber eine Nebendatei: umbenannt wird erst, wenn die Nebendatei
+# byteweise der Quelle gleicht. Ein cp unmittelbar aufs Ziel kuerzt es zuerst
+# auf null; scheitert das Schreiben danach (volle Karte), ist der alte Stand
+# fort und der neue halb. Bis 1.1.14 stand hier genau das, und gemeldet wurde
+# ohne Blick auf die Wirkung - gemessen am 18.09.2026 in WSL unter
+# "ulimit -f 0" (Pruefung-MGiSmart-1.1.14, Faelle K2/K4): mg.json danach
+# 0 Byte, gemeldet "wiederhergestellt" und "liegt unter ...kaputt".
+# Rueckgabe 0 nur, wenn das Ziel danach der Quelle gleicht.
+mg_kopieren() {   # $1 Quelle, $2 Ziel, $3 Rechte
+    mg_neu="$2.neu.$$"
+    if ( umask 077 && cp -p "$1" "$mg_neu" ) 2>/dev/null \
+       && cmp -s "$1" "$mg_neu" \
+       && chmod "$3" "$mg_neu" 2>/dev/null \
+       && mv -f "$mg_neu" "$2" 2>/dev/null \
+       && cmp -s "$1" "$2"; then
+        return 0
+    fi
+    rm -f "$mg_neu" 2>/dev/null
+    return 1
+}
+
 # Zurueckholen, was preupgrade weggelegt hat - aber nur, wenn nicht schon eine
 # brauchbare Konfiguration dasteht. postinstall hat sie moeglicherweise bereits
 # aus der Sicherung neben dem Ordner wiederhergestellt.
 CF="$CDIR/mg.json"
 if [ -f "$ARGV1/mg.json" ] && ! hat_inhalt "$CF" && hat_inhalt "$ARGV1/mg.json"; then
     if [ -s "$CF" ] && [ "$(tr -d ' \t\r\n' < "$CF" 2>/dev/null)" != "{}" ]; then
-        cp -p "$CF" "$CF.kaputt" 2>/dev/null
-        chmod 600 "$CF.kaputt" 2>/dev/null
-        echo "<INFO> Der vorherige Inhalt liegt unter $CF.kaputt"
+        if mg_kopieren "$CF" "$CF.kaputt" 600; then
+            echo "<INFO> Der vorherige Inhalt liegt unter $CF.kaputt"
+        else
+            echo "<WARNING> Der vorherige Inhalt liess sich nicht nach $CF.kaputt legen."
+        fi
     fi
-    cp -p "$ARGV1/mg.json" "$CF" && chmod 600 "$CF" 2>/dev/null
-    echo "<OK> Konfiguration aus dem Upgrade uebernommen."
+    if mg_kopieren "$ARGV1/mg.json" "$CF" 600; then
+        echo "<OK> Konfiguration aus dem Upgrade uebernommen."
+    else
+        echo "<WARNING> Die Konfiguration von vor dem Upgrade liess sich nicht nach $CF kopieren."
+    fi
 fi
 if [ -f "$ARGV1/mg.log" ] && [ ! -s "$LDIR/mg.log" ]; then
-    cp -p "$ARGV1/mg.log" "$LDIR/mg.log" 2>/dev/null
-    echo "<OK> Protokoll aus dem Upgrade uebernommen."
+    if cp -p "$ARGV1/mg.log" "$LDIR/mg.log" 2>/dev/null \
+       && cmp -s "$ARGV1/mg.log" "$LDIR/mg.log"; then
+        echo "<OK> Protokoll aus dem Upgrade uebernommen."
+    else
+        echo "<WARNING> Das Protokoll von vor dem Upgrade liess sich nicht uebernehmen."
+    fi
 fi
-if [ -f "$ARGV1/ladungen.json" ] && [ ! -s "$DDIR/ladungen.json" ]; then
-    cp -p "$ARGV1/ladungen.json" "$DDIR/ladungen.json" 2>/dev/null
-    echo "<OK> Aufgezeichnete Ladevorgaenge uebernommen."
+
+# Die mitgeschriebenen Ladevorgaenge - nach INHALT, und zusammengefuehrt.
+#
+# Bis 1.1.14 hiess es "Ziel leer? dann kopieren" (Groesse). Zwei Faelle, beide
+# gemessen am 18.09.2026 in WSL (Pruefung-MGiSmart-1.1.14):
+#  * Im Upgrade laeuft der Minutentakt schon vor postinstall.sh (Regeln/06,
+#    Einspeisebremse 0.9.19). Endet in dieser Minute eine Ladung, schreibt
+#    cron.php eine ladungen.json mit genau diesem einen Eintrag - und die
+#    gesicherten fielen weg (Fall K6: 1 statt 4 Eintraege).
+#  * Eine abgeschnittene Ablage wurde als "uebernommen" gemeldet und lag
+#    danach unlesbar im Datenordner (Fall K7).
+# Zusammengefuehrt wird ueber die Kennung, wie mg_ladung_pruefen() sie
+# vergibt; die Obergrenze zieht der naechste Eintrag nach (array_slice auf
+# ladungen_max in mg_lib.php). php braucht das Plugin ohnehin - cron.php ist PHP.
+mg_ladungen_lesbar() {   # $1 Datei -> Zahl der Eintraege; 1 = unlesbar, 2 = kein php
+    command -v php >/dev/null 2>&1 || return 2
+    php -r '
+        $d = json_decode((string) @file_get_contents($argv[1]), true);
+        if (!is_array($d) || !isset($d["liste"]) || !is_array($d["liste"])) { exit(1); }
+        echo count($d["liste"]);
+        exit(0);' -- "$1" 2>/dev/null
+}
+mg_ladungen_zusammen() {   # $1 Ablage, $2 Datei im Datenordner, $3 Ausgabe
+    php -r '
+        $lies = function ($f) {
+            if (!is_file($f)) { return array(); }
+            $d = json_decode((string) @file_get_contents($f), true);
+            return (is_array($d) && isset($d["liste"]) && is_array($d["liste"])) ? $d["liste"] : array();
+        };
+        $liste = $lies($argv[1]);
+        $da = array();
+        foreach ($liste as $e) {
+            if (is_array($e) && isset($e["id"])) { $da[(string) $e["id"]] = true; }
+        }
+        foreach ($lies($argv[2]) as $e) {
+            if (!is_array($e) || !isset($e["id"]) || !isset($da[(string) $e["id"]])) { $liste[] = $e; }
+        }
+        $j = json_encode(array("liste" => array_values($liste)),
+                         JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if ($j === false || @file_put_contents($argv[3], $j) !== strlen($j)) { exit(1); }
+        exit(0);' -- "$1" "$2" "$3" 2>/dev/null
+}
+LA="$ARGV1/ladungen.json"
+LZ="$DDIR/ladungen.json"
+if [ -f "$LA" ]; then
+    MG_N=$(mg_ladungen_lesbar "$LA"); MG_RC=$?
+    if [ "$MG_RC" = 2 ]; then
+        echo "<WARNING> php fehlt - die gesicherten Ladevorgaenge wurden nicht uebernommen."
+    elif [ "$MG_RC" != 0 ]; then
+        echo "<WARNING> Die gesicherten Ladevorgaenge sind nicht lesbar und wurden nicht uebernommen."
+        if mg_kopieren "$LA" "$LZ.kaputt" 600; then
+            echo "<WARNING> Der Stand liegt unter $LZ.kaputt"
+        fi
+    else
+        # Was im Datenordner liegt und nicht lesbar ist, kommt vorher beiseite.
+        if [ -f "$LZ" ] && ! mg_ladungen_lesbar "$LZ" >/dev/null; then
+            if mg_kopieren "$LZ" "$LZ.kaputt" 600; then
+                echo "<INFO> Die unlesbare ladungen.json liegt unter $LZ.kaputt"
+            fi
+        fi
+        MG_NEU="$LZ.neu.$$"
+        if mg_ladungen_zusammen "$LA" "$LZ" "$MG_NEU" && chmod 644 "$MG_NEU" 2>/dev/null \
+           && mv -f "$MG_NEU" "$LZ" 2>/dev/null && MG_Z=$(mg_ladungen_lesbar "$LZ"); then
+            echo "<OK> Aufgezeichnete Ladevorgaenge uebernommen ($MG_Z Eintraege, davon $MG_N gesichert)."
+        else
+            rm -f "$MG_NEU" 2>/dev/null
+            echo "<WARNING> Die gesicherten Ladevorgaenge ($MG_N Eintraege) liessen sich nicht uebernehmen."
+        fi
+    fi
 fi
 
 # Altlast aus 1.0.2: cron.php lag im UNANGEMELDETEN Webordner und war damit
@@ -94,16 +190,27 @@ fi
 # Aufruf startet mosquitto_sub mit -W 3, haelt also drei Sekunden lang einen
 # PHP-Arbeiter fest. Seit 1.0.3 liegt die Datei unter bin/.
 ALT="$BASE/webfrontend/html/plugins/$PFOLDER/cron.php"
+# Gemeldet wird, was nachgesehen wurde: bis 1.1.14 kam die <OK>-Zeile auch,
+# wenn rm scheiterte (gemessen 18.09.2026 in WSL, Pruefung-MGiSmart-1.1.14,
+# Fall K10) - hier also ein unangemeldet erreichbarer Endpunkt als "entfernt".
 if [ -f "$ALT" ]; then
-    rm -f "$ALT"
-    echo "<OK> Alte, ueber HTTP erreichbare cron.php entfernt."
+    rm -f "$ALT" 2>/dev/null
+    if [ -e "$ALT" ]; then
+        echo "<WARNING> Die alte, ueber HTTP erreichbare cron.php liess sich nicht entfernen: $ALT"
+    else
+        echo "<OK> Alte, ueber HTTP erreichbare cron.php entfernt."
+    fi
 fi
 
 # Altlast aus 1.0.2 bis 1.0.8: die nie gelesene Datei unter falschem Namen.
 # Sie entstand bis dahin GENAU HIER, in diesem Skript.
 if [ -f "$CDIR/mgismart.json" ]; then
-    rm -f "$CDIR/mgismart.json"
-    echo "<OK> Verwaiste mgismart.json entfernt (sie wurde bis 1.0.8 hier angelegt)."
+    rm -f "$CDIR/mgismart.json" 2>/dev/null
+    if [ -e "$CDIR/mgismart.json" ]; then
+        echo "<WARNING> Die verwaiste mgismart.json liess sich nicht entfernen: $CDIR/mgismart.json"
+    else
+        echo "<OK> Verwaiste mgismart.json entfernt (sie wurde bis 1.0.8 hier angelegt)."
+    fi
 fi
 
 exit 0
