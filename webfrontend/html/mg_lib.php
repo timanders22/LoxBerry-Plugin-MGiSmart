@@ -2477,15 +2477,104 @@ function mg_mqtt_fluechtig()
                  'ladeplan', 'heizplan', 'abbruchgrund', 'fahrzeugmeldung');
 }
 
+/**
+ * Themen mit Zeitbezug und das Sammelthema ok - sie gehen nie mit -r hinaus.
+ *
+ * Entscheidung des Hausherrn vom 18.09.2026 (Regeln/07, Abschnitt 2, die drei
+ * Absaetze "Entschieden am 18.09.2026"): ein Alter ist ein Messwert mit
+ * Zeitbezug und nie retained, und ok ist nie retained. Ein zurueckbehaltenes
+ * alter=3 ist falsch, sobald es zurueckbehalten wird; ein zurueckbehaltenes
+ * ok=1 meldete nach einem Neustart von Broker oder Gateway einen toten Dienst
+ * als in Ordnung. Bis 1.1.14 gingen alle vier retained hinaus (gemessen
+ * 18.09.2026 am empfangenen Paket, Pruefung-MGiSmart-1.1.15, Fall F1b).
+ *
+ *   alter, fahrzeugalter  Minuten seit ... (Feldliste: ALTER, FZALTER)
+ *   restzeit              Restladezeit in Minuten - eine Dauer, die mit der
+ *                         Zeit veraltet wie time_left (Regeln/07, Hausstandard)
+ *   ok                    Sammelthema "Datensatz gueltig"
+ *
+ * fertig_um bleibt retained: ein absoluter Zeitpunkt, kein Alter (Regeln/07,
+ * Einordnung an der Funkwacht). Die Zustaende (soc, laedt, ...) bleiben
+ * retained.
+ */
+function mg_mqtt_nie_behalten()
+{
+    return array('ok', 'alter', 'fahrzeugalter', 'restzeit');
+}
+
 /** Geht dieser Wert behalten (-r) hinaus?
- *  Nie bei einem leeren Wert, nie bei einem Thema aus mg_mqtt_fluechtig(). */
+ *  Nie bei einem leeren Wert, nie bei einem Thema aus mg_mqtt_fluechtig()
+ *  oder mg_mqtt_nie_behalten(). */
 function mg_mqtt_behalten($thema, $wert)
 {
     if ((string) $wert === '') {
         return false;
     }
     $name = substr((string) $thema, strrpos('/' . $thema, '/'));
-    return !in_array($name, mg_mqtt_fluechtig(), true);
+    return !in_array($name, mg_mqtt_fluechtig(), true)
+        && !in_array($name, mg_mqtt_nie_behalten(), true);
+}
+
+/**
+ * Der Merker der einmaligen Abraeumung fuer mg_mqtt_nie_behalten().
+ *
+ * Eine Umstellung von -r auf fluechtig loescht nichts: der alte Wert steht im
+ * Broker weiter und wird nach jedem Neustart wieder ausgeliefert. Fort ist er
+ * erst, wenn eine LEERE Nutzlast mit -r auf dasselbe Thema faellt (Regeln/07,
+ * am Broker belegt 14.09.2026). Das geschieht einmal, Vorbild Weissware
+ * 0.9.26 (altwerte_abraeumen(), Merker retain_ts_geraeumt).
+ *
+ * Der Merker traegt je Zeile "<praefix>/<fahrzeug>": wer das Praefix
+ * umstellt, bekommt die Abraeumung unter dem neuen Stamm noch einmal, und
+ * jedes Fahrzeug wird einzeln abgeraeumt - mg_mqtt_senden() laeuft je
+ * Fahrzeug (bin/cron.php:43-56). Ein Merker, der nur als Datei zaehlt, haette
+ * nach dem ersten Fahrzeug alle weiteren uebergangen (gemessen an
+ * mqtt_fluechtig_abgeraeumt, Pruefung-MGiSmart-1.1.15, Fall F4, Hinweis).
+ * Er liegt unter data/ - den raeumt der Installer bei jedem Update ab
+ * (Regeln/06), also laeuft die Abraeumung nach jedem Update einmal; der
+ * gueltige Wert folgt jedes Mal unmittelbar.
+ */
+function mg_mqtt_altwerte_merker()
+{
+    return mg_paths()['datadir'] . '/retain_zeitbezug_geraeumt';
+}
+
+/** Ist unter diesem Stamm ("<praefix>/<fahrzeug>") schon abgeraeumt? */
+function mg_mqtt_altwerte_geraeumt($stamm)
+{
+    $f = mg_mqtt_altwerte_merker();
+    if (!is_file($f)) {
+        return false;
+    }
+    $inhalt = @file_get_contents($f);
+    if ($inhalt === false) {
+        return false;
+    }
+    foreach (preg_split('/\r?\n/', $inhalt) as $zeile) {
+        if (trim($zeile) === $stamm) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** Den Stamm im Merker festhalten; ein Fehlschlag wird gemeldet. */
+function mg_mqtt_altwerte_merken($stamm)
+{
+    $f = mg_mqtt_altwerte_merker();
+    $alt = is_file($f) ? (string) @file_get_contents($f) : '';
+    $alt = rtrim($alt, "\r\n");
+    $neu = ($alt !== '' ? $alt . "\n" : '') . $stamm . "\n";
+    if (!mg_write_atomic($f, $neu, 0644)) {
+        /* Ohne Merker geschieht die Abraeumung bei jedem Lauf erneut. Schaden
+         * richtet das nicht an - der gueltige Wert folgt jedes Mal
+         * unmittelbar -, aber es gehoert gemeldet statt verschwiegen. */
+        mg_log_if_changed('retain_merker', 'Der Merker ' . $f . ' liess sich nicht'
+            . ' schreiben; die zurueckbehaltenen Altwerte von ' . $stamm
+            . ' werden deshalb bei jedem Lauf erneut abgeraeumt.');
+        return false;
+    }
+    return true;
 }
 
 /** Eine vollstaendige mosquitto_pub-Zeile fuer ein Thema. */
@@ -2525,6 +2614,22 @@ function mg_mqtt_senden($nr, $st)
         if ($vollstaendig || !isset($alt['werte'][$thema])
             || (string) $alt['werte'][$thema] !== (string) $wert) {
             $zu_senden[$thema] = $wert;
+        }
+    }
+
+    /* Einmal je Stamm: die Altwerte aus mg_mqtt_nie_behalten() abraeumen.
+     * Das steht VOR der Pruefung "nichts geaendert", damit die Abraeumung
+     * nicht auf die naechste Aenderung wartet; der gueltige Wert geht in
+     * derselben Datei ohne -r hinterher. */
+    $stamm = trim((string) $cfg['mqtt_praefix'], '/ ') . '/' . (int) $nr;
+    $raeumen = array();
+    if (!mg_mqtt_altwerte_geraeumt($stamm)) {
+        foreach ($paare as $thema => $wert) {
+            $name = substr((string) $thema, strrpos('/' . $thema, '/'));
+            if (in_array($name, mg_mqtt_nie_behalten(), true)) {
+                $raeumen[] = $thema;
+                $zu_senden[$thema] = $wert;
+            }
         }
     }
     if (!$zu_senden) {
@@ -2567,6 +2672,10 @@ function mg_mqtt_senden($nr, $st)
             }
         }
     }
+    foreach ($raeumen as $thema) {
+        $zeilen .= mg_broker_umgebung() . 'mosquitto_pub' . mg_broker_args()
+                 . ' -r -t ' . escapeshellarg((string) $thema) . " -m '' || exit 1\n";
+    }
     foreach ($zu_senden as $thema => $wert) {
         $zeilen .= mg_mqtt_zeile($thema, $wert) . ' || exit 1' . "\n";
     }
@@ -2588,6 +2697,11 @@ function mg_mqtt_senden($nr, $st)
     if (!is_file($abgeraeumt)) {
         if (!is_dir($p['datadir'])) { @mkdir($p['datadir'], 0775, true); }
         @file_put_contents($abgeraeumt, date('c') . "\n");
+    }
+    // Erst nach gelungenem Senden: sonst gilt ein Stamm als abgeraeumt, dessen
+    // leere Nachricht den Broker nie erreicht hat (Fall F6).
+    if ($raeumen) {
+        mg_mqtt_altwerte_merken($stamm);
     }
     mg_log_if_changed('mqtt', 'Veroeffentlichung laeuft (' . count($paare)
         . ' Themen je Fahrzeug)');

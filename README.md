@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.14
+Version 1.1.15
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -485,6 +485,46 @@ unter PHP 7.4.33 und 8.4.24. Nicht am Gerät gemessen.
 
 An der Anbindung ans MQTT-Gateway und an den MQTT-Themen ist nichts geändert
 worden.
+
+## Fassung 1.1.15 — Alter, Restzeit und `ok` gehen flüchtig hinaus
+
+Betrifft nur, wer die eigene MQTT-Veröffentlichung eingeschaltet hat. Die
+Themennamen bleiben, wie sie sind; geändert ist nur das Retain-Merkmal.
+
+Bis 1.1.14 ging jedes nicht leere Thema mit `mosquitto_pub -r` hinaus,
+ausgenommen die acht Textthemen, die regelmäßig leer werden. Damit lagen auch
+`<präfix>/<n>/alter`, `fahrzeugalter`, `restzeit` und `ok` zurückbehalten im
+Broker. Ein zurückbehaltenes Alter ist falsch, sobald es zurückbehalten ist:
+nach einem Neustart des MQTT-Gateways bekäme Loxone „3 Minuten alt" für Daten,
+die Stunden alt sind — und `ok=1` von einem Plugin, das längst nicht mehr
+läuft.
+
+* **`alter`, `fahrzeugalter`, `restzeit` und `ok` gehen jetzt ohne Retain
+  hinaus.** `restzeit` (Restladezeit in Minuten) gehört dazu, weil sie wie ein
+  Alter mit der Zeit veraltet. `fertig_um` bleibt zurückbehalten: es ist ein
+  fester Zeitpunkt, kein Alter. Alle übrigen Zustände (`soc`, `laedt`,
+  `stecker` …) bleiben zurückbehalten, die acht Textthemen flüchtig.
+* **Die alten Werte werden einmal abgeräumt.** Eine Umstellung auf flüchtig
+  löscht im Broker nichts. Deshalb schickt das Plugin beim ersten Senden je
+  Fahrzeug eine leere Nachricht mit Retain auf diese vier Themen — der gültige
+  Wert folgt unmittelbar, ohne Retain — und merkt sich das im Datenordner
+  (`retain_zeitbezug_geraeumt`, eine Zeile `<präfix>/<n>` je Fahrzeug). Wer
+  das Präfix umstellt oder ein Fahrzeug hinzufügt, bekommt die Abräumung dort
+  noch einmal. Der Installer leert den Datenordner bei jedem Update; nach
+  einem Update geschieht die Abräumung deshalb erneut einmal, ohne Schaden.
+* **Der Preis:** nach einem Neustart des MQTT-Gateways oder des Brokers
+  stehen diese vier Werte erst wieder an, wenn das Plugin sie sendet — bei
+  einer Änderung sofort, sonst mit dem vollständigen Satz, der alle halbe
+  Stunde hinausgeht (gelesen in `mg_mqtt_senden()`, nicht gemessen).
+
+Gemessen am 18.09.2026 in WSL/Ubuntu (PHP 8.3.6) an einem eigenen Broker, der
+das Retain-Bit jedes empfangenen Pakets mitschreibt, mit 8 Fällen: vorher 40
+rote Prüfzeilen, nachher keine; die neuen Funktionen zusätzlich unter PHP
+7.4.33 und 8.4.24. In der Messumgebung ist `mosquitto-clients` nicht
+installiert; an seiner Stelle stand eine Attrappe, die das Retain-Bit genau bei
+`-r` setzt. **Nicht am Gerät gemessen**, und nicht gemessen ist auch, ob das
+MQTT-Gateway der Anlage die leere Nachricht als leeren Wert an den Miniserver
+weiterreicht, bevor der gültige Wert folgt.
 
 ## Lizenz
 
