@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.12
+Version 1.1.13
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -395,6 +395,52 @@ Abhilfe: `clearstatcache(true, …)` **vor** dem Tor; der zweite Parameter
 beschränkt das Leeren auf diese eine Datei. Dasselbe Muster tragen Robonect,
 Saugroboter, SignalBot, Octopus, Sprachsteuerung und WärmepumpeCloud schon
 länger — es ist am 29.08.2026 im ganzen Bestand nachgezogen worden.
+
+## Fassung 1.1.13 — die Selbstheilung entscheidet nach Inhalt
+
+Bis 1.1.12 fragte die Selbstheilung nach der **Form** der Datei: „ist `mg.json`
+leer oder `{}`?" (`webfrontend/html/mg_lib.php:308`). Eine beim Schreiben
+**abgeschnittene** Datei ist aber weder leer noch `{}` — für `json_decode`
+trotzdem unbrauchbar. Das Plugin sah dann die blanken Vorgabewerte, hielt das
+Merkwort für „noch nicht vergeben", würfelte ein **neues** und schrieb es samt
+Zweitschrift (`:370`). Danach beantwortet der Endpunkt jede Loxone-Adresse mit
+dem alten Merkwort mit **HTTP 403**, und es gibt keinen Weg zurück.
+
+Gemessen am 18.09.2026 in WSL/Ubuntu (PHP 8.3.6) und unter Windows-PHP 7.4.33,
+je 43 bzw. 40 Prüfzeilen in 14 Fällen; vorher 17 bzw. 16 davon rot, nachher
+keine. Die Lage entsteht real durch Stromausfall oder ein volles Dateisystem
+beim Schreiben, durch Handbearbeitung und in der Lücke eines Upgrades.
+
+Was sich geändert hat:
+
+* **„Inhalt" heißt: lesbares JSON-Objekt *und* vorhandenes Merkwort**
+  (`mg_inhalt_oder_null()`, `mg_config_hat_inhalt()`). Fehlende, leere, `{}`-
+  und abgeschnittene Konfiguration sind damit derselbe Fall.
+* **Geheilt wird nur aus einer Zweitschrift, die selbst Inhalt trägt.** Ein
+  Stand ohne Inhalt ersetzt keinen anderen — in keiner der beiden Richtungen.
+* **Der verdrängte Stand bleibt liegen**, als `mg.json.kaputt` mit den Rechten
+  `0600`; dasselbe gilt für eine verdrängte Zweitschrift.
+* **Ein neues Merkwort entsteht nur, wenn nebenan keine Zweitschrift mit
+  Merkwort liegt** (`mg_token_aus_zweitschrift()`). Das ist der Weg, den eine
+  Wache am Schreibvorgang allein nicht schließt: ein frisch gewürfeltes
+  Merkwort ist ein gültiger Wert und käme durch jede solche Wache. Sind beide
+  Dateien abgeschnitten, wird das alte Merkwort aus der Zweitschrift
+  **wörtlich** geborgen — die Adressen im Miniserver bleiben gültig.
+* **Der unangemeldete Endpunkt** (`mg.php`) schreibt weiterhin nichts, auch
+  kein `.kaputt`; er liest bei beschädigter Konfiguration jetzt aber die
+  Zweitschrift unmittelbar und kann das Merkwort deshalb wieder prüfen. Vorher
+  antwortete er in dieser Lage mit `ERR=KEIN_TOKEN_EINGERICHTET`.
+* **`postinstall.sh` und `postupgrade.sh`** entscheiden ebenfalls nach Inhalt.
+  `[ -s "$datei" ]` heißt nur „nicht leer" und ließ eine abgeschnittene Datei
+  als brauchbare Konfiguration durchgehen; die weggelegte Sicherung wurde dann
+  nicht zurückgeholt.
+* **Neue Zeile im Reiter „Test":** „War die Konfiguration heil, als sie zum
+  ersten Mal gelesen wurde?" Sie hält den **zuerst** gesehenen Zustand fest —
+  sonst meldete sie „in Ordnung", weil der erste Aufruf der Lesefunktion den
+  Schaden schon behoben hat. Ein geheilter Schaden ist kein Nicht-Schaden: die
+  Zweitschrift kann älter sein als das Verlorene, und die Ursache besteht fort.
+
+An der Anbindung ans MQTT-Gateway ist nichts geändert worden.
 
 ## Lizenz
 

@@ -284,14 +284,113 @@ function mg_nur_lesen($setzen = null)
 }
 
 /**
+ * Traegt diese Datei ueberhaupt etwas?
+ *
+ * Nicht "ist sie leer oder {}?", sondern "laesst sie sich als JSON-Objekt mit
+ * mindestens einem Schluessel lesen?". Der Unterschied ist gemessen
+ * (18.09.2026, WSL, Fall "kaputt"): eine ABGESCHNITTENE mg.json - nicht leer,
+ * nicht "{}", fuer json_decode aber unbrauchbar - ging bis 1.1.13 an der
+ * Selbstheilung vorbei. mg_json_lesen() gab daraus array(), mg_config()
+ * lieferte die blanken Vorgaben, die Oberflaeche wuerfelte ein NEUES
+ * Aktionstoken und mg_config_save() schrieb es samt Zweitschrift: das alte
+ * Merkwort war fort, jede Loxone-Adresse bekam HTTP 403.
+ *
+ * Rueckgabe: die gelesenen Daten oder null, wenn die Datei nichts traegt.
+ * Bauart: sp_inhalt_oder_null() aus Sprachsteuerung 0.11.7/0.11.8.
+ */
+function mg_inhalt_oder_null($pfad)
+{
+    if (!is_file($pfad)) {
+        return null;
+    }
+    $roh = trim((string) @file_get_contents($pfad));
+    if ($roh === '') {
+        return null;
+    }
+    $d = json_decode($roh, true);
+    if (!is_array($d) || $d === array()) {
+        return null;
+    }
+    return $d;
+}
+
+/**
+ * Traegt diese Konfiguration das, was nur sie tragen kann?
+ *
+ * Das Aktionstoken. Es steht in JEDER Loxone-Adresse dieses Plugins (Reiter
+ * "Einbindung in Loxone"); geht es verloren, scheitern alle virtuellen
+ * Eingaenge im Miniserver, und es gibt keinen Weg, es zurueckzurechnen. Alles
+ * andere - Broker, Praefix, VIN - laesst sich in der Oberflaeche noch einmal
+ * eintragen.
+ *
+ * Eine gespeicherte Konfiguration OHNE Merkwort gibt es auf keinem Weg der
+ * Oberflaeche: index.php fuellt es beim ersten Seitenaufbau. Steht dort
+ * keines, ist die Datei nicht aus einem gespeicherten Stand hervorgegangen.
+ */
+function mg_config_hat_inhalt($c)
+{
+    return is_array($c) && $c !== array()
+        && trim((string) (isset($c['aktionstoken']) ? $c['aktionstoken'] : '')) !== '';
+}
+
+/**
+ * Den verdraengten Stand beiseitelegen, statt ihn wegzuwerfen.
+ *
+ * 0600, denn in der Datei koennen Broker-Passwort und Merkwort stehen. Eine
+ * leere Datei und eine mit "{}" sind nichts wert und werden nicht abgelegt.
+ * Rueckgabe: der Ablageort, oder '' wenn nichts abzulegen war.
+ */
+function mg_kaputt_beiseite($datei)
+{
+    if (!is_file($datei)) {
+        return '';
+    }
+    $rest = preg_replace('/\s+/', '', (string) @file_get_contents($datei));
+    if ($rest === '' || $rest === '{}' || $rest === '[]') {
+        return '';
+    }
+    $ziel = $datei . '.kaputt';
+    if (!@copy($datei, $ziel)) {
+        return '';
+    }
+    @chmod($ziel, 0600);
+    return $ziel;
+}
+
+/**
+ * Der ZUERST festgestellte Zustand der Konfiguration.
+ *
+ * Er wird fuer die Dauer des Vorgangs festgehalten und von einem spaeteren
+ * "ok" NICHT ueberschrieben: der erste Aufruf von mg_config() heilt die Datei,
+ * der zweite - den der Reiter Test macht - saehe sonst eine heile Datei und
+ * meldete "in Ordnung", obwohl beim selben Seitenaufruf etwas kaputt war
+ * (Regeln/05, Robonect 1.1.0). Werte: ok, leer, aus der Zweitschrift, kaputt,
+ * kaputt ohne Zweitschrift.
+ */
+function mg_config_lage($setzen = null)
+{
+    static $lage = '';
+    if ($setzen !== null && $lage === '') {
+        $lage = (string) $setzen;
+    }
+    return $lage;
+}
+
+/**
  * Die Konfiguration lesen.
  *
- * Fehlt die mg.json, aber es liegt eine Zweitschrift vor, wird sie
- * daraus wiederhergestellt - AUSSER im Nur-Lesen-Betrieb. Eine einzige
- * tokenlose Anfrage hat sonst auf jeder Anlage, die schon einmal
- * gespeichert hat, die mg.json angelegt. Gelesen wird dann die
- * Zweitschrift unmittelbar; die Tokenpruefung bleibt also moeglich,
- * nur der Schreibzugriff faellt weg.
+ * Geheilt wird nach INHALT (mg_inhalt_oder_null(), mg_config_hat_inhalt()),
+ * nicht nach Form: eine fehlende, eine leere, eine "{}" und eine
+ * ABGESCHNITTENE mg.json sind derselbe Fall, naemlich "traegt nichts". Geheilt
+ * wird nur aus einer Zweitschrift, die selbst Inhalt traegt - ein Stand ohne
+ * Inhalt darf keinen anderen ersetzen, in keine der beiden Richtungen. Was
+ * vorher in der Datei stand, liegt danach als <datei>.kaputt daneben.
+ *
+ * Im Nur-Lesen-Betrieb (mg.php, der unangemeldete Endpunkt) wird NICHTS
+ * geschrieben - auch kein .kaputt. Gelesen wird dann die Zweitschrift
+ * unmittelbar; die Tokenpruefung bleibt also moeglich, nur der Schreibzugriff
+ * faellt weg. Eine einzige tokenlose Anfrage hat sonst auf jeder Anlage, die
+ * schon einmal gespeichert hat, die mg.json angelegt.
  */
 function mg_config()
 {
@@ -302,18 +401,59 @@ function mg_config()
      * da. Und die Konfigurationsdatei fehlt regelmaessig, naemlich vor dem
      * ersten Speichern. Dasselbe gilt fuer mkdir() auf einen Ordner, den es
      * schon gibt. */
-    $roh = is_file($p['config'])
-        ? trim((string) @file_get_contents($p['config'])) : '';
+    static $gemeldet = false;
     $quelle = $p['config'];
-    if (($roh === '' || $roh === '{}') && is_file($p['backup'])) {
-        if (!mg_nur_lesen()) {
-            if (!is_dir(dirname($p['config']))) {
-                @mkdir(dirname($p['config']), 0775, true);
+    $eigen = mg_inhalt_oder_null($p['config']);
+    if (mg_config_hat_inhalt($eigen)) {
+        mg_config_lage('ok');
+    } else {
+        $zweit = mg_inhalt_oder_null($p['backup']);
+        $hat_zweit = mg_config_hat_inhalt($zweit);
+        /* "leer" heisst: es war ohnehin nichts da (fehlende Datei,
+         * Aktualisierungsfall "{}"). Nur dann ist der Zustand harmlos. */
+        $rest = is_file($p['config'])
+            ? preg_replace('/\s+/', '', (string) @file_get_contents($p['config'])) : '';
+        $leer = ($rest === '' || $rest === '{}' || $rest === '[]');
+        if (mg_nur_lesen()) {
+            mg_config_lage($hat_zweit ? 'aus der Zweitschrift' : ($leer ? 'leer' : 'kaputt'));
+            if ($hat_zweit) {
+                $quelle = $p['backup'];
             }
-            @copy($p['backup'], $p['config']);
-            @chmod($p['config'], 0600);
         } else {
-            $quelle = $p['backup'];
+            /* Nur EINMAL je Vorgang ablegen und melden - mg_config() wird auf
+             * 27 Wegen gerufen, und eine Zeile je Weg waere ein volles
+             * Protokoll ohne einen einzigen neuen Messwert (Regeln/05,
+             * "einmal wiederherstellen, einmal melden"). */
+            $erstmals = !$gemeldet;
+            $abgelegt = '';
+            if ($erstmals) {
+                $gemeldet = true;
+                $abgelegt = mg_kaputt_beiseite($p['config']);
+            }
+            if ($hat_zweit) {
+                if (!is_dir(dirname($p['config']))) {
+                    @mkdir(dirname($p['config']), 0775, true);
+                }
+                if (@copy($p['backup'], $p['config'])) {
+                    @chmod($p['config'], 0600);
+                    mg_config_lage($leer ? 'aus der Zweitschrift' : 'kaputt');
+                    if ($erstmals) {
+                        mg_log('Die Konfiguration trug kein Merkwort und wurde aus der '
+                            . 'Zweitschrift wiederhergestellt: ' . $p['backup']
+                            . ($abgelegt !== '' ? ' (der vorherige Inhalt liegt unter '
+                                . $abgelegt . ')' : '') . '.');
+                    }
+                } else {
+                    mg_config_lage('kaputt');
+                }
+            } else {
+                mg_config_lage($leer ? 'leer' : 'kaputt ohne Zweitschrift');
+                if ($erstmals && $abgelegt !== '') {
+                    mg_log('WARNUNG: Die Konfiguration war unbrauchbar und es liegt keine '
+                        . 'Zweitschrift mit Merkwort daneben. Der vorherige Inhalt liegt '
+                        . 'unter ' . $abgelegt . '.');
+                }
+            }
         }
     }
     $cfg = mg_json_lesen($quelle);
@@ -366,14 +506,78 @@ function mg_config_save(array $cfg)
      * Sicherung liegt neben dem Konfigordner und ist damit der einzige Weg,
      * der ein Upgrade uebersteht - ein misslungenes copy() haette dem
      * Anwender beim naechsten Upgrade stillschweigend Passwort und Merkwort
-     * eines aelteren Standes zurueckgegeben. */
-    if (!mg_write_atomic($p['backup'], $json, 0600)) {
+     * eines aelteren Standes zurueckgegeben.
+     *
+     * Seit 1.1.13 geht sie ausserdem durch mg_zweitschrift_ziehen(): ein
+     * Stand OHNE Merkwort ersetzt keine Zweitschrift MIT Merkwort. Das
+     * Speichern selbst wird dadurch nicht verhindert - nur der einzige
+     * Rueckweg nicht zerstoert; das Protokoll sagt es. */
+    if (!mg_zweitschrift_ziehen($json, $cfg)) {
         mg_log('FEHLER: Sicherung ' . $p['backup'] . ' liess sich nicht schreiben.');
         return false;
     }
     // Die Optionsdatei fuer mosquitto traegt dieselben Zugangsdaten.
     mg_broker_optionsdatei(true);
     return true;
+}
+
+/**
+ * Was die Zweitschrift traegt und der neue Stand nicht.
+ *
+ * Leere Rueckgabe heisst: die Zweitschrift darf erneuert werden. Verglichen
+ * wird, ob ein SCHLUESSEL fehlt oder leer ist, nicht ob sich ein Wert
+ * geaendert hat - ein geleertes Broker-Passwort ist ein gewolltes Loeschen und
+ * wird nachgezogen. Ein leeres Aktionstoken gibt es auf keinem Weg der
+ * Oberflaeche und gilt deshalb als fehlend.
+ *
+ * Bauart uebernommen aus Sprachsteuerung 0.11.8 / Intercom 2.2.11.
+ */
+function mg_zweitschrift_fehlt(array $neu, array $felder)
+{
+    $p = mg_paths();
+    $z = mg_inhalt_oder_null($p['backup']);
+    if ($z === null) {
+        return array();
+    }
+    $fehlt = array();
+    foreach ($felder as $feld) {
+        if (!array_key_exists($feld, $z)) {
+            continue;
+        }
+        if (trim((string) $z[$feld]) === '') {
+            continue;
+        }
+        if (!array_key_exists($feld, $neu) || trim((string) $neu[$feld]) === '') {
+            $fehlt[] = $feld;
+        }
+    }
+    return $fehlt;
+}
+
+/**
+ * Die Zweitschrift erneuern - oder begruendet nicht.
+ *
+ * Rueckgabe false heisst NUR: das Schreiben ist misslungen. Eine begruendete
+ * Verweigerung gibt true zurueck und steht im Protokoll - der gespeicherte
+ * Stand ist ja da, es fehlt nur der Rueckweg, und den hat gerade diese
+ * Verweigerung erhalten.
+ */
+function mg_zweitschrift_ziehen($json, array $neu)
+{
+    $p = mg_paths();
+    $fehlt = mg_zweitschrift_fehlt($neu, array('aktionstoken'));
+    if ($fehlt) {
+        mg_log('WARNUNG: Die Zweitschrift bleibt unveraendert - der gespeicherte Stand '
+            . 'traegt nicht, was dort steht (' . implode(', ', $fehlt) . '): ' . $p['backup']);
+        return true;
+    }
+    /* Eine Zweitschrift, die kein lesbares Objekt mehr ist, kann das alte
+     * Merkwort woertlich noch tragen (abgeschnitten beim Schreiben). Bevor sie
+     * ersetzt wird, kommt sie als .kaputt daneben. */
+    if (is_file($p['backup']) && mg_inhalt_oder_null($p['backup']) === null) {
+        mg_kaputt_beiseite($p['backup']);
+    }
+    return mg_write_atomic($p['backup'], $json, 0600);
 }
 
 /**
@@ -386,6 +590,42 @@ function mg_config_save(array $cfg)
 function mg_token_erzeugen()
 {
     return bin2hex(random_bytes(12));
+}
+
+/**
+ * Das Merkwort aus der Zweitschrift holen - auch aus einer abgeschnittenen.
+ *
+ * DER DRITTE WEG, gemessen an FerienFeiertage 1.2.13 (18.09.2026): eine
+ * Heilung nach Inhalt und eine Wache vor der Zweitschrift genuegen NICHT.
+ * Sind BEIDE Dateien abgeschnitten, traegt keine von beiden "Inhalt" im Sinne
+ * von mg_config_hat_inhalt() - geheilt wird also nicht, ein frisch
+ * gewuerfeltes Merkwort ist aber ein voellig gueltiger Wert und kommt durch
+ * jede Wache, die nur den zu schreibenden Stand ansieht. Das alte Merkwort
+ * steht in der abgeschnittenen Zweitschrift woertlich da und ist das, was in
+ * den Adressen des Miniservers steht; es wird deshalb von dort geholt.
+ *
+ * Gesucht wird die Form, die mg_token_erzeugen() liefert: bin2hex von zwoelf
+ * Zufallsbytes, also 24 Stellen aus [0-9a-f]. Die Obergrenze 64 laesst ein
+ * laenger gesetztes Merkwort zu, eine ganze Datei aber nicht.
+ *
+ * Rueckgabe: das Merkwort, oder '' wenn nebenan keines liegt - dann und nur
+ * dann darf ein neues entstehen.
+ */
+function mg_token_aus_zweitschrift()
+{
+    $p = mg_paths();
+    $z = mg_inhalt_oder_null($p['backup']);
+    if (mg_config_hat_inhalt($z)) {
+        return trim((string) $z['aktionstoken']);
+    }
+    if (!is_file($p['backup'])) {
+        return '';
+    }
+    $roh = (string) @file_get_contents($p['backup']);
+    if (preg_match('/"aktionstoken"\s*:\s*"([0-9a-fA-F]{24,64})"/', $roh, $t)) {
+        return $t[1];
+    }
+    return '';
 }
 
 /**
@@ -2589,6 +2829,18 @@ function mg_selbsttest()
     $auto = mg_mqtt_gateway_autostart();
     $add('PRUEF.AUTOSTART', $auto === true ? 1 : ($auto === false ? 0 : 2), '');
     $add('PRUEF.MERKWORT', trim((string) $cfg['aktionstoken']) !== '' ? 1 : 0, '');
+    /* War die Konfiguration heil, als sie zum ERSTEN Mal gelesen wurde?
+     *
+     * Ein geheilter Schaden ist kein Nicht-Schaden: die Zweitschrift kann
+     * aelter sein als das, was verlorenging, und die Ursache (volles
+     * Dateisystem, Stromausfall beim Schreiben) besteht fort. Ohne diese Zeile
+     * erfaehrt der Bediener nie, dass etwas war - nur das Protokoll wuesste
+     * es. mg_config_lage() haelt deshalb den ZUERST gesehenen Zustand fest;
+     * das mg_config() eine Zeile weiter oben wuerde sonst "ok" melden. */
+    $mg_lage = mg_config_lage();
+    $add('PRUEF.KONFIG',
+        ($mg_lage === 'ok' || $mg_lage === '') ? 1 : ($mg_lage === 'leer' ? 2 : 0),
+        $mg_lage);
 
     // Ein Zustand fuer die beiden folgenden Proben - einmal gebildet.
     $probe_st = mg_state(1);

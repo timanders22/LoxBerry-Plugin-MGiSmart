@@ -95,10 +95,25 @@ if (isset($_POST['activetab']) && in_array((string) $_POST['activetab'], $mg_rei
 
 $mg_cfg = mg_config();
 
-// Merkwort beim ersten Oeffnen erzeugen. Danach nur noch auf ausdruecklichen
-// Wunsch - es steckt in den Adressen im Miniserver.
+/* Merkwort beim ersten Oeffnen erzeugen. Danach nur noch auf ausdruecklichen
+ * Wunsch - es steckt in den Adressen im Miniserver.
+ *
+ * EIN NEUES MERKWORT DARF NUR ENTSTEHEN, WENN NEBENAN KEINE ZWEITSCHRIFT MIT
+ * MERKWORT LIEGT. Ein frisch gewuerfeltes Merkwort ist ein gueltiger Wert und
+ * kaeme durch jede Wache, die nur den zu schreibenden Stand ansieht; die
+ * Heilung in mg_config() wiederum greift nicht, wenn auch die Zweitschrift
+ * kein lesbares Objekt mehr ist (abgeschnitten) - sie traegt das alte Merkwort
+ * dann aber woertlich. Gemessen an FerienFeiertage 1.2.13 und am eigenen Fall
+ * "zweitschrift_kaputt" (18.09.2026, WSL). */
 if (trim((string) $mg_cfg['aktionstoken']) === '') {
-    $mg_cfg['aktionstoken'] = mg_token_erzeugen();
+    $mg_gerettet = mg_token_aus_zweitschrift();
+    if ($mg_gerettet !== '') {
+        $mg_cfg['aktionstoken'] = $mg_gerettet;
+        mg_log('Das Merkwort fehlte in der Konfiguration und wurde aus der Zweitschrift '
+            . 'uebernommen - die Adressen im Miniserver bleiben gueltig.');
+    } else {
+        $mg_cfg['aktionstoken'] = mg_token_erzeugen();
+    }
     mg_config_save($mg_cfg);
     $mg_cfg = mg_config();
     $mg_fmt = mg_formtoken($mg_cfg);
