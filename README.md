@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.15
+Version 1.1.16
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -525,6 +525,17 @@ installiert; an seiner Stelle stand eine Attrappe, die das Retain-Bit genau bei
 `-r` setzt. **Nicht am Gerät gemessen**, und nicht gemessen ist auch, ob das
 MQTT-Gateway der Anlage die leere Nachricht als leeren Wert an den Miniserver
 weiterreicht, bevor der gültige Wert folgt.
+
+## Fassung 1.1.16 — Schlusswort nach dem Update
+
+Nach einem Update fordert die Installation nicht mehr dazu auf, Broker-Zugang,
+iSMART-Benutzername und Fahrzeug-Kennung einzutragen, wenn die Einstellungen
+übernommen sind. Steht nach dem Zurückholen der iSMART-Benutzername oder
+mindestens eine Fahrzeug-Kennung in `mg.json`, meldet die Installation
+„Einstellungen übernommen". Fehlt die Sicherung neben dem Ordner, holt erst
+`postupgrade.sh` die Einstellungen zurück und meldet dort, ob es gelang;
+scheitert es, erscheint die Anleitung als Warnung. In WSL nachgestellt
+(`Pruefung-MGiSmart-1.1.16/`), nicht am Gerät.
 
 ## Lizenz
 

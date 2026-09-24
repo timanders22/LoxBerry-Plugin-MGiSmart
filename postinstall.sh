@@ -124,10 +124,57 @@ if ! command -v mosquitto_sub >/dev/null 2>&1; then
     echo "<INFO> Nachinstallieren mit: sudo apt-get install -y mosquitto-clients"
 fi
 
-echo "<OK> Installation abgeschlossen."
-echo "<INFO> Bitte die Plugin-Oberflaeche oeffnen. Im Reiter MQTT gehoeren die"
-echo "<INFO> Zugangsdaten des Brokers, der iSMART-Benutzername und die"
-echo "<INFO> Fahrzeug-Kennung (VIN) hinein - ein Konto darf mehrere Fahrzeuge"
-echo "<INFO> fuehren. Der Reiter Test beantwortet danach mit Haken und Kreuzen,"
-echo "<INFO> ob die Einrichtung traegt."
+# Die Erstanleitung nur, wenn keine eingerichtete Konfiguration vorliegt.
+# postinstall.sh laeuft auch bei jedem Upgrade; danach war der Rat falsch und
+# legte nahe, die Zugangsdaten seien verloren. "Eingerichtet" heisst: in
+# mg.json steht der iSMART-Benutzername oder mindestens eine Fahrzeug-Kennung
+# (vins, oder vin aus der Zeit bis 1.0.8). Das Merkwort, nach dem hat_inhalt()
+# die Sicherung beurteilt, reicht nicht: es entsteht beim ersten Oeffnen der
+# Oberflaeche ohne jede Eintragung. Gleichlautend in postupgrade.sh.
+mg_eingerichtet() {
+    [ -s "$1" ] || return 1
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$1" <<'PYEOF'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+def voll(w):
+    return isinstance(w, str) and w.strip() != ""
+if not isinstance(d, dict):
+    sys.exit(1)
+vins = d.get("vins") if isinstance(d.get("vins"), list) else []
+sys.exit(0 if voll(d.get("saic_user")) or voll(d.get("vin")) or any(voll(v) for v in vins) else 1)
+PYEOF
+        return $?
+    fi
+    if command -v php >/dev/null 2>&1; then
+        php -r '$d = json_decode((string) @file_get_contents($argv[1]), true);
+            if (!is_array($d)) { exit(1); }
+            $voll = function ($w) { return is_string($w) && trim($w) !== ""; };
+            $v = isset($d["vins"]) && is_array($d["vins"]) ? $d["vins"] : array();
+            exit(($voll(isset($d["saic_user"]) ? $d["saic_user"] : null)
+                  || $voll(isset($d["vin"]) ? $d["vin"] : null)
+                  || count(array_filter($v, $voll)) > 0) ? 0 : 1);' "$1" 2>/dev/null
+        return $?
+    fi
+    return 1
+}
+if mg_eingerichtet "$CF"; then
+    echo "<OK> Installation abgeschlossen, Einstellungen uebernommen."
+    echo "<INFO> Der Reiter Test beantwortet mit Haken und Kreuzen, ob die Einrichtung traegt."
+elif [ -n "$1" ] && mg_eingerichtet "$1/mg.json"; then
+    # Ohne Sicherung neben dem Ordner holt erst postupgrade.sh die
+    # Konfiguration zurueck (aus der Ablage von preupgrade.sh) und meldet
+    # dort, ob es gelang.
+    echo "<OK> Installation abgeschlossen. Die Einstellungen holt postupgrade.sh gleich zurueck."
+else
+    echo "<OK> Installation abgeschlossen."
+    echo "<INFO> Bitte die Plugin-Oberflaeche oeffnen. Im Reiter MQTT gehoeren die"
+    echo "<INFO> Zugangsdaten des Brokers, der iSMART-Benutzername und die"
+    echo "<INFO> Fahrzeug-Kennung (VIN) hinein - ein Konto darf mehrere Fahrzeuge"
+    echo "<INFO> fuehren. Der Reiter Test beantwortet danach mit Haken und Kreuzen,"
+    echo "<INFO> ob die Einrichtung traegt."
+fi
 exit 0

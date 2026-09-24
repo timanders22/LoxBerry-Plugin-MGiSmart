@@ -92,6 +92,40 @@ mg_kopieren() {   # $1 Quelle, $2 Ziel, $3 Rechte
 # brauchbare Konfiguration dasteht. postinstall hat sie moeglicherweise bereits
 # aus der Sicherung neben dem Ordner wiederhergestellt.
 CF="$CDIR/mg.json"
+# Dieselbe Frage wie am Ende von postinstall.sh: iSMART-Benutzername oder
+# Fahrzeug-Kennung eingetragen?
+mg_eingerichtet() {
+    [ -s "$1" ] || return 1
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$1" <<'PYEOF'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+def voll(w):
+    return isinstance(w, str) and w.strip() != ""
+if not isinstance(d, dict):
+    sys.exit(1)
+vins = d.get("vins") if isinstance(d.get("vins"), list) else []
+sys.exit(0 if voll(d.get("saic_user")) or voll(d.get("vin")) or any(voll(v) for v in vins) else 1)
+PYEOF
+        return $?
+    fi
+    if command -v php >/dev/null 2>&1; then
+        php -r '$d = json_decode((string) @file_get_contents($argv[1]), true);
+            if (!is_array($d)) { exit(1); }
+            $voll = function ($w) { return is_string($w) && trim($w) !== ""; };
+            $v = isset($d["vins"]) && is_array($d["vins"]) ? $d["vins"] : array();
+            exit(($voll(isset($d["saic_user"]) ? $d["saic_user"] : null)
+                  || $voll(isset($d["vin"]) ? $d["vin"] : null)
+                  || count(array_filter($v, $voll)) > 0) ? 0 : 1);' "$1" 2>/dev/null
+        return $?
+    fi
+    return 1
+}
+MG_VORHER=0; mg_eingerichtet "$CF" && MG_VORHER=1
+MG_GESICHERT=0; [ -n "$ARGV1" ] && mg_eingerichtet "$ARGV1/mg.json" && MG_GESICHERT=1
 if [ -f "$ARGV1/mg.json" ] && ! hat_inhalt "$CF" && hat_inhalt "$ARGV1/mg.json"; then
     if [ -s "$CF" ] && [ "$(tr -d ' \t\r\n' < "$CF" 2>/dev/null)" != "{}" ]; then
         if mg_kopieren "$CF" "$CF.kaputt" 600; then
@@ -210,6 +244,20 @@ if [ -f "$CDIR/mgismart.json" ]; then
         echo "<WARNING> Die verwaiste mgismart.json liess sich nicht entfernen: $CDIR/mgismart.json"
     else
         echo "<OK> Verwaiste mgismart.json entfernt (sie wurde bis 1.0.8 hier angelegt)."
+    fi
+fi
+
+# Das Schlusswort zur Konfiguration steht hier nur, wenn postinstall.sh es
+# hierher verwiesen hat: dort war mg.json noch nicht eingerichtet, die
+# Ablage von preupgrade.sh aber schon.
+if [ $MG_VORHER = 0 ] && [ $MG_GESICHERT = 1 ]; then
+    if mg_eingerichtet "$CF"; then
+        echo "<OK> Aktualisierung abgeschlossen, Einstellungen uebernommen."
+    else
+        echo "<WARNING> Die Einstellungen liessen sich nicht zurueckholen."
+        echo "<WARNING> Bitte die Plugin-Oberflaeche oeffnen. Im Reiter MQTT gehoeren die"
+        echo "<WARNING> Zugangsdaten des Brokers, der iSMART-Benutzername und die"
+        echo "<WARNING> Fahrzeug-Kennung (VIN) hinein."
     fi
 fi
 
