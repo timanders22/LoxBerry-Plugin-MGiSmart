@@ -61,59 +61,94 @@ if (!function_exists('lb_wurzel_ermitteln')) {
     }
 }
 
+/* Die LoxBerry-Wurzel: $LBHOMEDIR, wenn dort config/plugins und data/plugins
+ * liegen, sonst die Aufwaertssuche lb_wurzel_ermitteln() (mit general.json).
+ * '' heisst: keine Wurzel. */
+function mg_lbhome()
+{
+    $h = rtrim((string) getenv('LBHOMEDIR'), '/');
+    if ($h !== '' && is_dir($h . '/config/plugins') && is_dir($h . '/data/plugins')) {
+        return $h;
+    }
+    return lb_wurzel_ermitteln();
+}
+
 function mg_paths()
 {
-    $lbhomedir = getenv('LBHOMEDIR') ?: lb_wurzel_ermitteln();
-    $plugindir = getenv('LBPPLUGINDIR') ?: basename(__DIR__);
-    /* Installiert liegt diese Datei unter webfrontend/html/plugins/<ordner>/;
-     * dann IST basename(__DIR__) der Ordnername, auch wenn
-     * config/plugins/<ordner>/ gerade fehlt - in der Upgrade-Luecke hat
-     * purge_installation ihn geloescht (Regeln/06). Bis 1.1.14 griff der
-     * Rueckfall darunter auch hier: gemessen am 18.09.2026 in WSL
-     * (Pruefung-MGiSmart-1.1.14, Fall P3) nahm die Zweitinstallation mgismart01
-     * in der Luecke den festen Namen, fand dort keine Zweitschrift, wuerfelte
-     * beim ersten Oeffnen der Oberflaeche ein NEUES Merkwort und legte es samt
-     * Zweitschrift unter dem festen Namen ab - wo es keine Deinstallation
-     * wegraeumt. Der Rueckfall bleibt fuer das ausgepackte Archiv. */
-    if ($lbhomedir && is_dir($lbhomedir . '/config/plugins/' . $plugindir) === false
-        && basename(dirname(__DIR__)) !== 'plugins') {
-        /* Rueckfall auf den vorgesehenen Ordnernamen - aber NUR, wenn dort
-         * auch wirklich unsere Konfiguration liegt.
-         *
-         * Es gibt ein zweites LoxBerry-Plugin fuer dasselbe Fahrzeug
-         * (mschlenstedt/LoxBerry-Plugin-MGiSMART). Es traegt in seiner
-         * plugin.cfg denselben FOLDER=mgismart, aber einen anderen Autor -
-         * LoxBerry haelt beide fuer verschiedene Plugins und haengt beim
-         * zweiten 01, 02 an den Ordnernamen. Ein blinder Rueckfall auf
-         * "mgismart" koennte damit auf das Verzeichnis des FREMDEN Plugins
-         * zeigen und dort eine mg.json anlegen, die niemand liest.
-         * Deshalb: nur uebernehmen, wenn dort schon unsere mg.json liegt
-         * oder der Ordner ueberhaupt noch nicht existiert. */
-        $kand = $lbhomedir . '/config/plugins/mgismart';
-        if (!is_dir($kand) || is_file($kand . '/mg.json')) {
-            $plugindir = 'mgismart';
+    $home = mg_lbhome();
+    /* Der Ordnername. LBPPLUGINDIR ist die Auskunft von LoxBerry SELBST und
+     * hat Vorrang; von ihr zaehlt nur der letzte Pfadteil, und Namen, die
+     * nachweislich kein Pluginordner sind, gelten auch dort nicht. Sonst der
+     * eigene Ablageort: installiert liegt diese Datei unter
+     * webfrontend/html/plugins/<ordner>/ - auch in der Upgrade-Luecke, in der
+     * purge_installation config/plugins/<ordner>/ geloescht hat (Regeln/06).
+     * Der feste Name greift nur, wo der abgeleitete kein Pluginordner sein
+     * KANN - aus dem ausgepackten Archiv heisst er 'html'. */
+    $nie = array('', '.', '/', 'html', 'htmlauth', 'bin', 'plugins', 'webfrontend');
+    $lbp = basename(rtrim((string) getenv('LBPPLUGINDIR'), '/'));
+    $lbp_gilt = !in_array($lbp, $nie, true);
+    $ordner = basename(__DIR__);
+    if ($lbp_gilt) {
+        $ordner = $lbp;
+    } elseif (in_array($ordner, $nie, true)) {
+        $ordner = 'mgismart';
+    }
+    /* ARCHIVMODUS. Die Pfade DER ANLAGE gelten nur, wenn diese Bibliothek dort
+     * installiert liegt (<Wurzel>/webfrontend/html/plugins/<ordner>, physisch
+     * verglichen) oder der Aufrufer Wurzel UND Ordner ausdruecklich nennt
+     * ($LBHOMEDIR und $LBPPLUGINDIR - so arbeiten die Pruefwerkzeuge mit ihrer
+     * Attrappe, und so ruft uninstall/uninstall die Bibliothek). Sonst ist das
+     * ein ausgepacktes Archiv oder ein Pruefordner.
+     *
+     * Bis 1.1.16 nahm ein Archiv unterhalb einer echten Wurzel diese Wurzel
+     * und ueber den Rueckfall den Ordner 'mgismart' - Konfiguration, Daten,
+     * Protokoll der Anlage; mit $LBHOMEDIR allein, wie es am Geraet in
+     * /etc/environment steht, ebenso; tmp war in beiden Zweigen
+     * /tmp/mgismart (in WSL gemessen, Pruefung-MGiSmart-1.1.17, Faelle B1,
+     * B2, B5, B6). Bauart awm_paths() (AWM-Abfuhr 1.4.13), dort aus
+     * tb_paths() (Spotpreis-Tibber 0.9.19). */
+    $gefunden = $home;
+    if ($home !== '') {
+        $soll = @realpath($home . '/webfrontend/html/plugins/' . basename(__DIR__));
+        $ist = @realpath(__DIR__);
+        $installiert = ($soll !== false && $ist !== false && $soll === $ist);
+        $ausdruecklich = $lbp_gilt && $home === rtrim((string) getenv('LBHOMEDIR'), '/');
+        if (!$installiert && !$ausdruecklich) {
+            $home = '';
         }
     }
-    if ($lbhomedir) {
+    if ($home !== '') {
         return array(
-            'config' => $lbhomedir . '/config/plugins/' . $plugindir . '/mg.json',
-            'backup' => $lbhomedir . '/config/plugins/' . $plugindir . '.backup.json',
-            'log' => $lbhomedir . '/log/plugins/' . $plugindir . '/mg.log',
-            'datadir' => $lbhomedir . '/data/plugins/' . $plugindir,
-            'tmp' => '/tmp/mgismart',
-            'lbhome' => $lbhomedir,
-            'plugin' => $plugindir,
+            'config' => $home . '/config/plugins/' . $ordner . '/mg.json',
+            'backup' => $home . '/config/plugins/' . $ordner . '.backup.json',
+            'log' => $home . '/log/plugins/' . $ordner . '/mg.log',
+            'datadir' => $home . '/data/plugins/' . $ordner,
+            /* Je Ordner ein eigener Zwischenspeicher: bis 1.1.16 teilten
+             * sich eine Zweitinstallation (mgismart01) und die erste
+             * /tmp/mgismart - Drosselung, Meldungen, Veroeffentlichungsstand. */
+            'tmp' => '/tmp/' . $ordner,
+            'lbhome' => $home,
+            'plugin' => $ordner,
+            'archiv' => '',
         );
     }
-    $base = dirname(dirname(__DIR__));
+    /* Keine Wurzel (Entwicklung, Pruefstand, fremder Baum) oder Archivmodus:
+     * die Ersatzpfade unter dem Temp-Ordner, unter einem EIGENEN Namen - nie
+     * ein Pfad der Anlage, nie einer ab der Laufwerkswurzel und nie der
+     * Zwischenspeicher /tmp/<ordner> der Anlage. bin/cron.php steigt in beiden
+     * Faellen vorher aus. */
+    $tmp = sys_get_temp_dir() . '/mgismart-archiv';
     return array(
-        'config' => $base . '/config/mg.json',
-        'backup' => $base . '/config/mg.backup.json',
-        'log' => sys_get_temp_dir() . '/mgismart/mg.log',
-        'datadir' => sys_get_temp_dir() . '/mgismart/data',
-        'tmp' => sys_get_temp_dir() . '/mgismart',
+        'config' => $tmp . '/mg.json',
+        'backup' => $tmp . '/mg.backup.json',
+        'log' => $tmp . '/mg.log',
+        'datadir' => $tmp . '/data',
+        'tmp' => $tmp,
         'lbhome' => '',
-        'plugin' => 'mgismart',
+        'plugin' => $ordner,
+        // Die gefundene Wurzel, wenn diese Datei NICHT darin installiert liegt
+        // (Archivmodus) - fuer die Meldung von bin/cron.php; sonst leer.
+        'archiv' => $gefunden,
     );
 }
 
@@ -2255,14 +2290,11 @@ function mg_horcher_themen($cfg = null)
     if ($cfg === null) {
         $cfg = mg_config();
     }
+    /* Die Vorklimatisierung horcht seit 1.1.17 nicht mehr hier: der
+     * Abfahrts-Assistent sendet ABFAHRT_IN und OK fluechtig (Zeitbezug), und
+     * ein Abo von zwei Sekunden traf sie praktisch nie. Sie liest seinen
+     * Stand ueber mg_abfahrt_lesen(). */
     $t = array();
-    if (!empty($cfg['abfahrt_ein'])) {
-        $pfad = trim((string) $cfg['abfahrt_praefix'], '/ ');
-        if ($pfad !== '') {
-            $t[] = $pfad . '/ABFAHRT_IN';
-            $t[] = $pfad . '/OK';
-        }
-    }
     if (!empty($cfg['ladeempf_ein'])) {
         $th = trim((string) $cfg['ladeempf_thema']);
         if ($th !== '') {
@@ -2301,6 +2333,118 @@ function mg_horcher_zustand()
     );
 }
 
+/* ==================================================================
+ * Der Abfahrts-Assistent auf DIESEM LoxBerry
+ *
+ * Die Vorklimatisierung braucht "Minuten bis zur Abfahrt". Bis 1.1.16 kamen
+ * sie ueber ein Abo von zwei Sekunden auf <praefix>/ABFAHRT_IN und
+ * <praefix>/OK. Der Abfahrts-Assistent sendet beide seit 1.6.13 fluechtig
+ * (Zeitbezug, so entschieden); ein Abo, das zwei Sekunden je Minute lauscht,
+ * sah sie praktisch nie, und die Vorklimatisierung loeste nicht aus (in WSL
+ * gemessen, Pruefung-MGiSmart-1.1.17, Fall Z1).
+ *
+ * Gelesen wird jetzt, was der Abfahrts-Assistent dafuer anbietet: seinen
+ * unangemeldeten Leseendpunkt termin.php ohne Parameter. Er rechnet nicht und
+ * schreibt nichts; er gibt den Stand aus, den sein Dienst im Minutentakt
+ * fortschreibt, samt ALTER (Sekunden seit der Berechnung) als
+ * Ausfallerkennung. Dieselbe Bauart nutzt er selbst fuer das Ferien-Plugin
+ * (abfahrt_lokal_url(): 127.0.0.1, Port aus general.json -> Webserver.Port).
+ * Seine Zwischendatei stand.json ist innerer Aufbau und wird nicht gelesen.
+ * ================================================================== */
+
+/** Der Ordner des Abfahrts-Assistenten - FOLDER aus dessen plugin.cfg, seine
+ *  Kennung. Eine Zweitinstallation (abfahrtsassistent01) wird nicht gesucht. */
+function mg_abfahrt_ordner()
+{
+    return 'abfahrtsassistent';
+}
+
+/** Liegt der Abfahrts-Assistent auf dieser Anlage? Nur unter der gelesenen
+ *  Wurzel (mg_paths()), nie ab der Laufwerkswurzel. */
+function mg_abfahrt_da()
+{
+    $p = mg_paths();
+    return $p['lbhome'] !== ''
+        && is_file($p['lbhome'] . '/webfrontend/html/plugins/' . mg_abfahrt_ordner() . '/termin.php');
+}
+
+/** Der Port des LoxBerry-Webservers (general.json, Webserver.Port; sonst 80). */
+function mg_webport()
+{
+    $p = mg_paths();
+    if ($p['lbhome'] === '') {
+        return 80;
+    }
+    $g = mg_json_lesen($p['lbhome'] . '/config/system/general.json');
+    foreach (array('Webserver', 'WEBSERVER') as $ab) {
+        if (isset($g[$ab]['Port']) && is_scalar($g[$ab]['Port'])
+            && (int) $g[$ab]['Port'] > 0 && (int) $g[$ab]['Port'] < 65536) {
+            return (int) $g[$ab]['Port'];
+        }
+    }
+    return 80;
+}
+
+/**
+ * Den Stand des Abfahrts-Assistenten lesen.
+ *
+ * Rueckgabe array('lage' => 'ok'|'veraltet'|'fehlt'|'unbekannt',
+ *                 'ok' => 0|1, 'in' => Minuten bis zur Abfahrt,
+ *                 'alter' => Sekunden, 'grund' => Text).
+ * 'ok' heisst: Antwort gelesen und der Stand hoechstens 300 s alt - der
+ * Dienst des Abfahrts-Assistenten rechnet jede Minute; ein aelterer Stand
+ * gilt nicht (steht der Dienst, bliebe sonst die letzte Restzeit stehen).
+ * Nur mit 'ok' darf die Vorklimatisierung ausloesen.
+ */
+function mg_abfahrt_lesen()
+{
+    $aus = array('lage' => 'fehlt', 'ok' => 0, 'in' => 9999, 'alter' => -1, 'grund' => '');
+    if (mg_paths()['lbhome'] === '') {
+        $aus['lage'] = 'unbekannt';
+        $aus['grund'] = 'keine LoxBerry-Wurzel';
+        return $aus;
+    }
+    if (!mg_abfahrt_da()) {
+        $aus['grund'] = 'Abfahrts-Assistent nicht installiert';
+        return $aus;
+    }
+    $port = mg_webport();
+    $url = 'http://127.0.0.1' . ($port === 80 ? '' : ':' . $port)
+         . '/plugins/' . mg_abfahrt_ordner() . '/termin.php';
+    $roh = @file_get_contents($url, false, stream_context_create(array('http' => array(
+        'timeout' => 4, 'user_agent' => 'LoxBerry MG iSmart', 'ignore_errors' => true))));
+    $status = (isset($http_response_header) && is_array($http_response_header)
+               && isset($http_response_header[0])) ? (string) $http_response_header[0] : '';
+    if ($roh === false || !preg_match('#^HTTP/\S+\s+200\b#', $status)) {
+        $aus['lage'] = 'unbekannt';
+        $aus['grund'] = 'termin.php antwortet nicht' . ($status !== '' ? ' (' . $status . ')' : '');
+        return $aus;
+    }
+    $zeile = '';
+    foreach (preg_split('/\r?\n/', (string) $roh) as $z) {
+        if (strpos($z, 'TERMIN;') === 0) { $zeile = $z; }
+    }
+    $w = array();
+    if (preg_match_all('/;([A-Z_]+)=(-?[0-9]+(?:\.[0-9]+)?)(?=;|$)/', $zeile, $t, PREG_SET_ORDER)) {
+        foreach ($t as $m) { $w[$m[1]] = $m[2]; }
+    }
+    if (!isset($w['OK'], $w['ABFAHRT_IN'], $w['ALTER'])) {
+        $aus['lage'] = 'unbekannt';
+        $aus['grund'] = 'Antwort ohne OK, ABFAHRT_IN oder ALTER';
+        return $aus;
+    }
+    $aus['ok'] = ((int) $w['OK'] === 1) ? 1 : 0;
+    $aus['in'] = (int) $w['ABFAHRT_IN'];
+    $aus['alter'] = (int) $w['ALTER'];
+    if ($aus['alter'] < 0 || $aus['alter'] > 300) {
+        $aus['lage'] = 'veraltet';
+        $aus['grund'] = 'Stand ' . $aus['alter'] . ' s alt - laeuft der Dienst des Abfahrts-Assistenten?';
+        return $aus;
+    }
+    $aus['lage'] = 'ok';
+    return $aus;
+}
+
 /**
  * Die Automatiken auswerten. Rueckgabe: Liste der Meldungen.
  *
@@ -2321,10 +2465,16 @@ function mg_automatik()
 
     // --- Vorklimatisierung ---
     if (!empty($cfg['abfahrt_ein'])) {
-        $pfad = trim((string) $cfg['abfahrt_praefix'], '/ ');
-        $in = isset($werte[$pfad . '/ABFAHRT_IN'])
-            ? (float) str_replace(',', '.', $werte[$pfad . '/ABFAHRT_IN']) : -1;
-        $ok = isset($werte[$pfad . '/OK']) ? mg_bool_wert($werte[$pfad . '/OK'], 0) : 0;
+        /* Nur ein frischer Stand des Abfahrts-Assistenten zaehlt
+         * (mg_abfahrt_lesen()); fehlt er, ist er veraltet oder nicht zu
+         * lesen, bleibt die Vorklimatisierung aus, und das Protokoll sagt
+         * es einmal. */
+        $ab = mg_abfahrt_lesen();
+        mg_log_if_changed('abfahrt', $ab['lage'] === 'ok'
+            ? 'Abfahrts-Assistent gelesen'
+            : 'Vorklimatisierung ausgesetzt: ' . $ab['grund']);
+        $in = $ab['lage'] === 'ok' ? (float) $ab['in'] : -1;
+        $ok = $ab['lage'] === 'ok' ? (int) $ab['ok'] : 0;
         $vorlauf = max(1, (int) $cfg['abfahrt_vorlauf']);
         $nr = max(1, (int) $cfg['abfahrt_fahrzeug']);
         $zuletzt = isset($merk['abfahrt']) ? (int) $merk['abfahrt'] : 0;
@@ -2460,119 +2610,413 @@ function mg_mqtt_argumente($nr, $st)
 }
 
 /**
- * Textthemen, die REGELMAESSIG leer werden - sie gehen nie mit -r hinaus.
+ * Die Themen, die zurueckbehalten (-r) hinausgehen - eine POSITIVLISTE.
  *
- * Eine leere Nutzlast mit -r loescht das behaltene Thema im Broker
- * (Regeln/07, am Broker belegt 14.09.2026); bis 1.1.11 gingen diese Themen
- * bei jedem Leerwerden so hinaus. Nur den leeren Wert ohne -r zu schicken
- * genuegt aber nicht: dann bliebe der LETZTE Text behalten stehen - die
- * offene Tuer von gestern, ein laengst behobener Fehler - und kaeme nach
- * einem Neustart des Gateways als frisch beim Miniserver an. Deshalb gehen
- * diese Themen gar nicht behalten hinaus (Regeln/07: "Ein Thema, das im
- * Regelfall leer ist, darf nicht retained sein").
+ * Bis 1.1.16 stand hier eine Ausnahmeliste mit der Vorgabe "retained": jedes
+ * Thema, das nicht ausdruecklich ausgenommen war, ging mit -r hinaus - auch
+ * jedes neue (Bestandsliste Klasse E vom 19.09.2026). Jetzt geht nur
+ * zurueckbehalten hinaus, was hier steht; alles andere fluechtig.
+ *
+ * Die Frage je Thema (Regeln/07, Entscheidungen vom 18. und 19.09.2026, dazu
+ * "Werte, die allein durch die Uhr falsch werden" vom 24.09.2026): Wer sagt
+ * das - das Fahrzeug bzw. eine Einstellung, oder der Dienst ueber sich
+ * selbst? Und wird der Wert allein durch den Lauf der Uhr falsch?
+ *
+ * Zurueckbehalten: Zustaende des Fahrzeugs (Ladestand, Stecker, Tueren,
+ * Klima ...), Einstellungen (Ziel, Stromgrenze, Anzeigename, Kennung),
+ * Zaehler, die wahr bleiben (Kilometerstand, seit der letzten Ladung), und
+ * fertig_um (ein fester Zeitpunkt).
+ *
+ * Nicht zurueckbehalten - jedes Thema, das hier fehlt, darunter:
+ *   ok, themen          Aussagen des Dienstes ueber seinen eigenen Lauf
+ *   erreichbar, gateway, fehler       Aussagen des SAIC-Gateways, eines fremden
+ *                       Dienstes in der Kette, ueber sich selbst: gateway
+ *                       spiegelt dessen Letzten Willen, und stirbt dieser
+ *                       Minutenlauf, bliebe der Spiegel stehen (entschieden
+ *                       vom Hausherrn am 25.09.2026)
+ *   alter, fahrzeugalter, restzeit    Alter und Dauer (seit 1.1.15)
+ *   leistung, tempo, innentemperatur, aussentemperatur, ac_leistung,
+ *   ac_strom, ac_spannung             Messwerte mit Zeitbezug
+ *   km_tag, verbrauch_tag             Tageswerte - um Mitternacht falsch
+ *   push_aktiv, push_test             Fenster, die mit der Uhr enden
+ *   die acht Textthemen, die regelmaessig leer werden (seit 1.1.12)
+ * Gemessen am empfangenen Paket in WSL, Pruefung-MGiSmart-1.1.17, Faelle R1-R3.
  */
-function mg_mqtt_fluechtig()
+function mg_mqtt_retain_liste()
 {
-    return array('tueren_namen', 'fenster_namen', 'fehlertext', 'meldung',
-                 'ladeplan', 'heizplan', 'abbruchgrund', 'fahrzeugmeldung');
+    static $l = null;
+    if ($l === null) {
+        $l = array_fill_keys(array(
+            'soc', 'energie', 'ziel', 'reichweite', 'laedt', 'stecker',
+            'kilometerstand', 'batterie12v', 'verschlossen', 'kofferraum', 'voll',
+            'push', 'laeuft', 'zuhause',
+            'entfernung', 'km_seit_ladung', 'tueren_offen', 'fenster_offen',
+            'reifen_vl', 'reifen_vr', 'reifen_hl', 'reifen_hr', 'ladeart',
+            'kabel_verriegelt', 'stromgrenze', 'kapazitaet', 'verbrauch_seit_ladung',
+            'fertig_um', 'batterieheizung', 'klima', 'klima_soll', 'heckscheibe',
+            'frontscheibe', 'sitzheizung_l', 'sitzheizung_r', 'stecker_fahrzeug',
+            'stecker_saeule', 'name', 'vin', 'klima_text', 'stromgrenze_text',
+        ), 1);
+    }
+    return $l;
 }
 
-/**
- * Themen mit Zeitbezug und das Sammelthema ok - sie gehen nie mit -r hinaus.
- *
- * Entscheidung des Hausherrn vom 18.09.2026 (Regeln/07, Abschnitt 2, die drei
- * Absaetze "Entschieden am 18.09.2026"): ein Alter ist ein Messwert mit
- * Zeitbezug und nie retained, und ok ist nie retained. Ein zurueckbehaltenes
- * alter=3 ist falsch, sobald es zurueckbehalten wird; ein zurueckbehaltenes
- * ok=1 meldete nach einem Neustart von Broker oder Gateway einen toten Dienst
- * als in Ordnung. Bis 1.1.14 gingen alle vier retained hinaus (gemessen
- * 18.09.2026 am empfangenen Paket, Pruefung-MGiSmart-1.1.15, Fall F1b).
- *
- *   alter, fahrzeugalter  Minuten seit ... (Feldliste: ALTER, FZALTER)
- *   restzeit              Restladezeit in Minuten - eine Dauer, die mit der
- *                         Zeit veraltet wie time_left (Regeln/07, Hausstandard)
- *   ok                    Sammelthema "Datensatz gueltig"
- *
- * fertig_um bleibt retained: ein absoluter Zeitpunkt, kein Alter (Regeln/07,
- * Einordnung an der Funkwacht). Die Zustaende (soc, laedt, ...) bleiben
- * retained.
- */
-function mg_mqtt_nie_behalten()
-{
-    return array('ok', 'alter', 'fahrzeugalter', 'restzeit');
-}
-
-/** Geht dieser Wert behalten (-r) hinaus?
- *  Nie bei einem leeren Wert, nie bei einem Thema aus mg_mqtt_fluechtig()
- *  oder mg_mqtt_nie_behalten(). */
+/** Geht dieser Wert behalten (-r) hinaus? Nie bei einem leeren Wert - eine
+ *  leere Nutzlast mit -r LOESCHT das Thema im Broker -, sonst genau dann,
+ *  wenn der Name in mg_mqtt_retain_liste() steht. */
 function mg_mqtt_behalten($thema, $wert)
 {
     if ((string) $wert === '') {
         return false;
     }
     $name = substr((string) $thema, strrpos('/' . $thema, '/'));
-    return !in_array($name, mg_mqtt_fluechtig(), true)
-        && !in_array($name, mg_mqtt_nie_behalten(), true);
+    $liste = mg_mqtt_retain_liste();
+    return isset($liste[$name]);
+}
+
+/** Die Namen, die heute fluechtig hinausgehen - jeder davon kann aus einer
+ *  frueheren Fassung noch zurueckbehalten im Broker liegen. */
+function mg_mqtt_altlast_liste()
+{
+    $liste = mg_mqtt_retain_liste();
+    $aus = array();
+    foreach (array_keys(mg_mqtt_themen()) as $t) {
+        $name = substr($t, strlen('<n>/'));
+        if (!isset($liste[$name])) {
+            $aus[] = $name;
+        }
+    }
+    sort($aus);
+    return $aus;
 }
 
 /**
- * Der Merker der einmaligen Abraeumung fuer mg_mqtt_nie_behalten().
+ * Den Broker fragen, welche Themen er zurueckbehaelt - in EINER Verbindung,
+ * ein SUBSCRIBE mit allen Filtern.
  *
- * Eine Umstellung von -r auf fluechtig loescht nichts: der alte Wert steht im
- * Broker weiter und wird nach jedem Neustart wieder ausgeliefert. Fort ist er
- * erst, wenn eine LEERE Nutzlast mit -r auf dasselbe Thema faellt (Regeln/07,
- * am Broker belegt 14.09.2026). Das geschieht einmal, Vorbild Weissware
- * 0.9.26 (altwerte_abraeumen(), Merker retain_ts_geraeumt).
+ * Rueckgabe array('lage' => 'ok'|'unbekannt', 'grund' => Text,
+ *                 'behalten' => array(thema => wert)).
+ * 'ok' heisst: Anmeldung angenommen (CONNACK 0) und JEDER Filter bestaetigt
+ * (SUBACK-Rueckgabe unter 0x80); was dann nicht unter 'behalten' steht, liegt
+ * nicht zurueckbehalten im Broker. 'unbekannt': er war nicht zu fragen - keine
+ * Verbindung, Anmeldung abgewiesen, ein Filter abgelehnt, keine Antwort. Das
+ * heisst NIE "nichts belegt": ein Broker, der das Lesen verweigert, schickt
+ * nach dem SUBACK nichts (Bauart bw_mqtt_behalten_liste(),
+ * Beschattungswaechter 0.9.21; in WSL gemessen, Pruefung-MGiSmart-1.1.17,
+ * Faelle R6, R7, V1, V2).
  *
- * Der Merker traegt je Zeile "<praefix>/<fahrzeug>": wer das Praefix
- * umstellt, bekommt die Abraeumung unter dem neuen Stamm noch einmal, und
- * jedes Fahrzeug wird einzeln abgeraeumt - mg_mqtt_senden() laeuft je
- * Fahrzeug (bin/cron.php:43-56). Ein Merker, der nur als Datei zaehlt, haette
- * nach dem ersten Fahrzeug alle weiteren uebergangen (gemessen an
- * mqtt_fluechtig_abgeraeumt, Pruefung-MGiSmart-1.1.15, Fall F4, Hinweis).
- * Er liegt unter data/ - den raeumt der Installer bei jedem Update ab
- * (Regeln/06), also laeuft die Abraeumung nach jedem Update einmal; der
- * gueltige Wert folgt jedes Mal unmittelbar.
+ * Belegt ist ein Thema nur am EMPFANGENEN Paket mit Retain-Merkmal und nicht
+ * leerer Nutzlast. Angemeldet wird mit den Zugangsdaten aus dem Reiter MQTT -
+ * derselbe Broker, an den mosquitto_pub sendet. Das Kennwort steht nur im
+ * CONNECT-Paket, nie in einem Protokoll und nie auf einer Kommandozeile.
+ * MQTT 3.1.1 von Hand (CONNECT, SUBSCRIBE mit QoS 0, DISCONNECT), ohne fremde
+ * Bibliothek.
  */
-function mg_mqtt_altwerte_merker()
+function mg_mqtt_rueckfrage(array $filter)
 {
-    return mg_paths()['datadir'] . '/retain_zeitbezug_geraeumt';
-}
-
-/** Ist unter diesem Stamm ("<praefix>/<fahrzeug>") schon abgeraeumt? */
-function mg_mqtt_altwerte_geraeumt($stamm)
-{
-    $f = mg_mqtt_altwerte_merker();
-    if (!is_file($f)) {
-        return false;
+    $aus = array('lage' => 'unbekannt', 'grund' => '', 'behalten' => array());
+    $soll = array();
+    foreach ($filter as $f) {
+        if ((string) $f !== '') { $soll[(string) $f] = true; }
     }
-    $inhalt = @file_get_contents($f);
-    if ($inhalt === false) {
-        return false;
+    if (!$soll) {
+        $aus['lage'] = 'ok';
+        return $aus;
     }
-    foreach (preg_split('/\r?\n/', $inhalt) as $zeile) {
-        if (trim($zeile) === $stamm) {
-            return true;
+    $cfg = mg_config();
+    $host = trim((string) $cfg['broker_host']);
+    if ($host === '' || $host === 'localhost') { $host = '127.0.0.1'; }
+    $port = (int) $cfg['broker_port'];
+    if ($port <= 0 || $port > 65535) { $port = 1883; }
+    $benutzer = mg_optionswert($cfg['broker_user']);
+    $kennwort = mg_optionswert($cfg['broker_pass']);
+    $ziel = (strpos($host, ':') !== false) ? '[' . $host . ']' : $host;
+    $errno = 0;
+    $errstr = '';
+    $s = @stream_socket_client('tcp://' . $ziel . ':' . $port, $errno, $errstr, 2);
+    if (!$s) {
+        $aus['grund'] = 'keine Verbindung zu ' . $host . ':' . $port;
+        return $aus;
+    }
+    stream_set_timeout($s, 1);
+    $zk = function ($t) { return pack('n', strlen($t)) . $t; };
+    $laenge = function ($n) {
+        $o = '';
+        do {
+            $b = $n % 128;
+            $n = intdiv($n, 128);
+            if ($n > 0) { $b |= 128; }
+            $o .= chr($b);
+        } while ($n > 0);
+        return $o;
+    };
+    /* Genau $n Bytes lesen oder null - bei Zeitablauf und Verbindungsende. */
+    $lies = function ($n) use ($s) {
+        $d = '';
+        while (strlen($d) < $n) {
+            $t = @fread($s, $n - strlen($d));
+            if ($t === false || $t === '') {
+                $meta = stream_get_meta_data($s);
+                if (!empty($meta['timed_out']) || !empty($meta['eof']) || feof($s)) { return null; }
+                continue;
+            }
+            $d .= $t;
+        }
+        return $d;
+    };
+    /* Ein Paket: array(kopfbyte, rumpf) oder null. */
+    $paket = function () use ($lies) {
+        $k = $lies(1);
+        if ($k === null) { return null; }
+        $n = 0;
+        $mult = 1;
+        for ($i = 0; $i < 4; $i++) {
+            $b = $lies(1);
+            if ($b === null) { return null; }
+            $n += (ord($b) & 127) * $mult;
+            $mult *= 128;
+            if (!(ord($b) & 128)) { break; }
+        }
+        $r = ($n > 0) ? $lies($n) : '';
+        return ($r === null) ? null : array(ord($k), $r);
+    };
+    $flags = 0x02;                                  // saubere Sitzung
+    $nutz = $zk('mgrueck' . getmypid() . mt_rand(100, 999));
+    if ($benutzer !== '') {
+        $flags |= 0x80;
+        // Ein Kennwort ohne Benutzer laesst MQTT 3.1.1 nicht zu.
+        if ($kennwort !== '') { $flags |= 0x40; }
+    }
+    $kopf = $zk('MQTT') . chr(4) . chr($flags) . pack('n', 10);
+    if ($benutzer !== '') {
+        $nutz .= $zk($benutzer);
+        if ($kennwort !== '') { $nutz .= $zk($kennwort); }
+    }
+    if (@fwrite($s, chr(0x10) . $laenge(strlen($kopf . $nutz)) . $kopf . $nutz) === false) {
+        fclose($s);
+        $aus['grund'] = 'Anmeldung nicht zu senden';
+        return $aus;
+    }
+    $ack = $paket();
+    if ($ack === null || ($ack[0] >> 4) !== 2 || strlen($ack[1]) < 2) {
+        $aus['grund'] = 'keine Antwort auf die Anmeldung';
+    } elseif (ord($ack[1][1]) !== 0) {
+        $aus['grund'] = 'Anmeldung abgewiesen, CONNACK ' . ord($ack[1][1]);
+    } else {
+        $sub = pack('n', 1);
+        foreach (array_keys($soll) as $t) { $sub .= $zk($t) . chr(0); }
+        @fwrite($s, chr(0x82) . $laenge(strlen($sub)) . $sub);
+        $bestaetigt = false;
+        $abgelehnt = false;
+        $behalten = array();
+        $ende = microtime(true) + 3.0;
+        while (microtime(true) < $ende) {
+            $pk = $paket();
+            if ($pk === null) { break; }           // Zeitablauf: nichts mehr gekommen
+            $art = $pk[0] >> 4;
+            if ($art === 9) {
+                /* Je Filter ein Rueckgabebyte hinter der Paketkennung;
+                   0x80 heisst abgelehnt. */
+                $rc = (string) substr($pk[1], 2);
+                if (strlen($rc) !== count($soll)) { $abgelehnt = true; }
+                for ($i = 0; $i < strlen($rc); $i++) {
+                    if (ord($rc[$i]) >= 0x80) { $abgelehnt = true; }
+                }
+                if ($abgelehnt) { break; }
+                $bestaetigt = true;
+                // Zurueckbehaltenes kommt unmittelbar nach dem SUBACK.
+                $ende = min($ende, microtime(true) + 1.0);
+            } elseif ($art === 3 && strlen($pk[1]) >= 2) {
+                $tl = unpack('n', substr($pk[1], 0, 2));
+                $t = substr($pk[1], 2, $tl[1]);
+                $versatz = 2 + $tl[1] + ((($pk[0] >> 1) & 3) > 0 ? 2 : 0);
+                $wert = (string) substr($pk[1], $versatz);
+                // Am empfangenen Paket: nur mit gesetztem Retain-Merkmal.
+                if (($pk[0] & 1) && $wert !== '') { $behalten[$t] = $wert; }
+            }
+        }
+        if ($bestaetigt && !$abgelehnt) {
+            $aus['lage'] = 'ok';
+            $aus['behalten'] = $behalten;
+        } else {
+            $aus['grund'] = $abgelehnt ? 'Abonnement abgelehnt, SUBACK 0x80'
+                                       : 'keine Bestaetigung des Abonnements';
         }
     }
-    return false;
+    @fwrite($s, chr(0xE0) . chr(0));
+    fclose($s);
+    return $aus;
 }
 
-/** Den Stamm im Merker festhalten; ein Fehlschlag wird gemeldet. */
-function mg_mqtt_altwerte_merken($stamm)
+/*
+ * Die Altlast: fluechtige Themen, die eine fruehere Fassung zurueckbehalten
+ * gesendet hat, liegen weiter im Broker und kaemen nach jedem Neustart von
+ * Broker oder MQTT-Gateway als frisch beim Miniserver an. Fort ist ein Wert
+ * erst, wenn eine LEERE Nutzlast mit -r auf dasselbe Thema faellt.
+ *
+ * Abgeraeumt wird nach der ANTWORT DES BROKERS, nie auf den Sendeerfolg
+ * (Regeln/07, Nachtrag 19.09.2026; Vorbild VolkswagenID 0.9.24
+ * mqtt_altlast_abraeumen(), Funkwacht 1.0.6):
+ *   - Merker liegt mit der Kennung dieses Stamms -> nichts zu tun.
+ *   - Broker fragen (mg_mqtt_rueckfrage()). Nichts belegt -> Merker, nichts
+ *     abraeumen. Einiges belegt -> genau das, leere Nutzlast unmittelbar vor
+ *     dem gueltigen Wert; danach NACHLESEN, und erst wenn der Broker nichts
+ *     mehr hat, der Merker.
+ *   - Nicht zu fragen -> KEIN Merker; alle fluechtigen Themen des Stamms
+ *     gehen mit leerer Nutzlast vor dem gueltigen Wert hinaus.
+ * Gefragt wird hoechstens alle 30 Minuten je Stamm (retain_altlast_gefragt),
+ * damit ein Broker, der das Lesen verweigert, nicht jede Minute 24 leere
+ * Nachrichten je Fahrzeug bekommt.
+ *
+ * Merker retain_altlast_bestaetigt im Datenordner, eine Zeile je Stamm
+ * "leer-bestaetigt <praefix>/<fahrzeug>: <Themenliste>": ein anderes Praefix,
+ * ein weiteres Fahrzeug oder eine laengere Liste gilt nicht, und die Merker
+ * der Vorfassungen (retain_zeitbezug_geraeumt, mqtt_fluechtig_abgeraeumt)
+ * haben einen anderen Namen und gelten deshalb ebenfalls nicht - die Merker
+ * bis 1.1.16 entstanden auf den Sendeerfolg, der Textmerker galt nur fuer
+ * das erste Fahrzeug (gemessen, Pruefung-MGiSmart-1.1.17, Faelle R1, R4, R5,
+ * R8). purge_installation raeumt den Datenordner bei jedem Update; dann wird
+ * einmal nachgefragt.
+ */
+function mg_mqtt_altlast_merker()
 {
-    $f = mg_mqtt_altwerte_merker();
-    $alt = is_file($f) ? (string) @file_get_contents($f) : '';
-    $alt = rtrim($alt, "\r\n");
-    $neu = ($alt !== '' ? $alt . "\n" : '') . $stamm . "\n";
-    if (!mg_write_atomic($f, $neu, 0644)) {
-        /* Ohne Merker geschieht die Abraeumung bei jedem Lauf erneut. Schaden
-         * richtet das nicht an - der gueltige Wert folgt jedes Mal
-         * unmittelbar -, aber es gehoert gemeldet statt verschwiegen. */
+    return mg_paths()['datadir'] . '/retain_altlast_bestaetigt';
+}
+
+function mg_mqtt_altlast_gefragt_datei()
+{
+    return mg_paths()['datadir'] . '/retain_altlast_gefragt';
+}
+
+/** Die Zeilen einer kleinen Merkdatei, leere weggelassen. */
+function mg_mqtt_merkzeilen($datei)
+{
+    if (!is_file($datei)) {
+        return array();
+    }
+    $roh = @file_get_contents($datei);
+    if ($roh === false) {
+        return array();
+    }
+    return array_values(array_filter(preg_split('/\r?\n/', $roh), 'strlen'));
+}
+
+function mg_mqtt_altlast_kennung($stamm)
+{
+    return 'leer-bestaetigt ' . $stamm . ': ' . implode(' ', mg_mqtt_altlast_liste());
+}
+
+/** Traegt der Merker die Kennung dieses Stamms? */
+function mg_mqtt_altlast_bestaetigt($stamm)
+{
+    return in_array(mg_mqtt_altlast_kennung($stamm),
+                    mg_mqtt_merkzeilen(mg_mqtt_altlast_merker()), true);
+}
+
+/** Den Stamm als bestaetigt eintragen; ein Fehlschlag wird gemeldet. */
+function mg_mqtt_altlast_bestaetigen($stamm)
+{
+    $f = mg_mqtt_altlast_merker();
+    $neu = array();
+    foreach (mg_mqtt_merkzeilen($f) as $z) {
+        if (strpos($z, 'leer-bestaetigt ' . $stamm . ': ') !== 0) { $neu[] = $z; }
+    }
+    $neu[] = mg_mqtt_altlast_kennung($stamm);
+    if (!mg_write_atomic($f, implode("\n", $neu) . "\n", 0644)) {
         mg_log_if_changed('retain_merker', 'Der Merker ' . $f . ' liess sich nicht'
-            . ' schreiben; die zurueckbehaltenen Altwerte von ' . $stamm
-            . ' werden deshalb bei jedem Lauf erneut abgeraeumt.');
+            . ' schreiben; der Broker wird deshalb in 30 Minuten erneut gefragt.');
         return false;
+    }
+    return true;
+}
+
+/** Wann wurde fuer diesen Stamm zuletzt gefragt? 0 = nie oder unlesbar.
+ *  Der Inhalt wird als Zahl geprueft, bevor mit ihm gerechnet wird. */
+function mg_mqtt_altlast_gefragt($stamm)
+{
+    foreach (mg_mqtt_merkzeilen(mg_mqtt_altlast_gefragt_datei()) as $z) {
+        if (preg_match('/^(\S+) ([0-9]{1,12})$/', $z, $t) && $t[1] === $stamm) {
+            return (int) $t[2];
+        }
+    }
+    return 0;
+}
+
+function mg_mqtt_altlast_fragen_merken($stamm)
+{
+    $f = mg_mqtt_altlast_gefragt_datei();
+    $neu = array();
+    foreach (mg_mqtt_merkzeilen($f) as $z) {
+        if (strpos($z, $stamm . ' ') !== 0) { $neu[] = $z; }
+    }
+    $neu[] = $stamm . ' ' . time();
+    return mg_write_atomic($f, implode("\n", $neu) . "\n", 0644);
+}
+
+/**
+ * Welche Altwerte gehen in diesem Lauf mit leerer Nutzlast vor dem gueltigen
+ * Wert hinaus? Rueckgabe array('lage' => 'erledigt'|'wartet'|'belegt'|
+ * 'unbekannt', 'themen' => array(<volles Thema>, ...)).
+ */
+function mg_mqtt_altlast($stamm)
+{
+    if (mg_mqtt_altlast_bestaetigt($stamm)) {
+        return array('lage' => 'erledigt', 'themen' => array());
+    }
+    $zuletzt = mg_mqtt_altlast_gefragt($stamm);
+    $vergangen = time() - $zuletzt;
+    if ($zuletzt > 0 && $vergangen >= 0 && $vergangen < 1800) {
+        return array('lage' => 'wartet', 'themen' => array());
+    }
+    mg_mqtt_altlast_fragen_merken($stamm);
+    $voll = array();
+    foreach (mg_mqtt_altlast_liste() as $n) {
+        $voll[] = $stamm . '/' . $n;
+    }
+    $f = mg_mqtt_rueckfrage($voll);
+    if ($f['lage'] === 'ok') {
+        $belegt = array_values(array_intersect($voll, array_keys($f['behalten'])));
+        if (!$belegt) {
+            if (mg_mqtt_altlast_bestaetigen($stamm)) {
+                mg_log('MQTT: unter ' . $stamm . '/ steht keiner der frueher zurueckbehaltenen'
+                    . ' Werte im Broker (' . count($voll) . ' Themen; vom Broker bestaetigt).');
+            }
+            return array('lage' => 'erledigt', 'themen' => array());
+        }
+        mg_log('MQTT: im Broker stehen noch zurueckbehaltene Altwerte unter ' . $stamm
+            . '/ (' . implode(', ', array_map('basename', $belegt)) . ') - sie gehen mit leerer'
+            . ' Nutzlast unmittelbar vor dem gueltigen Wert hinaus und werden danach nachgelesen.');
+        return array('lage' => 'belegt', 'themen' => $belegt);
+    }
+    mg_log_if_changed('altlast_' . substr(md5($stamm), 0, 8), 'MQTT: der Broker liess sich nicht'
+        . ' befragen (' . $f['grund'] . ') - die frueher zurueckbehaltenen Werte unter ' . $stamm
+        . '/ gehen deshalb alle 30 Minuten mit leerer Nutzlast unmittelbar vor dem gueltigen'
+        . ' Wert hinaus; ein Merker entsteht so nicht. Siehe README, Fassung 1.1.17.');
+    return array('lage' => 'unbekannt', 'themen' => $voll);
+}
+
+/** Nach dem Abraeumen: steht noch etwas? Erst wenn nicht, der Merker. */
+function mg_mqtt_altlast_nachlesen($stamm, array $themen)
+{
+    // Die leeren Nachrichten kamen ueber eigene Verbindungen (mosquitto_pub);
+    // der Broker bekommt einen Augenblick, sie zu uebernehmen.
+    usleep(300000);
+    $f = mg_mqtt_rueckfrage($themen);
+    if ($f['lage'] !== 'ok') {
+        mg_log('MQTT: das Nachlesen unter ' . $stamm . '/ gelang nicht (' . $f['grund']
+            . ') - kein Merker; in 30 Minuten wird wieder gefragt.');
+        return false;
+    }
+    $rest = array_values(array_intersect($themen, array_keys($f['behalten'])));
+    if ($rest) {
+        mg_log('MQTT: unter ' . $stamm . '/ stehen nach dem Abraeumen noch zurueckbehaltene Werte ('
+            . implode(', ', array_map('basename', $rest)) . ') - der Broker hat die leere'
+            . ' Nachricht nicht uebernommen; kein Merker, in 30 Minuten wird wieder gefragt.');
+        return false;
+    }
+    if (mg_mqtt_altlast_bestaetigen($stamm)) {
+        mg_log('MQTT: die frueher zurueckbehaltenen Werte unter ' . $stamm . '/ sind abgeraeumt ('
+            . count($themen) . ' Themen; vom Broker bestaetigt).');
     }
     return true;
 }
@@ -2617,19 +3061,16 @@ function mg_mqtt_senden($nr, $st)
         }
     }
 
-    /* Einmal je Stamm: die Altwerte aus mg_mqtt_nie_behalten() abraeumen.
-     * Das steht VOR der Pruefung "nichts geaendert", damit die Abraeumung
-     * nicht auf die naechste Aenderung wartet; der gueltige Wert geht in
-     * derselben Datei ohne -r hinterher. */
+    /* Die Altlast (mg_mqtt_altlast()). Das steht VOR der Pruefung "nichts
+     * geaendert", damit die Abraeumung nicht auf die naechste Aenderung
+     * wartet; der gueltige Wert geht in derselben Datei ohne -r hinterher. */
     $stamm = trim((string) $cfg['mqtt_praefix'], '/ ') . '/' . (int) $nr;
+    $altlast = mg_mqtt_altlast($stamm);
     $raeumen = array();
-    if (!mg_mqtt_altwerte_geraeumt($stamm)) {
-        foreach ($paare as $thema => $wert) {
-            $name = substr((string) $thema, strrpos('/' . $thema, '/'));
-            if (in_array($name, mg_mqtt_nie_behalten(), true)) {
-                $raeumen[] = $thema;
-                $zu_senden[$thema] = $wert;
-            }
+    foreach ($altlast['themen'] as $thema) {
+        if (array_key_exists($thema, $paare)) {
+            $raeumen[] = $thema;
+            $zu_senden[$thema] = $paare[$thema];
         }
     }
     if (!$zu_senden) {
@@ -2654,24 +3095,8 @@ function mg_mqtt_senden($nr, $st)
      * Jetzt schreibt PHP eine fertige Befehlsdatei: jedes Argument geht durch
      * escapeshellarg(). Es gibt kein Trennzeichen mehr, das falsch verstanden
      * werden koennte. */
-    /* Einmal nach jeder Installation: die Themen aus mg_mqtt_fluechtig()
-     * gingen bis 1.1.11 behalten hinaus, ihr letzter Text liegt noch im
-     * Broker. Er wird geloescht, der aktuelle Wert folgt in derselben Datei
-     * ohne -r. Der Merker liegt unter data/ - den raeumt der Installer bei
-     * jedem Update ab, also laeuft das Abraeumen nach jedem Update einmal. */
     $p = mg_paths();
-    $abgeraeumt = $p['datadir'] . '/mqtt_fluechtig_abgeraeumt';
     $zeilen = '';
-    if (!is_file($abgeraeumt)) {
-        foreach ($paare as $thema => $wert) {
-            $name = substr((string) $thema, strrpos('/' . $thema, '/'));
-            if (in_array($name, mg_mqtt_fluechtig(), true)) {
-                $zeilen .= mg_broker_umgebung() . 'mosquitto_pub' . mg_broker_args()
-                         . ' -r -t ' . escapeshellarg((string) $thema) . " -m '' || exit 1\n";
-                $zu_senden[$thema] = $wert;
-            }
-        }
-    }
     foreach ($raeumen as $thema) {
         $zeilen .= mg_broker_umgebung() . 'mosquitto_pub' . mg_broker_args()
                  . ' -r -t ' . escapeshellarg((string) $thema) . " -m '' || exit 1\n";
@@ -2694,14 +3119,10 @@ function mg_mqtt_senden($nr, $st)
     }
     mg_write_json($merk, array('zeit' => $vollstaendig ? time() : (int) $alt['zeit'],
         'werte' => $paare), 0600);
-    if (!is_file($abgeraeumt)) {
-        if (!is_dir($p['datadir'])) { @mkdir($p['datadir'], 0775, true); }
-        @file_put_contents($abgeraeumt, date('c') . "\n");
-    }
-    // Erst nach gelungenem Senden: sonst gilt ein Stamm als abgeraeumt, dessen
-    // leere Nachricht den Broker nie erreicht hat (Fall F6).
-    if ($raeumen) {
-        mg_mqtt_altwerte_merken($stamm);
+    // Der Merker entsteht erst aus der Antwort des Brokers, nie aus dem
+    // Senden: war einiges belegt, jetzt nachlesen.
+    if ($raeumen && $altlast['lage'] === 'belegt') {
+        mg_mqtt_altlast_nachlesen($stamm, $raeumen);
     }
     mg_log_if_changed('mqtt', 'Veroeffentlichung laeuft (' . count($paare)
         . ' Themen je Fahrzeug)');
@@ -2784,34 +3205,51 @@ function mg_mqtt_probe($nr = 1)
  * und die Liste wird dem Bediener vorher gezeigt.
  * ================================================================== */
 
-/** Alle Themen unter dem eigenen Praefix, die heute nicht mehr vorkommen. */
-function mg_mqtt_verwaiste($sekunden = 3)
+/**
+ * Alle Themen unter dem eigenen Praefix, die zurueckbehalten im Broker liegen
+ * und heute nicht mehr vorkommen - gefragt ueber mg_mqtt_rueckfrage().
+ *
+ * Rueckgabe array('lage' => 'ok'|'unbekannt', 'grund' => Text,
+ *                 'themen' => array(thema => wert)).
+ * Bis 1.1.16 fragte mosquitto_sub; abgewiesene Anmeldung und abgelehnter
+ * Filter ergaben eine leere Liste, und die Oberflaeche meldete "0 verwaiste
+ * Themen gefunden" bzw. "0 geloescht" (in WSL gemessen,
+ * Pruefung-MGiSmart-1.1.17, Faelle V1, V2, V4). Gezaehlt wurde dabei auch,
+ * was nur gerade gesendet, nicht zurueckbehalten war.
+ */
+function mg_mqtt_verwaiste_lage()
 {
     $cfg = mg_config();
+    $aus = array('lage' => 'ok', 'grund' => '', 'themen' => array());
     $praefix = trim((string) $cfg['mqtt_praefix'], '/ ');
-    if ($praefix === '' || !mg_has_mosquitto()) {
-        return array();
+    if ($praefix === '') {
+        return $aus;
     }
-    list($vorhanden, , ) = mg_sub(array($praefix . '/#'), $sekunden);
+    $f = mg_mqtt_rueckfrage(array($praefix . '/#'));
+    if ($f['lage'] !== 'ok') {
+        $aus['lage'] = 'unbekannt';
+        $aus['grund'] = $f['grund'];
+        return $aus;
+    }
     $soll = array();
-    foreach (mg_fahrzeuge($cfg) as $nr => $f) {
+    foreach (mg_fahrzeuge($cfg) as $nr => $fz) {
         foreach (mg_mqtt_argumente($nr, mg_state($nr)) as $thema => $wert) {
             $soll[$thema] = 1;
         }
     }
-    $aus = array();
-    foreach ($vorhanden as $thema => $wert) {
-        if (!isset($soll[$thema])) {
-            $aus[$thema] = $wert;
+    foreach ($f['behalten'] as $thema => $wert) {
+        if (!isset($soll[$thema])
+            && strncmp((string) $thema, $praefix . '/', strlen($praefix) + 1) === 0) {
+            $aus['themen'][$thema] = $wert;
         }
     }
-    ksort($aus);
+    ksort($aus['themen']);
     return $aus;
 }
 
 /**
  * Die uebergebenen Themen im Broker loeschen (leere Nutzlast, behalten).
- * Rueckgabe: array(anzahl, fehlertext)
+ * Rueckgabe: array(anzahl, fehlertext) - die Anzahl nach dem Nachlesen.
  */
 function mg_mqtt_verwaiste_loeschen($themen)
 {
@@ -2839,7 +3277,7 @@ function mg_mqtt_verwaiste_loeschen($themen)
         return array(0, '');
     }
     $zeilen = '';
-    $n = 0;
+    $gesendet = array();
     foreach ((array) $themen as $thema) {
         // Fail closed: nur unterhalb des eigenen Praefix. Ein Thema, das von
         // aussen hereingereicht wurde und woanders liegt, wird uebergangen.
@@ -2848,9 +3286,9 @@ function mg_mqtt_verwaiste_loeschen($themen)
         }
         $zeilen .= mg_broker_umgebung() . 'mosquitto_pub' . mg_broker_args()
                  . ' -r -t ' . escapeshellarg((string) $thema) . " -m ''\n";
-        $n++;
+        $gesendet[] = (string) $thema;
     }
-    if ($n === 0) {
+    if (!$gesendet) {
         return array(0, '');
     }
     $p = mg_paths();
@@ -2865,13 +3303,133 @@ function mg_mqtt_verwaiste_loeschen($themen)
     if ($rc !== 0) {
         return array(0, trim(implode(' ', array_slice($out, 0, 2))));
     }
-    mg_log('Verwaiste MQTT-Themen geloescht: ' . $n);
+    // Gemeldet wird, was der Broker danach nicht mehr hat.
+    usleep(300000);
+    $f = mg_mqtt_rueckfrage($gesendet);
+    $n = count($gesendet);
+    $fehler = '';
+    if ($f['lage'] === 'ok') {
+        $rest = array_intersect($gesendet, array_keys($f['behalten']));
+        $n -= count($rest);
+        if ($rest) {
+            $fehler = count($rest) . ' Themen stehen weiter im Broker: '
+                . implode(', ', array_slice($rest, 0, 5));
+        }
+    }
+    mg_log('Verwaiste MQTT-Themen geloescht: ' . $n . ($f['lage'] === 'ok'
+        ? ' (vom Broker bestaetigt)' : ' (nicht nachgelesen: ' . $f['grund'] . ')'));
     // Der Merker der Veroeffentlichung wird verworfen, damit der naechste
     // Lauf den ganzen Satz neu sendet.
-    foreach (mg_fahrzeuge($cfg) as $nr => $f) {
+    foreach (mg_fahrzeuge($cfg) as $nr => $fz) {
         @unlink($p['tmp'] . '/veroeffentlicht' . (int) $nr . '.json');
     }
-    return array($n, '');
+    return array($n, $fehler);
+}
+
+/**
+ * Die Deinstallation: jedes zurueckbehaltene Thema dieses Plugins im Broker
+ * leeren (bin/cron.php --mqtt-leeren, aufgerufen von uninstall/uninstall).
+ *
+ * Bis 1.1.16 blieben sie stehen - nach dem Entfernen des Plugins lieferte der
+ * Broker bei jedem Neustart des MQTT-Gateways den letzten Ladestand, die
+ * letzte Kennung usw. an den Miniserver (in WSL gemessen,
+ * Pruefung-MGiSmart-1.1.17, Fall U1). Geleert wird unter
+ * <mqtt_praefix>/<nummer>/<name> JEDES Thema, das eine Fassung je gesendet
+ * haben kann (heute zurueckbehalten oder frueher) - auch unter einer
+ * Fahrzeugnummer, die nicht mehr eingerichtet ist, soweit der Broker sie
+ * nennt. Ist er nicht zu fragen: blind fuer die eingerichteten Fahrzeuge,
+ * und das wird so gesagt. Die Themen des SAIC-Gateways (<prefix>/...) bleiben
+ * unberuehrt; kollidieren beide Praefixe, wird gar nichts geloescht.
+ * Rueckgabe array(rc, zeilen) - rc 0 in Ordnung, 1 Warnung.
+ */
+function mg_mqtt_leeren()
+{
+    $z = array();
+    $cfg = mg_config();
+    $praefix = trim((string) $cfg['mqtt_praefix'], '/ ');
+    if ($praefix === '' || strpbrk($praefix, '#+') !== false) {
+        $z[] = '<INFO> Kein eigenes MQTT-Praefix eingestellt - im Broker ist nichts abzuraeumen.';
+        return array(0, $z);
+    }
+    $gw = trim((string) $cfg['prefix'], '/ ');
+    if ($gw !== '' && ($gw === $praefix
+            || strncmp($gw, $praefix . '/', strlen($praefix) + 1) === 0)) {
+        $z[] = '<WARNING> Eigenes MQTT-Praefix und Gateway-Praefix kollidieren (' . $praefix
+            . ') - im Broker wurde nichts geloescht, sonst traefe es die Themen des Gateways.';
+        return array(1, $z);
+    }
+    if (!mg_has_mosquitto()) {
+        $z[] = '<WARNING> mosquitto_pub fehlt - die zurueckbehaltenen Themen unter ' . $praefix
+            . '/ bleiben im Broker.';
+        return array(1, $z);
+    }
+    $namen = array();
+    foreach (array_keys(mg_mqtt_themen()) as $t) {
+        $namen[substr($t, strlen('<n>/'))] = true;
+    }
+    $f = mg_mqtt_rueckfrage(array($praefix . '/#'));
+    $ziel = array();
+    if ($f['lage'] === 'ok') {
+        $muster = '#^' . preg_quote($praefix, '#') . '/[0-9]{1,3}/(.+)$#';
+        foreach (array_keys($f['behalten']) as $t) {
+            if (preg_match($muster, (string) $t, $m) && isset($namen[$m[1]])) {
+                $ziel[] = (string) $t;
+            }
+        }
+        if (!$ziel) {
+            $z[] = '<OK> Unter ' . $praefix . '/ liegt nichts dieses Plugins zurueckbehalten im'
+                . ' Broker (vom Broker bestaetigt).';
+            return array(0, $z);
+        }
+    } else {
+        $n = max(1, mg_fahrzeug_anzahl($cfg));
+        for ($i = 1; $i <= $n; $i++) {
+            foreach (array_keys($namen) as $nm) {
+                $ziel[] = $praefix . '/' . $i . '/' . $nm;
+            }
+        }
+        $z[] = '<WARNING> Der Broker liess sich nicht befragen (' . $f['grund'] . ') - geleert'
+            . ' werden blind die ' . count($ziel) . ' Themen der Fahrzeuge 1 bis ' . $n
+            . '; ob es wirkte, ist nicht nachpruefbar.';
+    }
+    $zeilen = '';
+    foreach ($ziel as $t) {
+        $zeilen .= mg_broker_umgebung() . 'mosquitto_pub' . mg_broker_args()
+                 . ' -r -t ' . escapeshellarg($t) . " -m '' || echo MGFEHL\n";
+    }
+    $p = mg_paths();
+    if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
+    $datei = $p['tmp'] . '/leeren.' . getmypid() . '.sh';
+    if (!mg_write_atomic($datei, $zeilen, 0600)) {
+        $z[] = '<WARNING> Die Befehlsdatei liess sich nicht schreiben (' . $datei . ') - im Broker'
+            . ' wurde nichts geleert.';
+        return array(1, $z);
+    }
+    $out = array();
+    @exec('sh ' . escapeshellarg($datei) . ' 2>&1', $out, $rc);
+    @unlink($datei);
+    $fehl = count(array_keys($out, 'MGFEHL', true));
+    if ($f['lage'] !== 'ok') {
+        $z[] = '<INFO> ' . (count($ziel) - $fehl) . ' leere Nachrichten gesendet, ' . $fehl
+            . ' gescheitert.';
+        return array(1, $z);
+    }
+    usleep(300000);
+    $g = mg_mqtt_rueckfrage($ziel);
+    if ($g['lage'] !== 'ok') {
+        $z[] = '<WARNING> ' . count($ziel) . ' Themen leer gesendet; das Nachlesen gelang nicht ('
+            . $g['grund'] . ') - nicht nachpruefbar.';
+        return array(1, $z);
+    }
+    $rest = array_values(array_intersect($ziel, array_keys($g['behalten'])));
+    if ($rest) {
+        $z[] = '<WARNING> ' . count($rest) . ' von ' . count($ziel) . ' Themen stehen weiter im'
+            . ' Broker: ' . implode(', ', array_slice($rest, 0, 10));
+        return array(1, $z);
+    }
+    $z[] = '<OK> ' . count($ziel) . ' zurueckbehaltene Themen unter ' . $praefix . '/ geleert'
+        . ' (vom Broker bestaetigt).';
+    return array(0, $z);
 }
 
 /** Hausstandard: Gateway-Autostart aus general.json. */
@@ -3025,8 +3583,39 @@ function mg_selbsttest()
     $add('PRUEF.SMACTIVE', $sa_ok, $sa_txt);
     list($fo_ok, $fo_txt) = mg_formularprobe();
     $add('PRUEF.FORMULAR', $fo_ok, $fo_txt);
+    /* Geht nur zurueckbehalten hinaus, was in der Positivliste steht? Und
+     * steht dort kein Thema, das nach Regeln/07 nie retained sein darf (der
+     * Dienst ueber sich selbst, Alter/Dauer, Messwerte mit Zeitbezug,
+     * Tageswerte, die Fenster der Meldungen)? Jeder Name der Liste muss
+     * ausserdem wirklich gesendet werden - sonst ist sie veraltet. */
+    $re_liste = mg_mqtt_retain_liste();
+    $re_namen = array();
+    foreach (array_keys(mg_mqtt_themen()) as $re_t) {
+        $re_namen[substr($re_t, strlen('<n>/'))] = true;
+    }
+    $re_nie = array('ok', 'themen', 'erreichbar', 'gateway', 'fehler', 'alter', 'fahrzeugalter', 'restzeit', 'leistung', 'tempo',
+                    'innentemperatur', 'aussentemperatur', 'ac_leistung', 'ac_strom',
+                    'ac_spannung', 'km_tag', 'verbrauch_tag', 'push_aktiv', 'push_test');
+    $re_fehler = array();
+    if (mg_mqtt_behalten('x/1/mg_unbekannt', '1')) { $re_fehler[] = 'mg_unbekannt'; }
+    foreach ($re_nie as $re_n) {
+        if (mg_mqtt_behalten('x/1/' . $re_n, '1')) { $re_fehler[] = $re_n; }
+    }
+    foreach (array_keys($re_liste) as $re_n) {
+        if (!isset($re_namen[$re_n])) { $re_fehler[] = $re_n . '?'; }
+    }
+    $add('PRUEF.RETAIN', ($re_liste && !$re_fehler) ? 1 : 0,
+        $re_fehler ? implode(', ', $re_fehler)
+                   : (count($re_liste) . '/' . count($re_namen)));
 
-    if (!empty($cfg['abfahrt_ein']) || !empty($cfg['ladeempf_ein'])) {
+    if (!empty($cfg['abfahrt_ein'])) {
+        $ab = mg_abfahrt_lesen();
+        $add('PRUEF.ABFAHRT', $ab['lage'] === 'ok' ? 1 : ($ab['lage'] === 'unbekannt' ? 2 : 0),
+            $ab['lage'] === 'ok'
+                ? ('OK=' . $ab['ok'] . ', ABFAHRT_IN=' . $ab['in'] . ', ' . $ab['alter'] . ' s')
+                : $ab['grund']);
+    }
+    if (!empty($cfg['ladeempf_ein'])) {
         $h = mg_horcher_zustand();
         $gefunden = 0;
         foreach ($h['themen'] as $t) {
@@ -3191,25 +3780,27 @@ function mg_t($schluessel)
 {
     static $texte = null;
     if ($texte === null) {
-        $home = getenv('LBHOMEDIR');
-        if (!$home || !is_dir($home)) {
-            /* Kein fest verdrahteter Systempfad. LoxBerry laesst sich
-             * anderswohin installieren, und das Deinstallationsskript
-             * dieses Plugins haelt es ausdruecklich ebenso.
-             * lb_wurzel_ermitteln() steigt vom eigenen Ablageort auf. */
-            $k = lb_wurzel_ermitteln();
-            if ($k && is_dir($k)) { $home = $k; }
+        /* Welche Sprachdateien gelten, entscheiden mg_paths() und der eigene
+         * Ablageort - nie ein Pfad ab der Laufwerkswurzel. Bis 1.1.16 wurde
+         * ohne Wurzel '' . '/templates/plugins/html/lang' gefragt, also ab /,
+         * und zwar VOR den eigenen Dateien (in WSL im eigenen Wurzelbaum
+         * gemessen, Pruefung-MGiSmart-1.1.17, Fall P3).
+         *   1. Anlage: <Wurzel>/templates/plugins/<ordner>/lang
+         *   2. ausgepacktes Archiv (diese Datei liegt nicht unter
+         *      .../plugins/<ordner>): dessen eigenes templates/lang */
+        $p = mg_paths();
+        $pfad = '';
+        if ($p['lbhome'] !== ''
+            && is_dir($p['lbhome'] . '/templates/plugins/' . $p['plugin'] . '/lang')) {
+            $pfad = $p['lbhome'] . '/templates/plugins/' . $p['plugin'] . '/lang';
+        } elseif (basename(dirname(__DIR__)) !== 'plugins') {
+            $pfad = dirname(dirname(__DIR__)) . '/templates/lang';
         }
-        $ordner = basename(dirname(__FILE__));
-        $pfad = $home . '/templates/plugins/' . $ordner . '/lang';
-        if (!is_dir($pfad)) {
-            // Nicht installiert (Entwicklung): neben dem Plugin nachsehen.
-            $pfad = dirname(dirname(dirname(__FILE__))) . '/templates/lang';
-        }
-        $texte = @parse_ini_file($pfad . '/language_' . mg_sprache() . '.ini',
-                                 true, INI_SCANNER_RAW);
+        $texte = $pfad === '' ? false
+            : @parse_ini_file($pfad . '/language_' . mg_sprache() . '.ini', true, INI_SCANNER_RAW);
         if (!is_array($texte)) { $texte = array(); }
-        $rueck = @parse_ini_file($pfad . '/language_en.ini', true, INI_SCANNER_RAW);
+        $rueck = $pfad === '' ? false
+            : @parse_ini_file($pfad . '/language_en.ini', true, INI_SCANNER_RAW);
         if (is_array($rueck)) { $texte = array_replace_recursive($rueck, $texte); }
         foreach ($texte as $ab => $paare) {
             if (!is_array($paare)) { continue; }

@@ -12,16 +12,65 @@
 # Jetzt: die RICHTIGEN Dateinamen (mg.json, mg.log), und nichts wird angelegt,
 # was das Plugin nicht auch liest.
 
-ARGV1=$1
 ARGV3=$3
-ARGV5=$5
 PFOLDER="${ARGV3:-mgismart}"
-BASE="${ARGV5:-$LBHOMEDIR}"
 
-if [ -z "$BASE" ] || [ ! -d "$BASE" ]; then
-    echo "<WARNING> Das LoxBerry-Wurzelverzeichnis liess sich nicht bestimmen."
+# DIE WURZEL - gelesen, nicht angenommen (Regeln/06). Bis 1.1.16 stand hier
+# BASE="${5:-$LBHOMEDIR}", allenfalls mit "-d": ein fremder Baum ohne
+# general.json wurde Wurzel, und ohne beides griff dieses Skript ab / zu (in
+# WSL gemessen, Pruefung-MGiSmart-1.1.17, Faelle H1-H3). Wurzel ist, was
+# config/plugins, data/plugins UND config/system/general.json traegt - erst
+# $5, dann $LBHOMEDIR, dann vom eigenen Ablageort aufwaerts. Ohne brauchbare
+# Wurzel wird gewarnt, nicht gehandelt.
+mg_ist_wurzel() {
+    [ -n "$1" ] && [ -d "$1/config/plugins" ] && [ -d "$1/data/plugins" ] \
+        && [ -f "$1/config/system/general.json" ]
+}
+lb_wurzel_suchen() {
+    v=$(cd "$(dirname "$(readlink -f "$0")")" 2>/dev/null && pwd)
+    i=0
+    while [ -n "$v" ] && [ "$v" != "/" ] && [ $i -lt 8 ]; do
+        if mg_ist_wurzel "$v"; then
+            echo "$v"; return 0
+        fi
+        v=$(dirname "$v"); i=$((i + 1))
+    done
+    return 1
+}
+BASE=""
+for MG_K in "$5" "$LBHOMEDIR"; do
+    if mg_ist_wurzel "$MG_K"; then BASE="$MG_K"; break; fi
+done
+[ -n "$BASE" ] || BASE=$(lb_wurzel_suchen)
+
+# DIE ABLAGE - ein ABSOLUTER Pfad. Der Installer ruft jeden Haken als
+#   cd "$tempfolder" && "$script" "$tempfile" ... "$lbhomedir" "$tempfolder"
+# (plugininstall.pl:853, :1311, :1337, LoxBerry 4.0.0.15, Geraet/2026-09-05):
+# $1 ist eine Kennung, kein Pfad, $6 der Arbeitsordner, und das Skript selbst
+# liegt in eben diesem Ordner. Bis 1.1.16 lag die Ablage unter dem RELATIVEN
+# $1 - am Arbeitsordner, den kein Skript prueft (aus einem anderen Ordner
+# gerufen, legte preupgrade.sh dort ab und postupgrade.sh fand nichts), und
+# ein $1 mit "../" fuehrte hinaus (in WSL gemessen, Pruefung-MGiSmart-1.1.17,
+# Faelle A1-A5). Jetzt: $6/$1, ersatzweise <Ordner dieses Skripts>/$1; $1 nur
+# als schlichter Name.
+MG_SELBST=$(cd "$(dirname "$(readlink -f "$0")")" 2>/dev/null && pwd -P)
+ABLAGE=""
+case "$1" in
+    ''|.|..|*/*) ;;
+    *)  for MG_A in "$6" "$MG_SELBST"; do
+            case "$MG_A" in
+                /*) if [ -d "$MG_A" ]; then ABLAGE="$MG_A/$1"; break; fi ;;
+            esac
+        done ;;
+esac
+
+if [ -z "$BASE" ]; then
+    echo "<WARNING> Das LoxBerry-Wurzelverzeichnis liess sich nicht bestimmen - nichts zurueckgeholt."
     exit 1
 fi
+# Unten heisst die Ablage ARGV1; leer, wenn es keine gibt - dann wird aus ihr
+# nichts gelesen (sonst stuende "$ARGV1/mg.json" fuer /mg.json).
+ARGV1="$ABLAGE"
 
 CDIR="$BASE/config/plugins/$PFOLDER"
 LDIR="$BASE/log/plugins/$PFOLDER"
@@ -126,7 +175,7 @@ PYEOF
 }
 MG_VORHER=0; mg_eingerichtet "$CF" && MG_VORHER=1
 MG_GESICHERT=0; [ -n "$ARGV1" ] && mg_eingerichtet "$ARGV1/mg.json" && MG_GESICHERT=1
-if [ -f "$ARGV1/mg.json" ] && ! hat_inhalt "$CF" && hat_inhalt "$ARGV1/mg.json"; then
+if [ -n "$ARGV1" ] && [ -f "$ARGV1/mg.json" ] && ! hat_inhalt "$CF" && hat_inhalt "$ARGV1/mg.json"; then
     if [ -s "$CF" ] && [ "$(tr -d ' \t\r\n' < "$CF" 2>/dev/null)" != "{}" ]; then
         if mg_kopieren "$CF" "$CF.kaputt" 600; then
             echo "<INFO> Der vorherige Inhalt liegt unter $CF.kaputt"
@@ -140,7 +189,7 @@ if [ -f "$ARGV1/mg.json" ] && ! hat_inhalt "$CF" && hat_inhalt "$ARGV1/mg.json";
         echo "<WARNING> Die Konfiguration von vor dem Upgrade liess sich nicht nach $CF kopieren."
     fi
 fi
-if [ -f "$ARGV1/mg.log" ] && [ ! -s "$LDIR/mg.log" ]; then
+if [ -n "$ARGV1" ] && [ -f "$ARGV1/mg.log" ] && [ ! -s "$LDIR/mg.log" ]; then
     if cp -p "$ARGV1/mg.log" "$LDIR/mg.log" 2>/dev/null \
        && cmp -s "$ARGV1/mg.log" "$LDIR/mg.log"; then
         echo "<OK> Protokoll aus dem Upgrade uebernommen."
@@ -192,7 +241,7 @@ mg_ladungen_zusammen() {   # $1 Ablage, $2 Datei im Datenordner, $3 Ausgabe
 }
 LA="$ARGV1/ladungen.json"
 LZ="$DDIR/ladungen.json"
-if [ -f "$LA" ]; then
+if [ -n "$ARGV1" ] && [ -f "$LA" ]; then
     MG_N=$(mg_ladungen_lesbar "$LA"); MG_RC=$?
     if [ "$MG_RC" = 2 ]; then
         echo "<WARNING> php fehlt - die gesicherten Ladevorgaenge wurden nicht uebernommen."

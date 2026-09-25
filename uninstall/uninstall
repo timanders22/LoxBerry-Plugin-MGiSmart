@@ -24,15 +24,21 @@
 #      LoxBerry eine Ramdisk, der Ordner verschwindet also spaetestens beim
 #      naechsten Neustart - bis dahin stuende er da.
 #   3. Ein noch laufender mosquitto_sub aus einem Cron-Durchgang.
+#   4. Die zurueckbehaltenen Themen der eigenen MQTT-Veroeffentlichung
+#      (<mqtt_praefix>/<n>/...) im Broker - bis 1.1.16 blieben sie stehen,
+#      und der Broker lieferte sie nach jedem Neustart des MQTT-Gateways an
+#      den Miniserver (Pruefung-MGiSmart-1.1.17, Fall U1).
 #
 # ZUR PROZESSSUCHE: "pkill -f mosquitto_sub" waere grob falsch - so heissen
 # die Aufrufe mehrerer Plugins und moeglicherweise laufende Sitzungen des
-# Anwenders. Beendet wird nur, was auf den Themenbaum DIESES Plugins horcht,
-# und verglichen wird argumentweise.
+# Anwenders. Beendet wird nur, was DIESES Plugin gestartet hat - siehe
+# mg_eigener_abruf() weiter unten.
 
 PDIR=$3
 [ -n "$PDIR" ] || PDIR="mgismart"
-BASE="${5:-$LBHOMEDIR}"
+case "$PDIR" in
+    .|..|*/*) echo "<WARNING> Unbrauchbarer Ordnername '$PDIR' - nichts entfernt."; exit 1 ;;
+esac
 # Dritter Rueckfall: der eigene Ablageort. Bewusst kein fest verdrahteter
 # Systempfad - LoxBerry laesst sich anderswohin installieren, und der
 # Plugin-Pruefer sucht die Zeichenkette, ohne den Zusammenhang zu sehen.
@@ -47,22 +53,35 @@ BASE="${5:-$LBHOMEDIR}"
 # Fall U1) loeschte das Skript, drei Ebenen unter einem fremden Baum ohne
 # general.json abgelegt, dessen mgismart.backup.json und meldete Erfolg.
 # Ohne brauchbare Wurzel wird jetzt nichts entfernt.
+#
+# Seit 1.1.17 gilt dieselbe Bedingung auch fuer $5 und $LBHOMEDIR: bis 1.1.16
+# genuegte dort "-d", und ein fremder Baum ohne general.json als $5 verlor
+# seine mgismart.backup.json (in WSL gemessen, Pruefung-MGiSmart-1.1.17,
+# Fall U5).
+mg_ist_wurzel() {
+    [ -n "$1" ] && [ -d "$1/config/plugins" ] && [ -d "$1/data/plugins" ] \
+        && [ -f "$1/config/system/general.json" ]
+}
 lb_wurzel_suchen() {
     v=$(cd "$(dirname "$(readlink -f "$0")")" 2>/dev/null && pwd)
     i=0
     while [ -n "$v" ] && [ "$v" != "/" ] && [ $i -lt 8 ]; do
-        if [ -d "$v/config/plugins" ] && [ -d "$v/data/plugins" ] \
-           && [ -f "$v/config/system/general.json" ]; then
+        if mg_ist_wurzel "$v"; then
             echo "$v"; return 0
         fi
         v=$(dirname "$v"); i=$((i + 1))
     done
     return 1
 }
-if [ -z "$BASE" ] || [ ! -d "$BASE" ]; then
-    BASE=$(lb_wurzel_suchen)
+BASE=""
+if [ -n "$5" ] && ! mg_ist_wurzel "$5"; then
+    echo "<WARNING> Das fuenfte Argument ($5) ist keine LoxBerry-Wurzel - es wird nicht benutzt."
 fi
-if [ -z "$BASE" ] || [ ! -d "$BASE" ]; then
+for MG_K in "$5" "$LBHOMEDIR"; do
+    if mg_ist_wurzel "$MG_K"; then BASE="$MG_K"; break; fi
+done
+[ -n "$BASE" ] || BASE=$(lb_wurzel_suchen)
+if [ -z "$BASE" ]; then
     echo "<WARNING> Das LoxBerry-Wurzelverzeichnis liess sich nicht bestimmen - nichts entfernt."
     echo "<WARNING> Liegen bleiben kann config/plugins/$PDIR.backup.json mit Broker-Passwort und Merkwort."
     exit 1
@@ -71,7 +90,7 @@ fi
 PCONFIG="$BASE/config/plugins/$PDIR"
 PDATA="$BASE/data/plugins/$PDIR"
 BK="$BASE/config/plugins/$PDIR.backup.json"
-TMP="/tmp/mgismart"
+TMP="/tmp/$PDIR"
 
 # Das Themenpraefix steht in der Konfiguration; ohne es wird kein Prozess
 # angefasst.
@@ -85,29 +104,68 @@ except Exception:
 fi
 [ -n "$PREFIX" ] || PREFIX="saic"
 
+# Ein Abruf DIESES Plugins, argumentweise ueber /proc (Regeln/06): argv[0]
+# heisst mosquitto_sub, ein Argument ist genau "<prefix>/#", der Prozess
+# gehoert dem Dienstbenutzer (loxberry, ohne ihn der eigenen Kennung), und er
+# liest seine Zugangsdaten aus DIESEM Datenordner (XDG_CONFIG_HOME, so setzt
+# es mg_broker_umgebung()). Bis 1.1.16 genuegten argv[0] und das Argument:
+# ein mosquitto_sub des Anwenders auf denselben Baum wurde beendet, und nach
+# der Warteschleife ging "kill -9" ohne neue Pruefung an die Nummer - auch
+# wenn sie inzwischen zu einem anderen Prozess gehoerte (in WSL gemessen,
+# Pruefung-MGiSmart-1.1.17, Faelle U3b, U3c). Jetzt vor JEDEM Signal pruefen,
+# kein "kill -0".
+MG_UID=$(id -u loxberry 2>/dev/null || id -u)
+MG_XDG=$(readlink -f "$PDATA/mosquitto" 2>/dev/null)
+mg_eigener_abruf() {   # $1 PID
+    d="/proc/$1"
+    [ -r "$d/cmdline" ] || return 1
+    a0=$( { tr '\0' '\n' < "$d/cmdline" | head -1; } 2>/dev/null)
+    [ "$(basename -- "$a0" 2>/dev/null)" = "mosquitto_sub" ] || return 1
+    { tr '\0' '\n' < "$d/cmdline" | grep -qxF -- "$PREFIX/#"; } 2>/dev/null || return 1
+    u=$(awk '/^Uid:/ {print $2}' "$d/status" 2>/dev/null)
+    [ -n "$u" ] && [ "$u" = "$MG_UID" ] || return 1
+    x=$( { tr '\0' '\n' < "$d/environ" | sed -n 's/^XDG_CONFIG_HOME=//p' | head -1; } 2>/dev/null)
+    [ -n "$x" ] && [ -n "$MG_XDG" ] && [ "$(readlink -f "$x" 2>/dev/null)" = "$MG_XDG" ] || return 1
+    return 0
+}
 GEFUNDEN=0
 for D in /proc/[0-9]*; do
-    P=$(basename "$D")
-    [ -r "$D/cmdline" ] || continue
-    ARGS=$(tr '\0' '\n' < "$D/cmdline" 2>/dev/null)
-    # Erstes Argument muss mosquitto_sub sein UND ein Argument muss genau
-    # unser Themenbaum sein.
-    case "$(printf '%s\n' "$ARGS" | head -1)" in
-        *mosquitto_sub) : ;;
-        *) continue ;;
-    esac
-    if printf '%s\n' "$ARGS" | grep -qxF "$PREFIX/#"; then
-        kill "$P" 2>/dev/null
-        for i in 1 2 3; do
-            kill -0 "$P" 2>/dev/null || break
-            sleep 1
-        done
-        kill -9 "$P" 2>/dev/null
-        GEFUNDEN=1
+    P=${D#/proc/}
+    mg_eigener_abruf "$P" || continue
+    GEFUNDEN=1
+    kill "$P" 2>/dev/null
+    for i in 1 2 3; do
+        mg_eigener_abruf "$P" || break
+        sleep 1
+    done
+    mg_eigener_abruf "$P" && kill -9 "$P" 2>/dev/null && sleep 1
+    if mg_eigener_abruf "$P"; then
+        echo "<WARNING> Der Abruf (PID $P) laeuft weiter."
+    elif [ -d "/proc/$P" ]; then
+        echo "<INFO> PID $P ist kein Abruf dieses Plugins mehr - nicht weiter angefasst."
+    else
         echo "<OK> Laufenden mosquitto_sub beendet (PID $P)."
     fi
 done
 [ "$GEFUNDEN" -eq 0 ] && echo "<INFO> Es lief kein Abruf."
+
+# Die zurueckbehaltenen MQTT-Themen dieses Plugins abraeumen: bin/cron.php
+# --mqtt-leeren fragt den Broker, leert und liest nach (mg_mqtt_leeren() in
+# mg_lib.php). Wurzel und Ordner werden ausdruecklich genannt, sonst hielte
+# sich die Bibliothek fuer ein Archiv. Als loxberry, wie der Minutentakt.
+MG_CRON="$BASE/bin/plugins/$PDIR/cron.php"
+if command -v php >/dev/null 2>&1 && [ -f "$MG_CRON" ] \
+   && { [ -r "$PCONFIG/mg.json" ] || [ -r "$BK" ]; }; then
+    if [ "$(id -u)" = "0" ] && id loxberry >/dev/null 2>&1; then
+        su -s /bin/bash loxberry -c "$(printf '%q ' env "LBHOMEDIR=$BASE" "LBPPLUGINDIR=$PDIR" \
+            timeout 90 php "$MG_CRON" --mqtt-leeren)" < /dev/null 2>&1
+    else
+        env "LBHOMEDIR=$BASE" "LBPPLUGINDIR=$PDIR" timeout 90 php "$MG_CRON" --mqtt-leeren \
+            < /dev/null 2>&1
+    fi
+else
+    echo "<INFO> PHP, cron.php oder die Konfiguration fehlt - zurueckbehaltene MQTT-Themen wurden nicht geleert."
+fi
 
 # Die Zweitschrift UND ihr beiseitegelegter Stand: mg_kaputt_beiseite()
 # (mg_lib.php) legt eine beschaedigte Zweitschrift als
@@ -149,7 +207,8 @@ fi
 
 echo "<INFO> Das SAIC-MQTT-Gateway ist ein eigenstaendiger Docker-Container"
 echo "<INFO> und wurde nicht von diesem Plugin angelegt - es bleibt unberuehrt."
-echo "<WARNING> Im MQTT-Broker koennen Werte stehen bleiben."
-echo "<INFO> Sie stammen vom Gateway, nicht von diesem Plugin. Zum Aufraeumen:"
-echo "<INFO> LoxBerry -> System -> MQTT Gateway."
+echo "<INFO> Die Themen des Gateways ($PREFIX/...) stammen nicht von diesem Plugin"
+echo "<INFO> und bleiben im Broker. Zurueckbehaltene Themen unter einem FRUEHER"
+echo "<INFO> eingestellten eigenen Praefix raeumt dieses Skript nicht ab. Nachsehen:"
+echo "<INFO> mosquitto_sub -t '<praefix>/#' --retained-only"
 exit 0

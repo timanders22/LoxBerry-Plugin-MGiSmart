@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.16
+Version 1.1.17
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -536,6 +536,109 @@ mindestens eine Fahrzeug-Kennung in `mg.json`, meldet die Installation
 `postupgrade.sh` die Einstellungen zurück und meldet dort, ob es gelang;
 scheitert es, erscheint die Anleitung als Warnung. In WSL nachgestellt
 (`Pruefung-MGiSmart-1.1.16/`), nicht am Gerät.
+
+## Fassung 1.1.17 — Retain nach Positivliste, Abräumen nach Rückfrage, Wurzel und Archiv
+
+Die Themennamen bleiben, wie sie sind. Geändert sind das Retain-Merkmal
+einiger Themen, das Abräumen alter Werte, die Deinstallation und die Frage,
+wo das Plugin seine Dateien sucht.
+
+* **Zurückbehalten geht nur noch, was in einer Positivliste steht**
+  (`mg_mqtt_retain_liste()`). Bis 1.1.16 ging jedes Thema mit `-r` hinaus,
+  das nicht ausdrücklich ausgenommen war — auch jedes neue. Jetzt sind es 41
+  von 68: Zustände des Fahrzeugs, Einstellungen, Zähler, die wahr bleiben,
+  und `fertig_um`. **Neu flüchtig:** `erreichbar`, `gateway`, `fehler`
+  (Aussagen des SAIC-Gateways, eines fremden Dienstes in der Kette, über
+  sich selbst — `gateway` spiegelt dessen Letzten Willen, und stünde nach
+  einem Ausfall dieses Plugins weiter da), `leistung`, `tempo`,
+  `innentemperatur`, `aussentemperatur`, `ac_leistung`, `ac_strom`,
+  `ac_spannung` (Messwerte mit Zeitbezug), `km_tag`, `verbrauch_tag`
+  (Tageswerte, um Mitternacht falsch), `themen` (die Zählung des Plugins
+  selbst), `push_aktiv`, `push_test` (Fenster, die mit der Uhr enden). `soc`
+  bleibt zurückbehalten. Die Tabelle im Reiter MQTT nennt je Thema, ob es
+  zurückbehalten hinausgeht; eine Zeile im Reiter Test prüft die Liste.
+* **Alte Werte werden nach Rückfrage beim Broker abgeräumt.** Das Plugin
+  meldet sich mit den Zugangsdaten aus dem Reiter MQTT selbst beim Broker an
+  und fragt, welche der 27 flüchtigen Themen je Fahrzeug dort noch
+  zurückbehalten stehen. Genau diese bekommen eine leere Nachricht mit
+  Retain, unmittelbar gefolgt vom gültigen Wert ohne Retain; danach liest es
+  nach, und erst wenn der Broker nichts mehr hat, schreibt es den Merker
+  `retain_altlast_bestaetigt` in den Datenordner (je Fahrzeug eine Zeile
+  `leer-bestaetigt <präfix>/<n>: <Themenliste>`). Das gilt für jedes
+  Fahrzeug und nach jedem Präfixwechsel; die Merker der Vorfassungen zählen
+  nicht. Bis 1.1.16 entstand der Merker auf den bloßen Sendeerfolg, und die
+  Textthemen wurden nur beim ersten Fahrzeug abgeräumt.
+* **Ist der Broker nicht zu befragen** (Anmeldung abgewiesen, Abonnement
+  abgelehnt, keine Antwort), entsteht kein Merker. Dann gehen alle 27
+  flüchtigen Themen des Fahrzeugs alle 30 Minuten mit leerer Nachricht vor
+  dem gültigen Wert hinaus, und das Protokoll sagt es einmal. Gefragt wird
+  höchstens alle 30 Minuten (`retain_altlast_gefragt`).
+* **Der Preis:** nach einem Neustart des Brokers oder des MQTT-Gateways
+  fehlen die flüchtigen Werte, bis sie sich ändern oder der vollständige Satz
+  hinausgeht (spätestens nach 30 Minuten).
+* **Die Deinstallation leert die zurückbehaltenen Themen des Plugins**
+  (`bin/cron.php --mqtt-leeren`): alles unter `<präfix>/<n>/`, auch unter
+  der Nummer eines entfernten Fahrzeugs, soweit der Broker es nennt, und
+  liest danach nach. Ist der Broker nicht zu befragen, leert sie blind die
+  Themen der eingerichteten Fahrzeuge und sagt, dass das nicht nachprüfbar
+  ist. Die Themen des SAIC-Gateways bleiben; kollidieren beide Präfixe, wird
+  nichts gelöscht. Themen unter einem früher eingestellten eigenen Präfix
+  bleiben stehen.
+* **Die Deinstallation beendet nur noch Abrufe dieses Plugins:** Name
+  `mosquitto_sub`, Themenbaum des Gateways, Dienstbenutzer und die eigene
+  Optionsdatei (`XDG_CONFIG_HOME`). Vor jedem Signal wird neu geprüft; bis
+  1.1.16 ging nach der Wartezeit ein `kill -9` ungeprüft an die Nummer.
+* **„Verwaiste Themen suchen/löschen"** meldet einen Broker, der sich nicht
+  befragen lässt, statt „0 verwaiste Themen gefunden". Gezählt wird nur, was
+  zurückbehalten im Broker liegt, und „gelöscht" heißt: nachgelesen.
+* **Hakenskripte:** Die LoxBerry-Wurzel wird an `config/system/general.json`
+  erkannt — erst das fünfte Argument, dann `LBHOMEDIR`, dann vom eigenen
+  Ablageort aufwärts. Ohne Wurzel warnen die Skripte und tun nichts; bis
+  1.1.16 griff `preupgrade.sh` dann ab der Laufwerkswurzel zu, und ein fremder
+  Baum ohne `general.json` wurde Wurzel. Die Ablage für das Update liegt
+  jetzt unter einem **absoluten** Pfad: im Arbeitsordner des Installers
+  (sechstes Argument), ersatzweise neben dem Skript, jeweils `/<Kennung>` aus
+  dem ersten Argument. Der Installer ruft alle Haken aus seinem Arbeitsordner
+  (`plugininstall.pl` Z. 853, 1311, 1337, LoxBerry 4.0.0.15); bis 1.1.16 hing
+  der Ablageort trotzdem am Arbeitsverzeichnis, und ein erstes Argument mit
+  `../` führte hinaus. `preupgrade.sh` meldet jetzt, was es beiseitegelegt
+  hat und was nicht.
+* **Ein ausgepacktes Archiv wirkt nicht mehr auf die Anlage.** Die Pfade der
+  Anlage gelten nur, wenn die Bibliothek dort installiert liegt oder
+  `LBHOMEDIR` **und** `LBPPLUGINDIR` gesetzt sind; sonst arbeitet sie unter
+  dem Temp-Ordner (`mgismart-archiv`), und `bin/cron.php` verweigert den
+  Lauf. Bis 1.1.16 nahm ein Archiv unterhalb der LoxBerry-Wurzel — oder mit
+  `LBHOMEDIR` allein, wie es am LoxBerry immer gesetzt ist — Konfiguration,
+  Daten, Protokoll und Zwischenspeicher der Anlage. Der Zwischenspeicher
+  heißt jetzt je Ordner `/tmp/<ordner>`; eine Zweitinstallation teilt ihn
+  nicht mehr mit der ersten.
+* **Keine Pfade ab der Laufwerkswurzel:** `bin/cron.php` und die Oberfläche
+  laden aus einem Archiv nur die eigene Bibliothek, die Sprachdateien kommen
+  aus der Anlage oder aus dem Archiv selbst.
+* **Die Vorklimatisierung liest den Abfahrts-Assistenten jetzt über dessen
+  Leseendpunkt.** Bis 1.1.16 lauschte sie zwei Sekunden je Minute auf
+  `<präfix>/ABFAHRT_IN` und `<präfix>/OK`; der Abfahrts-Assistent sendet
+  beide seit 1.6.13 ohne Retain, und so löste sie praktisch nie aus. Jetzt
+  fragt das Plugin jede Minute `termin.php` des Abfahrts-Assistenten auf
+  demselben LoxBerry (`127.0.0.1`, Port aus `general.json`, ohne Anmeldung,
+  rein lesend) und nimmt `OK`, `ABFAHRT_IN` und `ALTER`. Ausgelöst wird nur
+  bei einem Stand, der höchstens fünf Minuten alt ist. Fehlt der
+  Abfahrts-Assistent (Ordner `abfahrtsassistent`), ist er veraltet oder
+  antwortet er nicht, bleibt die Vorklimatisierung aus; der Reiter
+  Einstellungen sagt, wenn er nicht installiert ist, das Protokoll nennt den
+  Grund, und der Reiter Test hat eine eigene Zeile. Das Feld „Themen-Präfix
+  des Abfahrts-Assistenten" entfällt; der gespeicherte Wert bleibt in der
+  Konfiguration, damit ältere Sicherungsdateien gültig bleiben.
+
+Gemessen in WSL/Ubuntu (PHP 8.3.6) mit 57 Fällen
+(`Pruefung-MGiSmart-1.1.17/`): an einem eigenen Broker, der das Retain-Bit
+jedes empfangenen Pakets mitschreibt und wahlweise die Anmeldung abweist,
+Abonnements ablehnt oder Löschungen verwirft; die Pfade ab `/` in einem
+eigenen Wurzelbaum; die Vorklimatisierung gegen den echten `termin.php` des
+veröffentlichten Abfahrts-Assistenten 1.6.14. Vorher 39 bzw. 12 rote Fälle,
+nachher keiner. `mosquitto-clients`
+ist in der Messumgebung nicht installiert; an seiner Stelle standen
+Attrappen. **Nicht am Gerät gemessen** und nicht an einem echten Broker.
 
 ## Lizenz
 

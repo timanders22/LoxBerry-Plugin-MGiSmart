@@ -39,13 +39,24 @@ error_reporting(E_ALL & ~E_DEPRECATED & ~E_NOTICE);
  * $LBHOMEDIR also nichts und laedt seine eigene (Faelle H4/H5). */
 $mg_ordner = basename(__DIR__);
 $mg_home = getenv('LBHOMEDIR');
-foreach (array(
-    ($mg_home && is_dir($mg_home))
-        ? rtrim($mg_home, '/') . '/webfrontend/html/plugins/' . $mg_ordner . '/mg_lib.php'
-        : '',
-    dirname(dirname(dirname(__DIR__))) . '/html/plugins/' . $mg_ordner . '/mg_lib.php',
-    dirname(__DIR__) . '/html/mg_lib.php',
-) as $mg_kandidat) {
+/* Welche Lage gilt, entscheidet der eigene Ablageort: liegt diese Datei unter
+ * .../plugins/<ordner>, ist sie installiert, sonst liegt sie in einem
+ * ausgepackten Archiv und laedt ausschliesslich die eigene Bibliothek. Bis
+ * 1.1.16 kam der zweite Kandidat auch aus dem Archiv an die Reihe, VOR der
+ * eigenen - aus /plugin/webfrontend/htmlauth war das
+ * //html/plugins/htmlauth/mg_lib.php ab der Laufwerkswurzel (in WSL im eigenen
+ * Wurzelbaum gemessen, Pruefung-MGiSmart-1.1.17, Fall P2). */
+if (basename(dirname(__DIR__)) === 'plugins') {
+    $mg_kandidaten = array(
+        ($mg_home && is_dir($mg_home))
+            ? rtrim($mg_home, '/') . '/webfrontend/html/plugins/' . $mg_ordner . '/mg_lib.php'
+            : '',
+        dirname(dirname(dirname(__DIR__))) . '/html/plugins/' . $mg_ordner . '/mg_lib.php',
+    );
+} else {
+    $mg_kandidaten = array(dirname(__DIR__) . '/html/mg_lib.php');
+}
+foreach ($mg_kandidaten as $mg_kandidat) {
     if ($mg_kandidat !== '' && is_file($mg_kandidat)) {
         require_once $mg_kandidat;
         break;
@@ -160,19 +171,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['clearlog'])) {
     $mg_tab = 'tab-log';
 }
 
+/* Verwaiste Themen: gefragt wird der Broker selbst (mg_mqtt_verwaiste_lage()).
+ * War er nicht zu fragen - Anmeldung abgewiesen, Filter abgelehnt, keine
+ * Verbindung -, gibt es KEINE Zahl: bis 1.1.16 hiess das "0 verwaiste Themen
+ * gefunden" bzw. "0 geloescht" (Pruefung-MGiSmart-1.1.17, Faelle V1, V2, V4). */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['verwaiste_suchen'])) {
-    $mg_verwaiste = mg_mqtt_verwaiste(3);
-    $mg_meldungen[] = sprintf(mg_t('MELDUNG.VERWAISTE_GEFUNDEN'), count($mg_verwaiste));
+    $mg_vl = mg_mqtt_verwaiste_lage();
+    if ($mg_vl['lage'] !== 'ok') {
+        $mg_fehler[] = sprintf(mg_t('MELDUNG.VERWAISTE_UNBEKANNT'), $mg_vl['grund']);
+    } else {
+        $mg_verwaiste = $mg_vl['themen'];
+        $mg_meldungen[] = sprintf(mg_t('MELDUNG.VERWAISTE_GEFUNDEN'), count($mg_verwaiste));
+    }
     $mg_tab = 'tab-mqtt';
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['verwaiste_loeschen'])) {
-    $mg_liste = mg_mqtt_verwaiste(3);
-    list($mg_n, $mg_f) = mg_mqtt_verwaiste_loeschen(array_keys($mg_liste));
-    if ($mg_f !== '') {
-        $mg_fehler[] = mg_t('MELDUNG.VERWAISTE_FEHLER') . ' ' . $mg_f;
+    $mg_vl = mg_mqtt_verwaiste_lage();
+    if ($mg_vl['lage'] !== 'ok') {
+        $mg_fehler[] = sprintf(mg_t('MELDUNG.VERWAISTE_UNBEKANNT'), $mg_vl['grund']);
     } else {
-        $mg_meldungen[] = sprintf(mg_t('MELDUNG.VERWAISTE_GELOESCHT'), $mg_n);
+        list($mg_n, $mg_f) = mg_mqtt_verwaiste_loeschen(array_keys($mg_vl['themen']));
+        if ($mg_f !== '') {
+            $mg_fehler[] = mg_t('MELDUNG.VERWAISTE_FEHLER') . ' ' . $mg_f;
+        } else {
+            $mg_meldungen[] = sprintf(mg_t('MELDUNG.VERWAISTE_GELOESCHT'), $mg_n);
+        }
     }
     $mg_tab = 'tab-mqtt';
 }
@@ -364,9 +388,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
     }
 
     $mg_neu['abfahrt_ein'] = isset($_POST['abfahrt_ein']) ? 1 : 0;
-    $mg_neu['abfahrt_praefix'] = trim(preg_replace('#[^\w/\-]#', '',
-        (string) (isset($_POST['abfahrt_praefix']) ? $_POST['abfahrt_praefix'] : 'abfahrt')));
-    if ($mg_neu['abfahrt_praefix'] === '') { $mg_neu['abfahrt_praefix'] = 'abfahrt'; }
+    /* abfahrt_praefix: seit 1.1.17 ungenutzt (die Vorklimatisierung liest
+     * termin.php des Abfahrts-Assistenten). Der Schluessel bleibt in den
+     * Vorgaben und in der Datei, damit aeltere Sicherungsdateien gueltig
+     * bleiben; das Formular fasst ihn nicht mehr an. */
     $mg_neu['abfahrt_vorlauf'] = max(1, min(180,
         (int) (isset($_POST['abfahrt_vorlauf']) ? $_POST['abfahrt_vorlauf'] : 20)));
     $mg_neu['abfahrt_temp'] = max(16, min(30,
@@ -756,10 +781,9 @@ if (class_exists('LBWeb', false)) {
 	<input data-role="none" type="checkbox" name="abfahrt_ein" <?= !empty($mg_cfg['abfahrt_ein']) ? 'checked' : '' ?>>
 	<?= mg_e(mg_t('EINST.ABFAHRT_EIN')) ?></label>
 	<div class="sm-hilfe"><?php echo mg_t('EINST.ABFAHRT_HILFE'); ?></div>
-</div>
-<div class="sm-feld">
-	<label><?= mg_e(mg_t('EINST.ABFAHRT_PRAEFIX')) ?></label>
-	<input data-role="none" type="text" name="abfahrt_praefix" value="<?= mg_e($mg_cfg['abfahrt_praefix']) ?>" placeholder="abfahrt">
+<?php if (!mg_abfahrt_da()) { ?>
+	<div class="sm-hilfe"><b><?= mg_e(mg_t('EINST.ABFAHRT_FEHLT')) ?></b></div>
+<?php } ?>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.ABFAHRT_VORLAUF')) ?></label>
@@ -998,10 +1022,11 @@ if (class_exists('LBWeb', false)) {
 <div class="sm-hilfe"><?php echo mg_t('MQTTR.TABELLE_HILFE'); ?></div>
 <div class="sm-breit">
 <table class="sm-tbl">
-<tr><th><?= mg_e(mg_t('MQTTR.THEMA')) ?></th><th><?= mg_e(mg_t('MQTTR.BEDEUTUNG')) ?></th></tr>
+<tr><th><?= mg_e(mg_t('MQTTR.THEMA')) ?></th><th><?= mg_e(mg_t('MQTTR.BEDEUTUNG')) ?></th><th><?= mg_e(mg_t('MQTTR.RETAIN')) ?></th></tr>
 <?php foreach (mg_mqtt_themen() as $mg_th => $mg_bez) { ?>
 <tr><td><span class="sm-mono"><?= mg_e(trim((string) $mg_cfg['mqtt_praefix'], '/ ') . '/' . $mg_th) ?></span></td>
-	<td><?= mg_e(mg_t($mg_bez)) ?></td></tr>
+	<td><?= mg_e(mg_t($mg_bez)) ?></td>
+	<td><?= mg_e(mg_t(mg_mqtt_behalten($mg_th, '1') ? 'WORT.JA' : 'WORT.NEIN')) ?></td></tr>
 <?php } ?>
 </table>
 </div>

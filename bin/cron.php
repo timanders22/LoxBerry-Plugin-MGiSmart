@@ -14,19 +14,59 @@
  * Die Bibliothek liegt weiterhin im html-Ordner, weil der Miniserver-Endpunkt
  * sie ebenso braucht. Gesucht wird sie an beiden moeglichen Stellen.
  */
-$mg_lib = '';
-foreach (array(
-    dirname(dirname(__DIR__)) . '/html/plugins/' . basename(__DIR__) . '/mg_lib.php',
-    dirname(dirname(dirname(__DIR__))) . '/webfrontend/html/plugins/' . basename(__DIR__) . '/mg_lib.php',
-    dirname(__DIR__) . '/webfrontend/html/mg_lib.php',
-) as $mg_kand) {
-    if (is_file($mg_kand)) { $mg_lib = $mg_kand; break; }
+/* Die Bibliothek. Welche Lage gilt, entscheidet der eigene Ablageort, nicht
+ * die Reihenfolge der Versuche: liegt diese Datei unter .../plugins/<ordner>,
+ * ist sie installiert (<Wurzel>/bin/plugins/<ordner>), sonst liegt sie in
+ * einem ausgepackten Archiv. Bis 1.1.16 wurden drei Kandidaten der Reihe nach
+ * probiert; aus einem Archiv unter /plugin waren die ersten beiden
+ * //html/plugins/bin/mg_lib.php und //webfrontend/html/plugins/bin/mg_lib.php
+ * - ab der Laufwerkswurzel, und was dort lag, lief als Bibliothek (in WSL im
+ * eigenen Wurzelbaum gemessen, Pruefung-MGiSmart-1.1.17, Fall P1). */
+if (basename(dirname(__DIR__)) === 'plugins') {
+    $mg_lib = dirname(dirname(dirname(__DIR__))) . '/webfrontend/html/plugins/'
+        . basename(__DIR__) . '/mg_lib.php';
+} else {
+    $mg_lib = dirname(__DIR__) . '/webfrontend/html/mg_lib.php';
 }
-if ($mg_lib === '') {
+if (!is_file($mg_lib)) {
     fwrite(STDERR, "mg_lib.php nicht gefunden - Plugin neu installieren.\n");
     exit(1);
 }
 require_once $mg_lib;
+
+/* Ohne Anlage nichts tun: weder lesen noch senden noch schreiben. Bis 1.1.16
+ * lief diese Datei aus einem ausgepackten Archiv unterhalb einer echten
+ * Wurzel ohne jede Pruefung los - Momentaufnahme, Protokoll, MQTT und
+ * Automatiken auf der Anlage (in WSL gemessen, Pruefung-MGiSmart-1.1.17,
+ * Fall B5). Der Archivmodus steht in mg_paths(). */
+$mg_p = mg_paths();
+if ($mg_p['lbhome'] === '') {
+    if ($mg_p['archiv'] !== '') {
+        fwrite(STDERR, "cron.php: Diese Datei liegt nicht in der Installation unter " . $mg_p['archiv'] . "\n"
+            . "(ausgepacktes Archiv oder Pruefordner). Damit nichts in die Anlage kommt,\n"
+            . "wurde nichts gelesen, nichts gesendet und nichts geschrieben.\n"
+            . "Abhilfe: das Programm aus " . $mg_p['archiv'] . "/bin/plugins/<ordner> aufrufen\n"
+            . "oder LBHOMEDIR und LBPPLUGINDIR ausdruecklich setzen.\n");
+    } else {
+        fwrite(STDERR, "cron.php: Es wurde kein LoxBerry-Wurzelverzeichnis gefunden.\n"
+            . "\$LBHOMEDIR ist nicht gesetzt, und oberhalb von " . __DIR__ . " traegt kein\n"
+            . "Verzeichnis config/plugins, data/plugins und config/system/general.json.\n"
+            . "Es wurde nichts gelesen, nichts gesendet und nichts geschrieben.\n");
+    }
+    exit(1);
+}
+
+/* Aufruf aus uninstall/uninstall: die zurueckbehaltenen MQTT-Themen dieses
+ * Plugins im Broker leeren (mg_mqtt_leeren()) - und sonst nichts. Nur lesen:
+ * die Konfiguration wird dabei nicht angelegt und nicht geheilt. */
+if (in_array('--mqtt-leeren', array_slice(isset($argv) ? $argv : array(), 1), true)) {
+    mg_nur_lesen(true);
+    list($mg_rc, $mg_zeilen) = mg_mqtt_leeren();
+    foreach ($mg_zeilen as $mg_z) {
+        echo $mg_z . "\n";
+    }
+    exit($mg_rc);
+}
 
 $cfg = mg_config();
 if (trim((string) $cfg['saic_user']) === '' || mg_fahrzeug_anzahl($cfg) === 0) {
