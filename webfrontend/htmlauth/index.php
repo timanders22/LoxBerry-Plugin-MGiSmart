@@ -621,6 +621,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $mg_formular === 'gw_neustart') {
     $mg_tab = 'tab-gateway';
 }
 
+/* A4 (seit 1.1.19): das Abbild aktualisieren - im Hintergrundvorgang, nie
+ * im Seitenaufruf; ein laufender Vorgang verhindert einen zweiten
+ * (mg_gw_vorgang_starten()). Das Merkmal prueft der Wachposten oben, die
+ * Umleitung (PRG) folgt unten wie bei jedem POST. */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $mg_formular === 'gw_aktualisieren') {
+    list($mg_gok, $mg_gtext) = mg_gw_vorgang_starten('aktualisieren');
+    if ($mg_gok) { $mg_meldungen[] = $mg_gtext; } else { $mg_fehler[] = $mg_gtext; }
+    $mg_tab = 'tab-gateway';
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $mg_formular === 'gw_entfernen') {
     if (!$mg_bestaetigt) {
         $mg_fehler[] = mg_t('FEHLER.NICHT_BESTAETIGT');
@@ -713,6 +723,11 @@ if ($mg_tab === 'tab-gateway' && isset($_GET['gwlog']) && $_GET['gwlog'] === '1'
 }
 $mg_roh = mg_raw();
 $mg_pruefzeilen = mg_selbsttest($mg_tab === 'tab-test');
+/* A2 (seit 1.1.19): derselbe Befund wie bin/healthcheck, hier ohne eigene
+ * Messung - er liest die Ampel, die oben gemessen wurde, und die Staende des
+ * Takts. */
+$mg_befund = mg_befund(false);
+list($mg_bg_status, $mg_bg_text) = mg_befund_gesamt($mg_befund);
 $mg_ladungen = mg_ladungen_lesen(100);
 
 // Das angezeigte Fahrzeug im Reiter Test.
@@ -1309,6 +1324,14 @@ foreach (mg_mqtt_status_themen() as $mg_th => $mg_bez) { ?>
 <tr><td><span class="sm-mono"><?= mg_e(trim((string) $mg_cfg['mqtt_praefix'], '/ ') . '/' . $mg_th) ?></span></td>
 	<td><?= mg_e(mg_t($mg_bez)) ?></td>
 	<td><?= mg_e(mg_t(mg_mqtt_behalten($mg_th, '1') ? 'WORT.JA' : 'WORT.NEIN')) ?></td></tr>
+<?php }
+/* A1 (seit 1.1.19): die Anmeldung bei MG, bei jedem Takt fluechtig (1, 0 oder
+ * "-"). mg_mqtt_behalten() fragt dieselbe Liste wie die Sendezeile. */
+$mg_anm_thema = mg_mqtt_anmeldung_thema($mg_cfg);
+if ($mg_anm_thema !== '') { ?>
+<tr><td><span class="sm-mono"><?= mg_e($mg_anm_thema) ?></span></td>
+	<td><?= mg_e(mg_t('MQTT.ANMELDUNG')) ?></td>
+	<td><?= mg_e(mg_t(mg_mqtt_behalten($mg_anm_thema, '1') ? 'WORT.JA' : 'WORT.NEIN')) ?></td></tr>
 <?php } ?>
 </table>
 </div>
@@ -1339,7 +1362,8 @@ $mg_eigener = ($mg_ampel !== null && !empty($mg_ampel['eigen']));
 
 <h2><?= mg_e(mg_t('GW.H_AMPEL')) ?></h2>
 <?php if ($mg_vlaeuft) { ?>
-<div class="sm-hinweis"><?= mg_e(sprintf(mg_t('GW.VORGANG_SEIT'), max(0, time() - (int) $mg_vorgang['start']))) ?></div>
+<div class="sm-hinweis"><?= mg_e(sprintf(mg_t((isset($mg_vorgang['vorgang']) && $mg_vorgang['vorgang'] === 'aktualisieren')
+    ? 'GW.VORGANG_SEIT_AKT' : 'GW.VORGANG_SEIT'), max(0, time() - (int) $mg_vorgang['start']))) ?></div>
 <?php } elseif ($mg_vorgang['zustand'] === 'fertig' && time() - (int) (isset($mg_vorgang['ende']) ? $mg_vorgang['ende'] : 0) < 3600) { ?>
 <div class="sm-hinweis"><?= mg_e(mg_t('GW.VORGANG_FERTIG') . ' ' . $mg_vorgang['meldung']) ?></div>
 <?php } elseif ($mg_vorgang['zustand'] === 'fehler' || $mg_vorgang['zustand'] === 'abgebrochen') { ?>
@@ -1360,15 +1384,27 @@ $mg_eigener = ($mg_ampel !== null && !empty($mg_ampel['eigen']));
 </table>
 <div class="sm-hilfe"><?= mg_e(sprintf(mg_t('GW.A_MESSZEIT'), date('d.m.Y H:i:s', (int) $mg_ampel['zeit']))) ?>
 <?= mg_e(mg_t('GW.A_HILFE')) ?></div>
+<div class="sm-hilfe"><?= mg_e(sprintf(mg_t('GW.A_FASSUNG'),
+    (isset($mg_ampel['fassung']) && $mg_ampel['fassung'] !== '') ? $mg_ampel['fassung'] : mg_t('WORT.UNBEKANNT'),
+    (isset($mg_ampel['bild']) && $mg_ampel['bild'] !== '') ? $mg_ampel['bild'] : '-',
+    (isset($mg_ampel['digest']) && $mg_ampel['digest'] !== '') ? $mg_ampel['digest'] : '-')) ?></div>
+<?php if (isset($mg_ampel['mg_anmeldung']) && $mg_ampel['mg_anmeldung'] === 0) { ?>
+<div class="sm-warnung"><?php echo mg_t('GW.ANM_HINWEIS'); ?></div>
+<div class="sm-knopfreihe">
+	<a data-role="none" class="sm-btn sm-b-lesen" href="#mg-gw-zugang"><?= mg_e(mg_t('GW.K_ANM_NEU')) ?></a>
+</div>
 <?php } ?>
+<?php } ?>
+<div class="sm-hilfe"><?= mg_e(sprintf(mg_t('BEFUND.GESAMT'), mg_t('BEFUND.STATUS_' . $mg_bg_status), $mg_bg_text)) ?></div>
 
 <?php if ($mg_docker_weg) { ?>
 <div class="sm-warnung"><?php echo mg_t($mg_ampel['docker'] === 'fehlt' ? 'GW.VOR_FEHLT' : 'GW.VOR_KEIN_ZUGRIFF'); ?></div>
 <?php } ?>
 
-<h2><?= mg_e(mg_t('GW.H_ZUGANG')) ?></h2>
+<h2 id="mg-gw-zugang"><?= mg_e(mg_t('GW.H_ZUGANG')) ?></h2>
 <?php if ($mg_vlaeuft) { ?>
-<div class="sm-hinweis"><?= mg_e(mg_t('GW.VORGANG_LAEUFT_SCHON')) ?></div>
+<div class="sm-hinweis"><?= mg_e(mg_t((isset($mg_vorgang['vorgang']) && $mg_vorgang['vorgang'] === 'aktualisieren')
+    ? 'GW.VORGANG_LAEUFT_AKT' : 'GW.VORGANG_LAEUFT_SCHON')) ?></div>
 <?php } elseif (!$mg_docker_weg) { ?>
 <form action="index.php" method="post">
 <input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
@@ -1413,6 +1449,17 @@ $mg_eigener = ($mg_ampel !== null && !empty($mg_ampel['eigen']));
 	<button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= mg_e(mg_t('GW.K_NEUSTART')) ?></button>
 </div>
 </form>
+<?php if ($mg_eigener && !$mg_vlaeuft) { ?>
+<form action="index.php" method="post">
+<input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
+<input data-role="none" type="hidden" name="activetab" value="tab-gateway">
+<input data-role="none" type="hidden" name="formular" value="gw_aktualisieren">
+<div class="sm-hilfe"><?php echo mg_t('GW.AKT_HILFE'); ?></div>
+<div class="sm-knopfreihe">
+	<button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= mg_e(mg_t('GW.K_AKTUALISIEREN')) ?></button>
+</div>
+</form>
+<?php } ?>
 <form action="index.php" method="post">
 <input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
 <input data-role="none" type="hidden" name="activetab" value="tab-gateway">
@@ -1746,6 +1793,21 @@ if ($mg_ampel_rot) { ?>
 <?php } ?>
 </table>
 <div class="sm-hilfe"><?php echo mg_t('TEST.STRICH_HILFE'); ?></div>
+
+<h3><?= mg_e(mg_t('TEST.H_BEFUND')) ?></h3>
+<div class="sm-hilfe"><?php echo mg_t('TEST.BEFUND_HILFE'); ?></div>
+<table class="sm-tbl">
+<tr><th style="width:2.5em;"></th><th><?= mg_e(mg_t('TEST.FRAGE')) ?></th><th><?= mg_e(mg_t('TEST.BEFUND')) ?></th></tr>
+<?php foreach ($mg_befund as $mg_bf) {
+    $mg_bs = $mg_bf['status'];
+    $mg_bfarbe = $mg_bs === 5 ? 'color:#1a7f1a;' : ($mg_bs === 3 ? 'color:#b00000;' : ($mg_bs === 4 ? 'color:#b36b00;' : 'color:#777;'));
+    $mg_bzeichen = $mg_bs === 5 ? '&#10003;' : ($mg_bs === 3 ? '&#10007;' : ($mg_bs === 4 ? '!' : ($mg_bs === 6 ? 'i' : '&ndash;'))); ?>
+<tr><td style="text-align:center;font-weight:700;<?= $mg_bfarbe ?>"><?= $mg_bzeichen ?></td>
+	<td><?= mg_e(mg_t($mg_bf['bez'])) ?></td>
+	<td><?= mg_e($mg_bf['text']) ?></td></tr>
+<?php } ?>
+</table>
+<div class="sm-hilfe"><?= mg_e(sprintf(mg_t('BEFUND.GESAMT'), mg_t('BEFUND.STATUS_' . $mg_bg_status), $mg_bg_text)) ?></div>
 
 <h2><?= mg_e(mg_t('TEST.H_ZUSTAND')) ?></h2>
 <?php if ($mg_anzahl > 1) { ?>

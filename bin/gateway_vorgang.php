@@ -12,7 +12,11 @@
  * Kein Takt und kein Hakenskript ruft diese Datei (G6). Die Kennwoerter
  * liest sie aus mg.json; auf der Befehlszeile steht nur der Auftrag.
  *
- * Aufruf: php gateway_vorgang.php anlegen
+ * Seit 1.1.19 (A4) auch "aktualisieren": docker pull, und nur bei neuem
+ * Abbild den eigenen Container mit denselben Einstellungen neu anlegen
+ * (mg_gw_aktualisieren()). Auch das nur auf Knopfdruck.
+ *
+ * Aufruf: php gateway_vorgang.php anlegen|aktualisieren
  */
 if (basename(dirname(__DIR__)) === 'plugins') {
     $mg_lib = dirname(dirname(dirname(__DIR__))) . '/webfrontend/html/plugins/'
@@ -38,16 +42,20 @@ ini_set('display_errors', '0');
 ini_set('error_log', dirname($mg_p['log']) . '/gateway_vorgang.err');
 
 $mg_auftrag = isset($argv[1]) ? (string) $argv[1] : '';
-if ($mg_auftrag !== 'anlegen' || count($argv) !== 2) {
-    fwrite(STDERR, "Unbekannter Auftrag - erlaubt ist nur: anlegen\n");
+if (!in_array($mg_auftrag, array('anlegen', 'aktualisieren'), true) || count($argv) !== 2) {
+    fwrite(STDERR, "Unbekannter Auftrag - erlaubt sind nur: anlegen, aktualisieren\n");
     exit(2);
 }
 
 $mg_v = mg_json_lesen(mg_gw_vorgang_datei());
 $mg_start = isset($mg_v['start']) ? (int) $mg_v['start'] : time();
-mg_gw_vorgang_schreiben(array('vorgang' => 'anlegen', 'zustand' => 'laeuft', 'pid' => getmypid(),
-    'start' => $mg_start, 'schritt' => 'anlegen', 'meldung' => ''));
-list($mg_ok, $mg_text, $mg_id) = mg_gw_anlegen();
+mg_gw_vorgang_schreiben(array('vorgang' => $mg_auftrag, 'zustand' => 'laeuft', 'pid' => getmypid(),
+    'start' => $mg_start, 'schritt' => $mg_auftrag, 'meldung' => ''));
+if ($mg_auftrag === 'aktualisieren') {
+    list($mg_ok, $mg_text, $mg_id) = mg_gw_aktualisieren();
+} else {
+    list($mg_ok, $mg_text, $mg_id) = mg_gw_anlegen();
+}
 /* Nacharbeit 30.09. (N1): angelegt ist angelegt - auch wenn der Container
  * nicht gleich laeuft. Die Merkdatei sagt uninstall, dass es ohne docker
  * warnen muss. Atomar, Rechte vor dem Inhalt (mg_write_atomic). */
@@ -56,8 +64,8 @@ if ($mg_id !== '') {
         mg_log('Gateway anlegen: die Merkdatei ' . mg_gw_merkdatei() . ' liess sich nicht schreiben.');
     }
 }
-mg_gw_vorgang_schreiben(array('vorgang' => 'anlegen', 'zustand' => $mg_ok ? 'fertig' : 'fehler',
+mg_gw_vorgang_schreiben(array('vorgang' => $mg_auftrag, 'zustand' => $mg_ok ? 'fertig' : 'fehler',
     'pid' => getmypid(), 'start' => $mg_start, 'ende' => time(), 'id' => $mg_id,
     'meldung' => $mg_text));
-mg_log('Gateway anlegen: ' . ($mg_ok ? 'fertig' : 'gescheitert') . ' - ' . $mg_text);
+mg_log('Gateway ' . $mg_auftrag . ': ' . ($mg_ok ? 'fertig' : 'gescheitert') . ' - ' . $mg_text);
 exit($mg_ok ? 0 : 1);

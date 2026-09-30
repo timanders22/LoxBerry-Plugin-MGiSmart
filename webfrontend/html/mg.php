@@ -6,7 +6,8 @@
  *   (ohne Parameter)        MG;OK=..;SOC=..;ZIEL=..;...
  *   ?zeile=laden|ort|technik  kuerzere Zeile mit eigenem Abfragetakt
  *   ?fahrzeug=2             das zweite eingerichtete Fahrzeug
- *   ?json=1                 kompletter Zustand als JSON
+ *   ?json=1                 kompletter Zustand als JSON (seit 1.1.19 mit
+ *                           _gateway_anmeldung: 1, 0 oder "-")
  *
  * MIT MERKWORT (sie tun etwas, oder sie geben mehr preis als eine Statuszeile)
  *   ?cmd=ziel&prozent=80&token=T   Befehl ans Fahrzeug
@@ -247,6 +248,9 @@ if (mg_gesetzt('json')) {
     $mg_aus['_heizplan'] = $mg_st['_heizplan'];
     $mg_aus['_abbruchgrund'] = $mg_st['_abbruchgrund'];
     $mg_aus['_fahrzeugmeldung'] = $mg_st['_fahrzeugmeldung'];
+    // A1 (seit 1.1.19): Anmeldung des Gateways bei MG, dieselbe Deutung wie MQTT.
+    $mg_anm = mg_gw_anmeldung($mg_cfg);
+    $mg_aus['_gateway_anmeldung'] = mg_mqtt_anmeldung_wert($mg_anm['stufe']);
     echo json_encode($mg_aus,
         JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT), "\n";
     exit;

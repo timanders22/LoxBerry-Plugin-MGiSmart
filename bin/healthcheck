@@ -1,0 +1,84 @@
+#!/usr/bin/env php
+<?php
+/**
+ * MG iSmart - Anschluss an den LoxBerry-Healthcheck (seit 1.1.19, Bauliste A2)
+ *
+ * sbin/healthcheck.pl ruft eine ausfuehrbare Datei bin/healthcheck des
+ * Plugins auf - einmal mit "title", einmal mit "check" (Regeln/03). Der
+ * Installer legt bin/ rekursiv mit 755 an. Antwort: JSON mit desc, status,
+ * result und logfile; Status 3 Fehler, 4 Warnung, 5 in Ordnung, 6 Hinweis.
+ *
+ * Die Befunde stammen aus mg_befund() - derselben Funktion, die der Reiter
+ * Test und der Reiter "Gateway einrichten" zeigen: Takt, Broker,
+ * Gateway-Container (nur, wenn das Plugin ihn eingerichtet hat), Anmeldung
+ * bei MG, Frische der Werte. Die Zusammenfassung ist nie besser als ihr
+ * schlechtester Punkt (mg_befund_gesamt()).
+ *
+ * Geurteilt wird ueber das ALTER der Werte, nicht ueber einen einzelnen Abruf
+ * (Regeln/04). docker wird mit Zeitgrenze gefragt (timeout 5 s je Aufruf), der
+ * Broker nur, wenn die Werte schon zu alt sind, mit 2 s fuer den Aufbau und
+ * 1 s je Lesen. Diese Datei schreibt nichts: die Konfiguration wird nur
+ * gelesen (mg_nur_lesen), es gibt keine Momentaufnahme, kein Protokoll und
+ * keinen Zwischenspeicher.
+ *
+ * Aufruf wie LoxBerry (Regeln/02): direkt, nie ueber /bin/bash - als
+ * Benutzer loxberry <LoxBerry-Wurzel>/bin/plugins/<ordner>/healthcheck check,
+ * Eingabe aus /dev/null.
+ */
+
+error_reporting(E_ALL & ~E_DEPRECATED & ~E_NOTICE);
+ini_set('display_errors', '0');
+
+$mg_was = isset($argv[1]) ? strtolower((string) $argv[1]) : 'check';
+if ($mg_was === 'title') {
+    echo "MG iSmart\n";
+    exit(0);
+}
+
+/* Die Bibliothek - wie bin/cron.php: liegt diese Datei unter
+ * .../bin/plugins/<ordner>, ist sie installiert, sonst im ausgepackten Archiv. */
+if (basename(dirname(__DIR__)) === 'plugins') {
+    $mg_lib = dirname(dirname(dirname(__DIR__))) . '/webfrontend/html/plugins/'
+        . basename(__DIR__) . '/mg_lib.php';
+} else {
+    $mg_lib = dirname(__DIR__) . '/webfrontend/html/mg_lib.php';
+}
+if (!is_file($mg_lib)) {
+    // Fail closed, mit Begruendung - ein grauer Punkt ohne Text laesst suchen.
+    echo json_encode(array(
+        'desc' => 'MG iSmart',
+        'status' => 3,
+        'result' => 'mg_lib.php nicht gefunden - das Plugin ist unvollstaendig installiert.',
+    )) . "\n";
+    exit(0);
+}
+require_once $mg_lib;
+mg_nur_lesen(true);
+
+$mg_p = mg_paths();
+if ($mg_p['lbhome'] === '') {
+    echo json_encode(array(
+        'desc' => 'MG iSmart',
+        'status' => 3,
+        'result' => 'Kein LoxBerry-Wurzelverzeichnis gefunden (ausgepacktes Archiv oder Pruefordner) - nichts geprueft.',
+    )) . "\n";
+    exit(0);
+}
+// Die Sprache des LoxBerry, wenn der Aufrufer keine setzt (nur gelesen).
+if (!getenv('LBLANG')) {
+    $mg_gen = mg_json_lesen($mg_p['lbhome'] . '/config/system/general.json');
+    if (isset($mg_gen['Base']['Lang']) && is_string($mg_gen['Base']['Lang'])) {
+        putenv('LBLANG=' . $mg_gen['Base']['Lang']);
+    }
+}
+
+list($mg_status, $mg_text) = mg_befund_gesamt(mg_befund(true));
+
+echo json_encode(array(
+    'desc' => 'MG iSmart',
+    'status' => (int) $mg_status,
+    'result' => (string) $mg_text,
+    'logfile' => $mg_p['log'],
+    // Ein Text des Gateways mit kaputtem UTF-8 darf die Antwort nicht leeren.
+), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE) . "\n";
+exit(0);

@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.18
+Version 1.1.19
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -8,6 +8,32 @@ Klima, Standort — und schickt Befehle zurück: Laden stoppen, Ziel-Ladestand,
 Ladestrombegrenzung, Standklima, „Auto finden".
 
 Kompatibel mit LoxBerry 3.x und **LoxBerry 4** (reines PHP, PHP 7.4 und 8.x).
+
+## Neu in 1.1.19
+
+**Ein falsches MG-Kennwort ist jetzt zu sehen.** Das Gateway meldet den
+Zeitpunkt der letzten Anmeldung bei MG und den letzten Anmeldefehler. Ist der
+Fehler jünger, zeigt die Ampel im Reiter *Gateway einrichten* rot „Anmeldung
+bei MG gescheitert“ mit Zeitpunkt und Text und springt auf Knopfdruck zum
+Formular für E-Mail und Kennwort. Bisher erschien ein falsches Kennwort nur als
+„es kommt nichts an“. Meldet das Gateway nichts dazu, ist die Zeile grau.
+Dieselbe Aussage steht im Reiter *Test* und geht als `gateway/anmeldung`
+(1, 0 oder `-`) über MQTT hinaus — flüchtig, weil es eine Aussage des Gateways
+über sich selbst ist.
+
+**LoxBerry-Healthcheck.** `bin/healthcheck` meldet Takt, Broker, Container,
+Anmeldung bei MG und die Frische der Werte — aus derselben Prüfung wie die
+Ampel. Geurteilt wird über das Alter der Werte, nicht über einen einzelnen
+Abruf; ein schlafendes Auto ist kein Fehler des Plugins.
+
+**Gateway-Abbild aktualisieren.** Ein Knopf holt das Abbild des Gateways neu.
+Ist es dasselbe, heißt es „schon aktuell“; sonst wird der eigene Container mit
+denselben Einstellungen neu angelegt. Der Vorgang läuft im Hintergrund; die
+Ampel zeigt Fassung und Abbild des laufenden Gateways. Container ohne das Label
+des Plugins werden nie angefasst.
+
+Gemessen an Attrappen für Broker und docker; an einem echten Gateway ist die
+Form der Anmeldethemen noch nicht nachgesehen.
 
 ## Neu in 1.1.18
 

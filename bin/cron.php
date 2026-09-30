@@ -103,6 +103,12 @@ if (!$ok) {
     exit;
 }
 mg_log_if_changed('verbindung', 'Broker erreichbar (' . $info . ')');
+/* A1 (seit 1.1.19): die Anmeldung des Gateways bei MG als Zustand
+ * <mqtt_praefix>/gateway/anmeldung - 1, 0 oder "-", bei jedem Takt nach einem
+ * gelungenen Einlesen und FLUECHTIG wie ok: eine Aussage des Gateways ueber
+ * sich selbst ist eine Dienstaussage (Entscheidung des Hausherrn 30.09.2026,
+ * Regeln/07 vom 19.09.2026). Scheitert das Einlesen, geht nichts hinaus. */
+mg_mqtt_anmeldung_senden($cfg);
 
 foreach (mg_fahrzeuge($cfg) as $nr => $fz) {
     $st = mg_state($nr);
