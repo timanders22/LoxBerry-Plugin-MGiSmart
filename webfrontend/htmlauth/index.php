@@ -164,10 +164,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['vorlage'])) {
     exit;
 }
 
+/* ---------------- Einstellungen sichern ----------------
+ *
+ * Ausgegeben wird die VOLLE Konfiguration - samt Aktionstoken, Broker- und
+ * (seit 1.1.18) iSMART-Kennwort. Ohne sie stuenden nach dem Zurueckspielen
+ * alle Felder richtig, und das Plugin kaeme trotzdem nicht an die Anlage; die
+ * Datei waere wertlos. Damit traegt sie Geheimnisse, und der Hinweis am Knopf
+ * sagt das. Seit 1.1.18 mit lesbarem Kopf (_hinweis, _stand; Befund U7) -
+ * mg_sicherung_lesen() uebergeht ihn. Wie jeder Download steht dieser Zweig
+ * vor lbheader() und ohne Umleitung. */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mg_sichern'])) {
+    $mg_js = json_encode(array('_hinweis' => mg_t('EINST.SICH_KOPF'), '_stand' => date('Y-m-d H:i'))
+        + mg_config(), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if ($mg_js !== false) {
+        header('Content-Type: application/json; charset=utf-8');
+        header('Content-Disposition: attachment; filename="mgismart_einstellungen_'
+               . date('Ymd_His') . '.json"');
+        echo $mg_js;
+        exit;
+    }
+    $mg_fehler[] = mg_t('EINST.SICH_SCHREIBFEHLER');
+    $mg_tab = 'tab-settings';
+}
+
+/* Loeschende Knoepfe verlangen einen Bestaetigungshaken (seit 1.1.18, Befund
+ * U9, Regeln/04 "Formregeln fuer einen loeschenden Knopf"); ohne ihn geschieht
+ * nichts. Bis 1.1.17 leerte ein einziger Klick die Ladehistorie. */
+$mg_bestaetigt = !empty($_POST['bestaetigt']);
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['clearlog'])) {
-    @mkdir(dirname($mg_logfile), 0775, true);
-    mg_write_atomic($mg_logfile, '[' . date('Y-m-d H:i:s') . '] '
-        . mg_t('MELDUNG.LOG_GELEERT') . "\n");
+    if (!$mg_bestaetigt) {
+        $mg_fehler[] = mg_t('FEHLER.NICHT_BESTAETIGT');
+    } else {
+        if (!is_dir(dirname($mg_logfile))) { @mkdir(dirname($mg_logfile), 0775, true); }
+        mg_write_atomic($mg_logfile, '[' . date('Y-m-d H:i:s') . '] '
+            . mg_t('MELDUNG.LOG_GELEERT') . "\n");
+        $mg_meldungen[] = mg_t('MELDUNG.LOG_GELEERT');
+    }
     $mg_tab = 'tab-log';
 }
 
@@ -187,8 +220,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['verwaiste_suchen'])) 
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['verwaiste_loeschen'])) {
-    $mg_vl = mg_mqtt_verwaiste_lage();
-    if ($mg_vl['lage'] !== 'ok') {
+    $mg_vl = $mg_bestaetigt ? mg_mqtt_verwaiste_lage() : array('lage' => 'nicht_bestaetigt');
+    if ($mg_vl['lage'] === 'nicht_bestaetigt') {
+        $mg_fehler[] = mg_t('FEHLER.NICHT_BESTAETIGT');
+    } elseif ($mg_vl['lage'] !== 'ok') {
         $mg_fehler[] = sprintf(mg_t('MELDUNG.VERWAISTE_UNBEKANNT'), $mg_vl['grund']);
     } else {
         list($mg_n, $mg_f) = mg_mqtt_verwaiste_loeschen(array_keys($mg_vl['themen']));
@@ -202,8 +237,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['verwaiste_loeschen'])
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['clearladungen'])) {
-    mg_write_json(mg_ladungen_datei(), array('liste' => array()));
-    $mg_meldungen[] = mg_t('MELDUNG.LADUNGEN_GELEERT');
+    if (!$mg_bestaetigt) {
+        $mg_fehler[] = mg_t('FEHLER.NICHT_BESTAETIGT');
+    } else {
+        mg_write_json(mg_ladungen_datei(), array('liste' => array()));
+        $mg_meldungen[] = mg_t('MELDUNG.LADUNGEN_GELEERT');
+    }
     $mg_tab = 'tab-ladungen';
 }
 
@@ -258,22 +297,46 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['token_neu'])) {
  * jeder baut auf mg_config() auf statt auf einem leeren Feld. */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mqtt_save'])) {
     $mg_neu = mg_config();
-    $mg_neu['broker_host'] = trim(preg_replace('/[\x00-\x1F\x7F"\']/', '',
-        (string) (isset($_POST['broker_host']) ? $_POST['broker_host'] : '127.0.0.1')));
-    if ($mg_neu['broker_host'] === '') { $mg_neu['broker_host'] = '127.0.0.1'; }
-    $mg_neu['broker_port'] = max(1, min(65535,
-        (int) (isset($_POST['broker_port']) ? $_POST['broker_port'] : 1883)));
-    $mg_neu['broker_user'] = mg_optionswert(isset($_POST['broker_user']) ? $_POST['broker_user'] : '');
-    // Leeres Feld loescht nicht: ein gespeichertes Passwort bleibt stehen.
-    // Beschnitten wird es wie der Benutzername - ein aus der Zwischenablage
-    // eingefuegtes Passwort mit angehaengtem \r ergaebe sonst ein stilles
-    // Falschpasswort in der Optionsdatei.
-    $mg_pw = mg_optionswert(isset($_POST['broker_pass']) ? $_POST['broker_pass'] : '');
-    if ($mg_pw !== '') { $mg_neu['broker_pass'] = $mg_pw; }
-    if (!empty($_POST['broker_pass_loeschen'])) { $mg_neu['broker_pass'] = ''; }
-    $mg_neu['prefix'] = trim(preg_replace('#[^\w/\-]#', '',
-        (string) (isset($_POST['prefix']) ? $_POST['prefix'] : 'saic')));
-    if ($mg_neu['prefix'] === '') { $mg_neu['prefix'] = 'saic'; }
+    $mg_alt_praefix = trim((string) $mg_neu['mqtt_praefix'], '/ ');
+    $mg_alt_ein = !empty($mg_neu['mqtt_ein']);
+    /* Broker: ohne eigene Angaben gelten die Daten des LoxBerry
+     * (Entscheidung 7, Befund U11/C1). Eigene Angaben nur mit dem Haken
+     * "eigene Broker-Angaben verwenden"; ohne ihn werden eigener Benutzer und
+     * eigenes Kennwort verworfen - mg_broker_zugang() nimmt dann general.json.
+     * Ohne Haken wird auch die Adresse auf 127.0.0.1 gesetzt; der Port bleibt
+     * gespeichert. Mit Haken gilt ein Broker auf einem anderen Rechner auch
+     * ohne Benutzer (Nacharbeit 30.09., N2). */
+    if (!empty($_POST['broker_eigen'])) {
+        mg_formfeld('broker_host', 'MQTTR.HOST', $mg_neu, $mg_fehler);
+        mg_formfeld('broker_port', 'MQTTR.PORT', $mg_neu, $mg_fehler);
+        $mg_neu['broker_user'] = mg_optionswert(isset($_POST['broker_user']) ? $_POST['broker_user'] : '');
+        // Leeres Feld loescht nicht: ein gespeichertes Passwort bleibt stehen.
+        // Beschnitten wird es wie der Benutzername - ein aus der Zwischenablage
+        // eingefuegtes Passwort mit angehaengtem \r ergaebe sonst ein stilles
+        // Falschpasswort in der Optionsdatei.
+        $mg_pw = mg_optionswert(isset($_POST['broker_pass']) ? $_POST['broker_pass'] : '');
+        if ($mg_pw !== '') { $mg_neu['broker_pass'] = $mg_pw; }
+        if (!empty($_POST['broker_pass_loeschen'])) { $mg_neu['broker_pass'] = ''; }
+        // Ohne Benutzer ist nur ein Broker auf einem ANDEREN Rechner eine
+        // eigene Angabe (Nacharbeit N2); lokal gaelte ohnehin general.json.
+        if ($mg_neu['broker_user'] === '') {
+            $mg_neu['broker_pass'] = '';
+            if (mg_broker_host_lokal($mg_neu['broker_host'])) {
+                $mg_fehler[] = mg_t('MQTTR.EIGEN_OHNE_BENUTZER');
+            }
+        }
+    } else {
+        // Ohne Haken: zurueck auf den Zugang des LoxBerry - dazu gehoert auch
+        // die Adresse, sonst bliebe ein fremder Host eine eigene Angabe (N2).
+        $mg_neu['broker_user'] = '';
+        $mg_neu['broker_pass'] = '';
+        $mg_neu['broker_host'] = '127.0.0.1';
+    }
+    /* Abweisen statt verbiegen (Befund U8): bis 1.1.17 wurde aus
+     * 127.0.0.1"x still 127.0.0.1x, aus Port 70000 der Port 65535 und aus
+     * "saic test" das Praefix "saictest". Jetzt bleibt der gespeicherte
+     * Wert stehen, und die Meldung nennt Feld und Grenze. */
+    mg_formfeld('prefix', 'MQTTR.PREFIX', $mg_neu, $mg_fehler);
     $mg_neu['saic_user'] = trim(preg_replace('/[\x00-\x1F\x7F"\']/', '',
         (string) (isset($_POST['saic_user']) ? $_POST['saic_user'] : '')));
 
@@ -298,9 +361,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mqtt_save'])) {
     $mg_neu['namen'] = $mg_namen;
 
     $mg_neu['mqtt_ein'] = isset($_POST['mqtt_ein']) ? 1 : 0;
-    $mg_neu['mqtt_praefix'] = trim(preg_replace('#[^\w/\-]#', '',
-        (string) (isset($_POST['mqtt_praefix']) ? $_POST['mqtt_praefix'] : 'mg')));
-    if ($mg_neu['mqtt_praefix'] === '') { $mg_neu['mqtt_praefix'] = 'mg'; }
+    mg_formfeld('mqtt_praefix', 'MQTTR.EIGEN_PRAEFIX', $mg_neu, $mg_fehler);
 
     /* Zwei verschiedene Praefixe: unter 'prefix' HORCHT das Plugin auf
      * das Gateway, unter 'mqtt_praefix' SENDET es selbst. Fallen beide
@@ -321,6 +382,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mqtt_save'])) {
         $mg_meldungen[] = mg_t('MELDUNG.GESPEICHERT');
         $mg_cfg = mg_config();
         $mg_fmt = mg_formtoken($mg_cfg);
+        $mg_neu_praefix = trim((string) $mg_cfg['mqtt_praefix'], '/ ');
+        /* Beim Wechsel des Praefixes und beim Ausschalten: die eigenen Themen
+         * unter dem ALTEN Praefix abraeumen (seit 1.1.18, Befund M6), mit
+         * derselben Logik wie die Deinstallation (Broker fragen, nur Themen
+         * dieses Plugins, Kollisionsschutz, nachlesen). Danach gilt der
+         * Merker der Veroeffentlichung nicht mehr - der naechste Lauf sendet
+         * den ganzen Satz neu. */
+        if ($mg_alt_praefix !== '' && ($mg_alt_praefix !== $mg_neu_praefix
+                || ($mg_alt_ein && empty($mg_cfg['mqtt_ein'])))) {
+            list($mg_lrc, $mg_lz) = mg_mqtt_leeren($mg_alt_praefix);
+            foreach ($mg_lz as $mg_l) {
+                $mg_l = trim(preg_replace('/^<[A-Z]+>\s*/', '', $mg_l));
+                if ($mg_lrc === 0) { $mg_meldungen[] = $mg_l; } else { $mg_fehler[] = $mg_l; }
+            }
+            foreach (glob(mg_paths()['tmp'] . '/veroeffentlicht*.json') ?: array() as $mg_merk) {
+                @unlink($mg_merk);
+            }
+        }
+        /* Die Abo-Datei des MQTT-Gateways auf das Praefix (seit 1.1.18,
+         * Befund M8) - nur geschrieben, wenn sie abweicht. */
+        mg_abo_datei($mg_neu_praefix, true);
     } else {
         $mg_fehler[] = mg_t('FEHLER.SPEICHERN');
     }
@@ -329,18 +411,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mqtt_save'])) {
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
     $mg_neu = mg_config();
-    $mg_neu['capacity'] = max(1, min(200, (float) str_replace(',', '.',
-        (string) (isset($_POST['capacity']) ? $_POST['capacity'] : 61.1))));
+    /* Abweisen statt verbiegen (seit 1.1.18, Befund U8): bis 1.1.17 wurde
+     * jede Zahl still in ihre Grenzen geklemmt ("abc" -> Kapazitaet 1,
+     * Wartezeit 25 -> 20, Radius 5 -> 20 ...) und "Konfiguration
+     * gespeichert" gemeldet. Jetzt bleibt der gespeicherte Wert stehen, und
+     * die Meldung nennt Feld und Grenze; die uebrigen Felder werden
+     * gespeichert (Regeln/05, "Beanstandungen melden, nicht das ganze
+     * Speichern verhindern"). Die Regeln stehen in mg_wert_regeln() - dieselben
+     * prueft das Zurueckspielen einer Sicherung. */
+    mg_formfeld('capacity', 'EINST.KAPAZITAET', $mg_neu, $mg_fehler);
     $mg_neu['commands'] = isset($_POST['commands']) ? 1 : 0;
     $mg_neu['gefahr_ein'] = isset($_POST['gefahr_ein']) ? 1 : 0;
     $mg_neu['wirkung_pruefen'] = isset($_POST['wirkung_pruefen']) ? 1 : 0;
-    $mg_neu['wartezeit'] = max(2, min(20, (int) (isset($_POST['wartezeit']) ? $_POST['wartezeit'] : 6)));
-    $mg_neu['befehl_abstand'] = max(0, min(3600,
-        (int) (isset($_POST['befehl_abstand']) ? $_POST['befehl_abstand'] : 60)));
-    $mg_neu['strom_abstand'] = max(0, min(3600,
-        (int) (isset($_POST['strom_abstand']) ? $_POST['strom_abstand'] : 300)));
-    $mg_neu['befehle_stunde'] = max(1, min(500,
-        (int) (isset($_POST['befehle_stunde']) ? $_POST['befehle_stunde'] : 30)));
+    mg_formfeld('wartezeit', 'EINST.WARTEZEIT', $mg_neu, $mg_fehler);
+    mg_formfeld('befehl_abstand', 'EINST.BEFEHL_ABSTAND', $mg_neu, $mg_fehler);
+    mg_formfeld('strom_abstand', 'EINST.STROM_ABSTAND', $mg_neu, $mg_fehler);
+    mg_formfeld('befehle_stunde', 'EINST.BEFEHLE_STUNDE', $mg_neu, $mg_fehler);
 
     $mg_neu['ort_ein'] = isset($_POST['ort_ein']) ? 1 : 0;
     foreach (array('heim_breite' => 90, 'heim_laenge' => 180) as $mg_f => $mg_max) {
@@ -353,8 +439,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
             $mg_fehler[] = mg_t('FEHLER.KOORDINATE') . ' ' . mg_kuerzen($mg_w, 20);
         }
     }
-    $mg_neu['heim_radius'] = max(20, min(20000,
-        (int) (isset($_POST['heim_radius']) ? $_POST['heim_radius'] : 150)));
+    mg_formfeld('heim_radius', 'EINST.HEIM_RADIUS', $mg_neu, $mg_fehler);
 
     $mg_neu['notify'] = array(
         'push' => isset($_POST['notify_push']) ? 1 : 0,
@@ -363,9 +448,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
         'offen' => isset($_POST['n_offen']) ? 1 : 0,
         'fenster' => isset($_POST['n_fenster']) ? 1 : 0,
         'fehler' => isset($_POST['n_fehler']) ? 1 : 0,
-        'push_minutes' => max(1, min(60,
-            (int) (isset($_POST['push_minutes']) ? $_POST['push_minutes'] : 5))),
+        'push_minutes' => (int) $mg_cfg['notify']['push_minutes'],
     );
+    mg_formfeld('push_minutes', 'EINST.PUSH_MINUTEN', $mg_neu, $mg_fehler, 'notify.push_minutes');
 
     $mg_neu['ladungen_ein'] = isset($_POST['ladungen_ein']) ? 1 : 0;
 
@@ -392,26 +477,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
      * termin.php des Abfahrts-Assistenten). Der Schluessel bleibt in den
      * Vorgaben und in der Datei, damit aeltere Sicherungsdateien gueltig
      * bleiben; das Formular fasst ihn nicht mehr an. */
-    $mg_neu['abfahrt_vorlauf'] = max(1, min(180,
-        (int) (isset($_POST['abfahrt_vorlauf']) ? $_POST['abfahrt_vorlauf'] : 20)));
-    $mg_neu['abfahrt_temp'] = max(16, min(30,
-        (int) (isset($_POST['abfahrt_temp']) ? $_POST['abfahrt_temp'] : 21)));
-    $mg_neu['abfahrt_fahrzeug'] = max(1, (int) (isset($_POST['abfahrt_fahrzeug'])
-        ? $_POST['abfahrt_fahrzeug'] : 1));
+    mg_formfeld('abfahrt_vorlauf', 'EINST.ABFAHRT_VORLAUF', $mg_neu, $mg_fehler);
+    mg_formfeld('abfahrt_temp', 'EINST.ABFAHRT_TEMP', $mg_neu, $mg_fehler);
+    mg_formfeld('abfahrt_fahrzeug', 'EINST.ABFAHRT_FAHRZEUG', $mg_neu, $mg_fehler);
 
     $mg_neu['ladeempf_ein'] = isset($_POST['ladeempf_ein']) ? 1 : 0;
     $mg_neu['ladeempf_thema'] = trim(preg_replace('/[\x00-\x1F\x7F"\'\s]/', '',
         (string) (isset($_POST['ladeempf_thema']) ? $_POST['ladeempf_thema'] : '')));
-    $mg_neu['ladeempf_grenze'] = (float) str_replace(',', '.',
-        (string) (isset($_POST['ladeempf_grenze']) ? $_POST['ladeempf_grenze'] : 0));
+    mg_formfeld('ladeempf_grenze', 'EINST.LADEEMPF_GRENZE', $mg_neu, $mg_fehler);
     $mg_neu['ladeempf_unter'] = isset($_POST['ladeempf_unter']) ? 1 : 0;
-    $mg_neu['ladeempf_fahrzeug'] = max(1, (int) (isset($_POST['ladeempf_fahrzeug'])
-        ? $_POST['ladeempf_fahrzeug'] : 1));
-    foreach (array('ladeempf_hoch', 'ladeempf_runter') as $mg_f) {
-        $mg_w = (string) (isset($_POST[$mg_f]) ? $_POST[$mg_f] : '');
-        list($mg_gueltig, , , , ) = mg_befehl_aufloesen($mg_w, null);
-        $mg_neu[$mg_f] = $mg_gueltig ? $mg_w : $mg_neu[$mg_f];
-    }
+    mg_formfeld('ladeempf_fahrzeug', 'EINST.LADEEMPF_FAHRZEUG', $mg_neu, $mg_fehler);
+    // Ein unbekannter Befehl wird gemeldet (bis 1.1.17 blieb still der alte).
+    mg_formfeld('ladeempf_hoch', 'EINST.LADEEMPF_HOCH', $mg_neu, $mg_fehler);
+    mg_formfeld('ladeempf_runter', 'EINST.LADEEMPF_RUNTER', $mg_neu, $mg_fehler);
 
     if (mg_config_save($mg_neu)) {
         $mg_meldungen[] = mg_t('MELDUNG.GESPEICHERT');
@@ -423,48 +501,196 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
     $mg_tab = 'tab-settings';
 }
 
-/* Dieser Zweig stand frueher HINTER dem Ableitungsblock weiter unten -
- * als einziger der Speicherzweige. Deshalb zeigte die Seite nach einer
- * erfolgreich eingespielten Sicherung weiter die ALTEN Felder und das
- * ALTE Aktionstoken, waehrend auf der Platte schon das neue lag. Wer das
- * Token abschrieb, trug ein totes in den Miniserver ein; wer die Felder
- * fuer "nicht uebernommen" hielt, speicherte erneut und ueberschrieb die
- * eben eingespielte Sicherung. Er gehoert vor die Ableitung, nicht
- * dahinter - dann zieht sie von selbst nach. */
 /* ---------------- Einstellungen zurueckspielen ----------------
  *
  * is_uploaded_file() ZUERST: ohne diese Pruefung liesse sich jede Datei des
  * Servers unterschieben. Dann die Groessengrenze - eine Sicherung dieses
- * Plugins ist wenige Kilobyte gross; alles darueber wird gar nicht gelesen. */
+ * Plugins ist wenige Kilobyte gross; alles darueber wird gar nicht gelesen.
+ *
+ * Seit 1.1.18 (Befunde C5, U2-U5): jeder Wert wird vor dem Zusammenfuehren
+ * gegen Typ und Regel geprueft (mg_sicherung_lesen(), Bauart E), ein leeres
+ * Merkwort heisst "kein Merkwort gesichert", und die Meldung zaehlt die
+ * Werte NACH dem Zuruecklesen der gespeicherten Datei. Bis 1.1.17 meldete
+ * sie "44 Werte uebernommen", auch wenn die Selbstheilung die Datei gleich
+ * danach mit der Zweitschrift ueberschrieben hatte. Die Seite danach zeigt
+ * das neue Merkwort, weil der Zweig wie jeder andere mit einer Umleitung
+ * endet (U1) - das folgende GET liest die Konfiguration neu (C6). */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mg_zurueck'])) {
     if (!isset($_FILES['mg_sicherung']) || !is_array($_FILES['mg_sicherung'])
         || !isset($_FILES['mg_sicherung']['tmp_name'])
+        || !is_string($_FILES['mg_sicherung']['tmp_name'])
         || !@is_uploaded_file($_FILES['mg_sicherung']['tmp_name'])) {
         $mg_fehler[] = mg_t('EINST.SICH_KEINE_DATEI');
     } elseif ((int) $_FILES['mg_sicherung']['size'] > 262144) {
         $mg_fehler[] = mg_t('EINST.SICH_ZU_GROSS');
     } else {
         list($mg_neu, $mg_mangel, $mg_n) = mg_sicherung_lesen(
-            (string) @file_get_contents($_FILES['mg_sicherung']['tmp_name']));
+            (string) @file_get_contents($_FILES['mg_sicherung']['tmp_name']), $mg_cfg);
         if ($mg_neu === null) {
             /* ALLE Beanstandungen, nicht nur die erste - und geaendert wird
              * nichts. */
             $mg_fehler[] = mg_t('EINST.SICH_ABGELEHNT') . ' '
                             . implode(' ', $mg_mangel);
         } elseif (mg_config_save($mg_neu)) {
-            $mg_meldungen[] = sprintf(mg_t('EINST.SICH_UEBERNOMMEN'), $mg_n);
+            $mg_datei = mg_json_lesen(mg_paths()['config']);
+            $mg_soll = $mg_neu;
+            $mg_soll['vin'] = isset($mg_neu['vins'][0]) ? (string) $mg_neu['vins'][0] : '';
+            $mg_gleich = 0;
+            $mg_anders = array();
+            foreach ($mg_soll as $mg_k => $mg_v) {
+                if (array_key_exists($mg_k, $mg_datei)
+                    && json_encode($mg_datei[$mg_k]) === json_encode($mg_v)) {
+                    $mg_gleich++;
+                } else {
+                    $mg_anders[] = $mg_k;
+                }
+            }
+            if ($mg_anders) {
+                $mg_fehler[] = sprintf(mg_t('EINST.SICH_ABWEICHUNG'), count($mg_anders),
+                    implode(', ', $mg_anders));
+            } else {
+                $mg_meldungen[] = sprintf(mg_t('EINST.SICH_UEBERNOMMEN'), $mg_gleich);
+            }
+            mg_log('Sicherung zurueckgespielt: ' . $mg_gleich . ' Werte nach dem Zuruecklesen gleich'
+                . ($mg_anders ? ', abweichend: ' . implode(', ', $mg_anders) : '') . '.');
         } else {
             $mg_fehler[] = mg_t('EINST.SICH_SCHREIBFEHLER');
         }
     }
+    $mg_tab = 'tab-settings';
 }
+
+/* ---------------- Gateway einrichten (Entscheidung 7, seit 1.1.18) ----------------
+ *
+ * formular=gateway: iSMART-E-Mail und -Kennwort uebernehmen und den
+ * Container im Hintergrund anlegen (bzw. den eigenen neu anlegen). Das
+ * Kennwortfeld wird nie vorbelegt; leer heisst unveraendert, geloescht wird
+ * ueber den Haken daneben (Regeln/04). */
+$mg_formular = (isset($_POST['formular']) && is_string($_POST['formular'])) ? $_POST['formular'] : '';
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $mg_formular === 'gateway') {
+    $mg_neu = mg_config();
+    $mg_ok = true;
+    $mg_mail = isset($_POST['saic_user']) && is_string($_POST['saic_user']) ? trim($_POST['saic_user']) : '';
+    /* Die E-Mail ist zugleich ein Glied des Themenpfads <prefix>/<user>/...:
+     * ein Schraegstrich, # oder + darin braeche den Pfad. Abgewiesen, nicht
+     * zurechtgebogen. */
+    if (!preg_match('/^[^\s@\/#+"\'<>\x00-\x1F\x7F]+@[^\s@\/#+"\'<>\x00-\x1F\x7F]+\z/', $mg_mail)) {
+        $mg_fehler[] = sprintf(mg_t('FEHLER.FELD'), mg_t('GW.MAIL'), mg_t('WERT.EMAIL'));
+        $mg_ok = false;
+    } else {
+        $mg_neu['saic_user'] = $mg_mail;
+    }
+    $mg_pw = isset($_POST['saic_pass']) && is_string($_POST['saic_pass']) ? $_POST['saic_pass'] : '';
+    $mg_loeschen = !empty($_POST['saic_pass_loeschen']);
+    if ($mg_pw !== '') {
+        list($mg_pok, $mg_pw, $mg_grund) = mg_wert_pruefen('saic_pass', $mg_pw, true);
+        if ($mg_pok) {
+            $mg_neu['saic_pass'] = $mg_pw;
+        } else {
+            $mg_fehler[] = sprintf(mg_t('FEHLER.FELD'), mg_t('GW.PASS'), $mg_grund);
+            $mg_ok = false;
+        }
+    }
+    if ($mg_loeschen) {
+        $mg_neu['saic_pass'] = '';
+    }
+    if ($mg_ok || $mg_loeschen) {
+        if (!mg_config_save($mg_neu)) {
+            $mg_fehler[] = mg_t('FEHLER.SPEICHERN');
+            $mg_ok = false;
+        } elseif ($mg_loeschen) {
+            $mg_meldungen[] = mg_t('GW.PASS_GELOESCHT');
+            $mg_ok = false;   // ohne Kennwort wird nichts angelegt
+        }
+    }
+    if ($mg_ok) {
+        $mg_neu = mg_config();
+        if ((string) $mg_neu['saic_pass'] === '') {
+            $mg_fehler[] = mg_t('GW.FEHLT_PASS');
+        } else {
+            list($mg_gok, $mg_gtext) = mg_gw_vorgang_starten();
+            if ($mg_gok) { $mg_meldungen[] = $mg_gtext; } else { $mg_fehler[] = $mg_gtext; }
+        }
+    }
+    $mg_tab = 'tab-gateway';
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $mg_formular === 'gw_neustart') {
+    list($mg_gok, $mg_gtext) = mg_gw_neustart();
+    if ($mg_gok) { $mg_meldungen[] = $mg_gtext; } else { $mg_fehler[] = $mg_gtext; }
+    $mg_tab = 'tab-gateway';
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $mg_formular === 'gw_entfernen') {
+    if (!$mg_bestaetigt) {
+        $mg_fehler[] = mg_t('FEHLER.NICHT_BESTAETIGT');
+    } else {
+        list($mg_gok, $mg_gtext) = mg_gw_entfernen();
+        if ($mg_gok) { $mg_meldungen[] = $mg_gtext; } else { $mg_fehler[] = $mg_gtext; }
+    }
+    $mg_tab = 'tab-gateway';
+}
+
+/* Nach dem ersten Erfolg: die Kennungen, die das Gateway unter
+ * <prefix>/<user>/vehicles/+ meldet, als Fahrzeuge uebernehmen - statt sie aus
+ * der Rohdatenliste abzuschreiben. Angehaengt, nie umsortiert: die Nummer
+ * eines Fahrzeugs steckt in jeder Loxone-Adresse. */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $mg_formular === 'gw_vins') {
+    $mg_neu = mg_config();
+    $mg_dazu = mg_gw_gefundene_vins($mg_neu);
+    if (!$mg_dazu) {
+        $mg_fehler[] = mg_t('GW.KEINE_NEUEN_VINS');
+    } else {
+        foreach ($mg_dazu as $mg_v) {
+            $mg_neu['namen'] = array_pad($mg_neu['namen'], count($mg_neu['vins']), '');
+            $mg_neu['vins'][] = $mg_v;
+            $mg_neu['namen'][] = '';
+        }
+        if (mg_config_save($mg_neu)) {
+            $mg_meldungen[] = sprintf(mg_t('GW.VINS_UEBERNOMMEN'), implode(', ', $mg_dazu));
+        } else {
+            $mg_fehler[] = mg_t('FEHLER.SPEICHERN');
+        }
+    }
+    $mg_tab = 'tab-gateway';
+}
+
+/* ==================================================================
+ * JEDER POST-ZWEIG ENDET MIT EINER UMLEITUNG (seit 1.1.18, Befund U1)
+ *
+ * 303 auf index.php?form=<reiter>; das Ergebnis reist als Einmalmeldung
+ * (mg_flash_schreiben()), die nur das folgende GET liest. Bis 1.1.17 wurde
+ * die Seite unmittelbar nach dem POST gebaut - F5 wiederholte jede Aktion,
+ * beim Befehlsknopf also auch einen Befehl ans Fahrzeug. Auch ein
+ * abgewiesenes Formular (Wachposten) laeuft hier durch. Die Downloads
+ * (Vorlagen, Sicherung) haben oben schon mit exit geendet.
+ * ================================================================== */
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    mg_flash_schreiben(array('meldungen' => $mg_meldungen, 'fehler' => $mg_fehler,
+                             'verwaiste' => $mg_verwaiste));
+    header('Location: index.php?form=' . rawurlencode(substr($mg_tab, 4)), true, 303);
+    exit;
+}
+/* Das GET danach: die Einmalmeldung lesen - und nur hier, nie beim POST
+ * (Regeln/04: sonst verhindert ein alter Fehlertext das naechste Speichern). */
+$mg_flash = mg_flash_lesen();
+foreach (array('meldungen' => 'mg_meldungen', 'fehler' => 'mg_fehler') as $mg_fk => $mg_fv) {
+    if (isset($mg_flash[$mg_fk]) && is_array($mg_flash[$mg_fk])) {
+        foreach ($mg_flash[$mg_fk] as $mg_m) {
+            if (is_string($mg_m)) { ${$mg_fv}[] = $mg_m; }
+        }
+    }
+}
+if (isset($mg_flash['verwaiste']) && is_array($mg_flash['verwaiste'])) {
+    $mg_verwaiste = $mg_flash['verwaiste'];
+}
+
 /* ---------------- Anzeige vorbereiten ---------------- */
 
 $mg_token = (string) $mg_cfg['aktionstoken'];
 $mg_notify = $mg_cfg['notify'];
 $mg_fahrzeuge = mg_fahrzeuge($mg_cfg);
 $mg_anzahl = count($mg_fahrzeuge);
-$mg_roh = mg_raw();
 $mg_hasmos = mg_has_mosquitto();
 $mg_cmds = mg_befehle();
 $mg_felder = mg_felder();
@@ -472,7 +698,21 @@ $mg_zeilen = mg_zeilen();
 $mg_host = mg_host();
 $mg_ver = mg_pluginversion();
 $mg_loglines = mg_log_tail($mg_logfile, 300);
-$mg_pruefzeilen = mg_selbsttest();
+$mg_cronerr = mg_log_tail($mg_p['cronerr'], 20);
+/* Die Ampel des Gateways: gemessen (docker, kurze Zeitgrenzen) nur, wenn der
+ * Reiter Gateway oder Test serverseitig offen ist oder "Zustand neu messen"
+ * gedrueckt wurde - sonst der zuletzt gemessene Stand mit Messzeit. Kein
+ * docker-Aufruf im Seitenaufbau der uebrigen Reiter (Regeln/04). */
+$mg_messen = isset($_GET['messen']) && $_GET['messen'] === '1';
+$mg_live = ($mg_tab === 'tab-test' || $mg_tab === 'tab-gateway');
+$mg_ampel = ($mg_live || $mg_messen) ? mg_gw_ampel(true, $mg_messen) : mg_gw_ampel(false);
+$mg_vorgang = mg_gw_vorgang();
+$mg_gwlog = null;
+if ($mg_tab === 'tab-gateway' && isset($_GET['gwlog']) && $_GET['gwlog'] === '1') {
+    $mg_gwlog = mg_gw_protokoll();
+}
+$mg_roh = mg_raw();
+$mg_pruefzeilen = mg_selbsttest($mg_tab === 'tab-test');
 $mg_ladungen = mg_ladungen_lesen(100);
 
 // Das angezeigte Fahrzeug im Reiter Test.
@@ -501,6 +741,30 @@ function mg_jn($v)
     return '&ndash;';
 }
 
+/**
+ * Ein Formularfeld pruefen und uebernehmen - oder abweisen (Befund U8).
+ * Fehlt das Feld in der Absendung, bleibt der Wert, wie er ist (das Feld
+ * gehoert zu einem anderen Formular). Sonst: am Rand beschnitten, gegen
+ * mg_wert_regeln() geprueft; passt es nicht, bleibt der gespeicherte Wert,
+ * und die Beanstandung nennt Feld und Grenze.
+ */
+function mg_formfeld($k, $bez, array &$neu, array &$fehler, $regel = null)
+{
+    if (!isset($_POST[$k]) || !is_string($_POST[$k])) {
+        return;
+    }
+    list($ok, $w, $grund) = mg_wert_pruefen($regel === null ? $k : $regel, trim($_POST[$k]), true);
+    if (!$ok) {
+        $fehler[] = sprintf(mg_t('FEHLER.FELD'), mg_t($bez), $grund);
+        return;
+    }
+    if ($regel === 'notify.push_minutes') {
+        $neu['notify']['push_minutes'] = $w;
+    } else {
+        $neu[$k] = $w;
+    }
+}
+
 /* ==================================================================
  * DIE HANDLER STEHEN VOR lbheader() - DAS IST BAUVORSCHRIFT
  * ==================================================================
@@ -521,28 +785,9 @@ function mg_jn($v)
  * Fehler lange verdeckt.
  *
  * Reihenfolge: Bibliothek, Konfiguration, Wachposten, Reiterwahl,
- * ALLE Handler samt Downloads, dann erst lbheader(), dann HTML.
+ * ALLE Handler samt Downloads, Umleitung, dann erst lbheader(), dann HTML.
+ * Seit 1.1.18 steht der Sicherungs-Download oben bei der Vorlage.
  * ================================================================== */
-/* ---------------- Einstellungen sichern ----------------
- *
- * Ausgegeben wird die VOLLE Konfiguration - samt Aktionstoken. Ohne ihn
- * stuenden nach dem Zurueckspielen alle Felder richtig, und das Plugin
- * kaeme trotzdem nicht an die Anlage; die Datei waere wertlos. Damit
- * traegt sie ein Geheimnis, und der Hinweis am Knopf sagt das. */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mg_sichern'])) {
-    $mg_js = json_encode(mg_config(),
-        JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    if ($mg_js !== false) {
-        header('Content-Type: application/json; charset=utf-8');
-        header('Content-Disposition: attachment; filename="mgismart_einstellungen_'
-               . date('Ymd_His') . '.json"');
-        echo $mg_js;
-        exit;
-    }
-    $mg_fehler[] = mg_t('EINST.SICH_SCHREIBFEHLER');
-}
-
-
 
 if (class_exists('LBWeb', false)) {
     LBWeb::lbheader('MG iSmart' . ($mg_ver !== '' ? ' ' . $mg_ver : ''),
@@ -641,6 +886,13 @@ if (class_exists('LBWeb', false)) {
 .sm-wrap .sm-log { background: #263238; color: #cfd8dc; font-family: Consolas, "Courier New", monospace;
     font-size: 0.82em; padding: 10px; border-radius: 8px; max-height: 460px; overflow: auto;
     white-space: pre-wrap; box-shadow: none; }
+/* Zweiter eigener Zusatz (seit 1.1.18): die Punkte der Ampel im Reiter
+   "Gateway einrichten". Vier feste Klassen, keine zusammengesetzte. */
+.sm-ampel { width: 14px; height: 14px; border-radius: 50%; display: inline-block; }
+.sm-ampel-gruen { background: #6dac20; }
+.sm-ampel-gelb  { background: #e0b40d; }
+.sm-ampel-rot   { background: #b00000; }
+.sm-ampel-grau  { background: #9e9e9e; }
 </style>
 <div class="sm-wrap">
 <h2 style="margin-top:6px;">MG iSmart<?php if ($mg_ver !== '') { ?> <span class="sm-hilfe" style="font-weight:400;"><?= mg_e($mg_ver) ?></span><?php } ?></h2>
@@ -679,6 +931,10 @@ if (class_exists('LBWeb', false)) {
 
 <!-- ================= Einstellungen ================= -->
 <div class="sm-seite<?= $mg_tab === 'tab-settings' ? ' sm-active' : '' ?>" id="tab-settings">
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-lesen"></i> <?= mg_e(mg_t('LEGENDE.LESEN')) ?></span>
+<span><i class="sm-punkt sm-b-aktion"></i> <?= mg_e(mg_t('LEGENDE.AKTION')) ?></span>
+</div>
 <form action="index.php" method="post">
 <input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
 <input data-role="none" type="hidden" name="activetab" value="tab-settings">
@@ -879,10 +1135,6 @@ if (class_exists('LBWeb', false)) {
 	<?= mg_e(mg_t('EINST.LADUNGEN_EIN')) ?></label>
 </div>
 
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-aktion"></i> <?= mg_e(mg_t('LEGENDE.AKTION')) ?></span>
-<span><i class="sm-punkt sm-b-lesen"></i> <?= mg_e(mg_t('LEGENDE.LESEN')) ?></span>
-</div>
 <div class="sm-knopfreihe">
 	<button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= mg_e(mg_t('KNOPF.SPEICHERN')) ?></button>
 </div>
@@ -912,12 +1164,39 @@ if (class_exists('LBWeb', false)) {
 
 <!-- ================= MQTT ================= -->
 <div class="sm-seite<?= $mg_tab === 'tab-mqtt' ? ' sm-active' : '' ?>" id="tab-mqtt">
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-technik"></i> <?= mg_e(mg_t('LEGENDE.TECHNIK')) ?></span>
+<span><i class="sm-punkt sm-b-aktion"></i> <?= mg_e(mg_t('LEGENDE.AKTION')) ?></span>
+</div>
 <form action="index.php" method="post">
 <input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
 <input data-role="none" type="hidden" name="activetab" value="tab-mqtt">
 <input data-role="none" type="hidden" name="mqtt_save" value="1">
 
 <h2><?= mg_e(mg_t('MQTTR.H_BROKER')) ?></h2>
+<?php
+/* U11 (seit 1.1.18): ohne eigene Angaben gelten die Broker-Daten des
+ * LoxBerry (mg_broker_zugang()). Angezeigt wird, woher sie kommen und mit
+ * welchem Benutzer - das Kennwort erscheint nie im HTML, auch nicht das des
+ * LoxBerry. */
+$mg_zugang = mg_broker_zugang($mg_cfg);
+$mg_eigen = ($mg_zugang['quelle'] === 'eigen');
+?>
+<div class="sm-hinweis"><?php if ($mg_zugang['quelle'] === 'loxberry') {
+    echo mg_e(sprintf(mg_t('MQTTR.UEBERNOMMEN'), $mg_zugang['user'] !== '' ? $mg_zugang['user'] : '–',
+        $mg_zugang['host'], (int) $mg_zugang['port']));
+} elseif ($mg_eigen) {
+    echo mg_e(sprintf(mg_t('MQTTR.EIGENE_GELTEN'), $mg_zugang['user'] !== '' ? $mg_zugang['user'] : '–',
+        $mg_zugang['host'], (int) $mg_zugang['port']));
+} else {
+    echo mg_e(sprintf(mg_t('MQTTR.KEINE_GENERAL'), $mg_zugang['host'], (int) $mg_zugang['port']));
+} ?></div>
+<div class="sm-feld">
+	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
+	<input data-role="none" type="checkbox" name="broker_eigen" value="1" <?= $mg_eigen ? 'checked' : '' ?>>
+	<?= mg_e(mg_t('MQTTR.EIGEN_HAKEN')) ?></label>
+	<div class="sm-hilfe"><?php echo mg_t('MQTTR.EIGEN_HAKEN_HILFE'); ?></div>
+</div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('MQTTR.HOST')) ?></label>
 	<input data-role="none" type="text" name="broker_host" value="<?= mg_e($mg_cfg['broker_host']) ?>" placeholder="127.0.0.1">
@@ -982,9 +1261,6 @@ if (class_exists('LBWeb', false)) {
 <span class="sm-mono"><?= mg_e(trim((string) $mg_cfg['mqtt_praefix'], '/ ')) ?>/#</span><br>
 <?php echo mg_abo_text(); ?></div>
 
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-aktion"></i> <?= mg_e(mg_t('LEGENDE.AKTION')) ?></span>
-</div>
 <div class="sm-knopfreihe">
 	<button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= mg_e(mg_t('KNOPF.SPEICHERN')) ?></button>
 </div>
@@ -997,10 +1273,6 @@ if (class_exists('LBWeb', false)) {
 <div class="sm-log"><?php foreach (array_slice($mg_verwaiste, 0, 200, true) as $mg_vt => $mg_vv) {
     echo mg_e($mg_vt) . ' = ' . mg_e(mg_kuerzen($mg_vv, 40)) . "\n"; } ?></div>
 <?php } ?>
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-technik"></i> <?= mg_e(mg_t('LEGENDE.TECHNIK')) ?></span>
-<span><i class="sm-punkt sm-b-aktion"></i> <?= mg_e(mg_t('LEGENDE.AKTION')) ?></span>
-</div>
 <form action="index.php" method="post">
 <input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
 <input data-role="none" type="hidden" name="activetab" value="tab-mqtt">
@@ -1013,6 +1285,9 @@ if (class_exists('LBWeb', false)) {
 <input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
 <input data-role="none" type="hidden" name="activetab" value="tab-mqtt">
 <input data-role="none" type="hidden" name="verwaiste_loeschen" value="1">
+<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
+<input data-role="none" type="checkbox" name="bestaetigt" value="1">
+<?= mg_e(mg_t('BESTAETIGEN.VERWAISTE')) ?></label>
 <div class="sm-knopfreihe">
 	<button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= mg_e(mg_t('KNOPF.VERWAISTE_LOESCHEN')) ?></button>
 </div>
@@ -1027,32 +1302,169 @@ if (class_exists('LBWeb', false)) {
 <tr><td><span class="sm-mono"><?= mg_e(trim((string) $mg_cfg['mqtt_praefix'], '/ ') . '/' . $mg_th) ?></span></td>
 	<td><?= mg_e(mg_t($mg_bez)) ?></td>
 	<td><?= mg_e(mg_t(mg_mqtt_behalten($mg_th, '1') ? 'WORT.JA' : 'WORT.NEIN')) ?></td></tr>
+<?php }
+/* Das Lebenszeichen (seit 1.1.18, Befund M3): je Lauf, nie zurueckbehalten.
+ * mg_mqtt_behalten() fragt dieselbe Liste wie die Sendefunktion. */
+foreach (mg_mqtt_status_themen() as $mg_th => $mg_bez) { ?>
+<tr><td><span class="sm-mono"><?= mg_e(trim((string) $mg_cfg['mqtt_praefix'], '/ ') . '/' . $mg_th) ?></span></td>
+	<td><?= mg_e(mg_t($mg_bez)) ?></td>
+	<td><?= mg_e(mg_t(mg_mqtt_behalten($mg_th, '1') ? 'WORT.JA' : 'WORT.NEIN')) ?></td></tr>
 <?php } ?>
 </table>
 </div>
 </div>
 
 <!-- ================= Gateway einrichten ================= -->
+<?php
+/* Seit 1.1.18 (Entscheidung 7, Bauliste G1): das Plugin legt den Container
+ * selbst an. Kein docker-Befehl zum Abtippen mehr. Die Farben der Ampel sind
+ * feste Klassen (Regeln/04: CSS-Klassen woertlich, nicht zusammengesetzt). */
+$mg_farbe = array('gruen' => 'sm-ampel sm-ampel-gruen', 'gelb' => 'sm-ampel sm-ampel-gelb',
+                  'rot' => 'sm-ampel sm-ampel-rot', 'grau' => 'sm-ampel sm-ampel-grau');
+$mg_vlaeuft = in_array($mg_vorgang['zustand'], array('gestartet', 'laeuft'), true);
+$mg_docker_weg = ($mg_ampel !== null && in_array($mg_ampel['docker'], array('fehlt', 'kein_zugriff'), true));
+$mg_eigener = ($mg_ampel !== null && !empty($mg_ampel['eigen']));
+?>
 <div class="sm-seite<?= $mg_tab === 'tab-gateway' ? ' sm-active' : '' ?>" id="tab-gateway">
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-lesen"></i> <?= mg_e(mg_t('LEGENDE.LESEN')) ?></span>
+<span><i class="sm-punkt sm-b-technik"></i> <?= mg_e(mg_t('LEGENDE.TECHNIK')) ?></span>
+<span><i class="sm-punkt sm-b-aktion"></i> <?= mg_e(mg_t('LEGENDE.AKTION')) ?></span>
+</div>
+<?php if ($mg_vlaeuft && $mg_tab === 'tab-gateway') { ?>
+<meta http-equiv="refresh" content="5;url=index.php?form=gateway">
+<?php } ?>
 <h2><?= mg_e(mg_t('GW.H_WARUM')) ?></h2>
 <p class="sm-hilfe"><?php echo mg_t('GW.WARUM'); ?></p>
 
-<div class="sm-step"><b><?= mg_e(mg_t('GW.S1_TITEL')) ?></b><br><?php echo mg_t('GW.S1'); ?></div>
-<div class="sm-step"><b><?= mg_e(mg_t('GW.S2_TITEL')) ?></b><br><?php echo mg_t('GW.S2'); ?></div>
-<div class="sm-step"><b><?= mg_e(mg_t('GW.S3_TITEL')) ?></b><br><?php echo mg_t('GW.S3'); ?>
-<div class="sm-pre">docker run -d --name saic-gateway --restart unless-stopped \
-  -e SAIC_USER="name@example.org" \
-  -e SAIC_PASSWORD="IHR-ISMART-PASSWORT" \
-  -e SAIC_REST_URI="https://gateway-sm-eu.soimt.com/api.app/v1/" \
-  -e SAIC_REGION="eu" \
-  -e MQTT_URI="tcp://<?= mg_e($mg_cfg['broker_host'] ?: '127.0.0.1') ?>:<?= (int) ($mg_cfg['broker_port'] ?: 1883) ?>" \
-  -e MQTT_TOPIC="<?= mg_e($mg_cfg['prefix'] ?: 'saic') ?>" \
-  -e HA_DISCOVERY_ENABLED="False" \
-  -e BATTERY_CAPACITY_MAPPING="IHRE-VIN=<?= mg_e($mg_cfg['capacity']) ?>" \
-  saicismartapi/saic-python-mqtt-gateway</div>
-<div class="sm-hilfe"><?php echo mg_t('GW.S3_HINWEIS'); ?></div>
+<h2><?= mg_e(mg_t('GW.H_AMPEL')) ?></h2>
+<?php if ($mg_vlaeuft) { ?>
+<div class="sm-hinweis"><?= mg_e(sprintf(mg_t('GW.VORGANG_SEIT'), max(0, time() - (int) $mg_vorgang['start']))) ?></div>
+<?php } elseif ($mg_vorgang['zustand'] === 'fertig' && time() - (int) (isset($mg_vorgang['ende']) ? $mg_vorgang['ende'] : 0) < 3600) { ?>
+<div class="sm-hinweis"><?= mg_e(mg_t('GW.VORGANG_FERTIG') . ' ' . $mg_vorgang['meldung']) ?></div>
+<?php } elseif ($mg_vorgang['zustand'] === 'fehler' || $mg_vorgang['zustand'] === 'abgebrochen') { ?>
+<div class="sm-warnung"><?= mg_e(mg_t($mg_vorgang['zustand'] === 'fehler' ? 'GW.VORGANG_FEHLER' : 'GW.VORGANG_ABGEBROCHEN')
+    . ' ' . $mg_vorgang['meldung']) ?></div>
+<?php } ?>
+<?php if ($mg_ampel === null) { ?>
+<div class="sm-hinweis"><?= mg_e(mg_t('GW.A_UNGEMESSEN')) ?></div>
+<?php } else { ?>
+<table class="sm-tbl">
+<tr><th style="width:2.5em;"></th><th><?= mg_e(mg_t('GW.A_ZEILE')) ?></th><th><?= mg_e(mg_t('TEST.BEFUND')) ?></th></tr>
+<?php foreach (array('container' => 'GW.A_CONTAINER', 'anmeldung' => 'GW.A_ANMELDUNG', 'werte' => 'GW.A_WERTEZEILE') as $mg_ak => $mg_ab) {
+    $mg_af = isset($mg_farbe[$mg_ampel[$mg_ak][0]]) ? $mg_farbe[$mg_ampel[$mg_ak][0]] : $mg_farbe['grau']; ?>
+<tr><td style="text-align:center;"><i class="<?= $mg_af ?>"></i></td>
+	<td><?= mg_e(mg_t($mg_ab)) ?></td>
+	<td><?= mg_e($mg_ampel[$mg_ak][1]) ?></td></tr>
+<?php } ?>
+</table>
+<div class="sm-hilfe"><?= mg_e(sprintf(mg_t('GW.A_MESSZEIT'), date('d.m.Y H:i:s', (int) $mg_ampel['zeit']))) ?>
+<?= mg_e(mg_t('GW.A_HILFE')) ?></div>
+<?php } ?>
+
+<?php if ($mg_docker_weg) { ?>
+<div class="sm-warnung"><?php echo mg_t($mg_ampel['docker'] === 'fehlt' ? 'GW.VOR_FEHLT' : 'GW.VOR_KEIN_ZUGRIFF'); ?></div>
+<?php } ?>
+
+<h2><?= mg_e(mg_t('GW.H_ZUGANG')) ?></h2>
+<?php if ($mg_vlaeuft) { ?>
+<div class="sm-hinweis"><?= mg_e(mg_t('GW.VORGANG_LAEUFT_SCHON')) ?></div>
+<?php } elseif (!$mg_docker_weg) { ?>
+<form action="index.php" method="post">
+<input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
+<input data-role="none" type="hidden" name="activetab" value="tab-gateway">
+<input data-role="none" type="hidden" name="formular" value="gateway">
+<div class="sm-feld">
+	<label><?= mg_e(mg_t('GW.MAIL')) ?></label>
+	<input data-role="none" type="email" name="saic_user" value="<?= mg_e($mg_cfg['saic_user']) ?>" placeholder="name@example.org" autocomplete="off">
 </div>
-<div class="sm-step"><b><?= mg_e(mg_t('GW.S4_TITEL')) ?></b><br><?php echo mg_t('GW.S4'); ?></div>
+<div class="sm-feld">
+	<label><?= mg_e(mg_t('GW.PASS')) ?></label>
+	<input data-role="none" type="password" name="saic_pass" value="" autocomplete="new-password" placeholder="<?= (string) $mg_cfg['saic_pass'] !== '' ? mg_e(mg_t('MQTTR.PASS_GESPEICHERT')) : mg_e(mg_t('GW.PASS_LEER')) ?>">
+	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;margin-top:6px;">
+	<input data-role="none" type="checkbox" name="saic_pass_loeschen" value="1">
+	<?= mg_e(mg_t('GW.PASS_LOESCHEN')) ?></label>
+	<div class="sm-hilfe"><?php echo mg_t('GW.ZUGANG_HILFE'); ?></div>
+</div>
+<div class="sm-hilfe"><?php echo mg_t('GW.ANLEGEN_HINWEIS'); ?></div>
+<div class="sm-knopfreihe">
+	<button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= mg_e(mg_t($mg_eigener ? 'GW.K_NEU' : 'GW.K_ANLEGEN')) ?></button>
+</div>
+</form>
+<?php } ?>
+
+<h2><?= mg_e(mg_t('GW.H_CONTAINER')) ?></h2>
+<div class="sm-knopfreihe">
+	<a data-role="none" class="sm-btn sm-b-lesen" href="index.php?form=gateway&amp;messen=1"><?= mg_e(mg_t('GW.K_MESSEN')) ?></a>
+	<a data-role="none" class="sm-btn sm-b-technik" href="index.php?form=gateway&amp;gwlog=1"><?= mg_e(mg_t('GW.K_PROTOKOLL')) ?></a>
+</div>
+<?php if ($mg_gwlog !== null) { ?>
+<?php if ($mg_gwlog[0]) { ?>
+<div class="sm-log"><?= mg_e($mg_gwlog[1] !== '' ? $mg_gwlog[1] : mg_t('GW.LOGS_LEER')) ?></div>
+<?php } else { ?>
+<div class="sm-warnung"><?= mg_e($mg_gwlog[1]) ?></div>
+<?php } ?>
+<?php } ?>
+<form action="index.php" method="post">
+<input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
+<input data-role="none" type="hidden" name="activetab" value="tab-gateway">
+<input data-role="none" type="hidden" name="formular" value="gw_neustart">
+<div class="sm-knopfreihe">
+	<button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= mg_e(mg_t('GW.K_NEUSTART')) ?></button>
+</div>
+</form>
+<form action="index.php" method="post">
+<input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
+<input data-role="none" type="hidden" name="activetab" value="tab-gateway">
+<input data-role="none" type="hidden" name="formular" value="gw_entfernen">
+<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
+<input data-role="none" type="checkbox" name="bestaetigt" value="1">
+<?= mg_e(mg_t('BESTAETIGEN.GATEWAY')) ?></label>
+<div class="sm-knopfreihe">
+	<button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= mg_e(mg_t('GW.K_ENTFERNEN')) ?></button>
+</div>
+</form>
+
+<?php $mg_neue_vins = mg_gw_gefundene_vins($mg_cfg);
+if ($mg_neue_vins) { ?>
+<h3><?= mg_e(mg_t('GW.H_GEFUNDEN')) ?></h3>
+<div class="sm-hinweis"><?= mg_e(sprintf(mg_t('GW.GEFUNDEN'), implode(', ', $mg_neue_vins))) ?></div>
+<form action="index.php" method="post">
+<input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
+<input data-role="none" type="hidden" name="activetab" value="tab-gateway">
+<input data-role="none" type="hidden" name="formular" value="gw_vins">
+<div class="sm-knopfreihe">
+	<button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= mg_e(mg_t('GW.K_VINS')) ?></button>
+</div>
+</form>
+<?php } ?>
+
+<details class="sm-step"><summary><b><?= mg_e(mg_t('GW.H_FORTGESCHRITTEN')) ?></b></summary>
+<div class="sm-hilfe"><?php echo mg_t('GW.FORTGESCHRITTEN'); ?></div>
+<?php
+/* Nur zum Lesen: was das Plugin anlegt. Die Kennwoerter maskiert, nie im
+ * HTML (Bauliste G1/G2). */
+list($mg_eok, $mg_env) = mg_gw_env($mg_cfg, $mg_zugang);
+$mg_envzeilen = array();
+if ($mg_eok) {
+    foreach (explode("\n", trim($mg_env)) as $mg_ez) {
+        $mg_et = explode('=', $mg_ez, 2);
+        if (in_array($mg_et[0], array('SAIC_PASSWORD', 'MQTT_PASSWORD'), true)) {
+            $mg_ez = $mg_et[0] . '=' . sprintf(mg_t('GW.MASKIERT'), strlen(isset($mg_et[1]) ? $mg_et[1] : ''));
+        }
+        $mg_envzeilen[] = $mg_ez;
+    }
+}
+?>
+<div class="sm-log"><?= mg_e(mg_t('GW.F_BILD') . ' ' . MG_GW_BILD . "\n"
+    . mg_t('GW.F_NAME') . ' ' . mg_gw_name() . "\n"
+    . mg_t('GW.F_NETZ') . " host\n"
+    . mg_t('GW.F_NEUSTART') . " unless-stopped\n"
+    . mg_t('GW.F_LABELS') . ' de.loxberry.plugin.folder=' . $mg_p['plugin'] . ', de.loxberry.plugin.name=mgismart, de.loxberry.plugin.def=' . MG_GW_DEF . ', de.loxberry.plugin.brokerhash=' . mg_t('GW.F_HASH') . "\n"
+    . mg_t('GW.F_VARIABLEN') . "\n  "
+    . ($mg_envzeilen ? implode("\n  ", $mg_envzeilen) : $mg_env)) ?></div>
+</details>
+
 <div class="sm-step"><b><?= mg_e(mg_t('GW.S5_TITEL')) ?></b>
 <div class="sm-warnung"><?php echo mg_t('GW.S5_WARNUNG'); ?></div>
 <div class="sm-hilfe"><?php echo mg_t('GW.S5_HINWEIS'); ?></div>
@@ -1061,6 +1473,10 @@ if (class_exists('LBWeb', false)) {
 
 <!-- ================= Einbindung in Loxone ================= -->
 <div class="sm-seite<?= $mg_tab === 'tab-loxone' ? ' sm-active' : '' ?>" id="tab-loxone">
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-technik"></i> <?= mg_e(mg_t('LEGENDE.TECHNIK')) ?></span>
+<span><i class="sm-punkt sm-b-aktion"></i> <?= mg_e(mg_t('LEGENDE.AKTION')) ?></span>
+</div>
 <h2><?= mg_e(mg_t('LOX.H')) ?></h2>
 
 <div class="sm-step"><b><?= mg_e(mg_t('LOX.S1_TITEL')) ?></b><br><?php echo mg_t('LOX.S1'); ?></div>
@@ -1071,6 +1487,7 @@ if (class_exists('LBWeb', false)) {
 <tr><td><span class="sm-mono"><?= mg_e(trim((string) $mg_cfg['mqtt_praefix'], '/ ')) ?>/#</span></td><td><?= mg_e(mg_t('LOX.ABO_EIGEN')) ?></td></tr>
 <tr><td><span class="sm-mono"><?= mg_e($mg_cfg['prefix'] ?: 'saic') ?>/#</span></td><td><?= mg_e(mg_t('LOX.ABO_ROH')) ?></td></tr>
 </table>
+<div class="sm-warnung"><?php echo mg_t('LOX.ABO_ROH_WARNUNG'); ?></div>
 <?php
 /* Was hier steht, haengt von der Fassung des MQTT-Gateways ab - siehe
  * mg_mqtt_gateway_info(). Ein pauschaler Satz waere fuer eine der beiden
@@ -1160,10 +1577,6 @@ $mg_gwf = ($mg_gw === null) ? 0 : (int) $mg_gw['fassung'];
 
 <h2><?= mg_e(mg_t('LOX.H_VORLAGE')) ?></h2>
 <div class="sm-hinweis"><?php echo mg_t('LOX.VORLAGE_TEXT'); ?></div>
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-technik"></i> <?= mg_e(mg_t('LEGENDE.TECHNIK')) ?></span>
-<span><i class="sm-punkt sm-b-aktion"></i> <?= mg_e(mg_t('LEGENDE.AKTION')) ?></span>
-</div>
 <form action="index.php" method="post">
 <input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
 <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
@@ -1260,6 +1673,9 @@ foreach ($mg_bausteine as $mg_ix => $mg_b) { ?>
 
 <!-- ================= Ladungen ================= -->
 <div class="sm-seite<?= $mg_tab === 'tab-ladungen' ? ' sm-active' : '' ?>" id="tab-ladungen">
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-aktion"></i> <?= mg_e(mg_t('LEGENDE.AKTION')) ?></span>
+</div>
 <h2><?= mg_e(mg_t('LAD.H')) ?></h2>
 <div class="sm-hilfe"><?php echo mg_t('LAD.HILFE'); ?></div>
 <?php if (!$mg_ladungen) { ?>
@@ -1285,13 +1701,13 @@ foreach ($mg_bausteine as $mg_ix => $mg_b) { ?>
 </table>
 </div>
 <?php } ?>
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-aktion"></i> <?= mg_e(mg_t('LEGENDE.AKTION')) ?></span>
-</div>
 <form action="index.php" method="post">
 <input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
 <input data-role="none" type="hidden" name="activetab" value="tab-ladungen">
 <input data-role="none" type="hidden" name="clearladungen" value="1">
+<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
+<input data-role="none" type="checkbox" name="bestaetigt" value="1">
+<?= mg_e(mg_t('BESTAETIGEN.LADUNGEN')) ?></label>
 <div class="sm-knopfreihe">
 	<button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= mg_e(mg_t('KNOPF.LADUNGEN_LEEREN')) ?></button>
 </div>
@@ -1300,6 +1716,24 @@ foreach ($mg_bausteine as $mg_ix => $mg_b) { ?>
 
 <!-- ================= Test ================= -->
 <div class="sm-seite<?= $mg_tab === 'tab-test' ? ' sm-active' : '' ?>" id="tab-test">
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-lesen"></i> <?= mg_e(mg_t('LEGENDE.LESEN')) ?></span>
+<span><i class="sm-punkt sm-b-technik"></i> <?= mg_e(mg_t('LEGENDE.TECHNIK')) ?></span>
+<span><i class="sm-punkt sm-b-aktion"></i> <?= mg_e(mg_t('LEGENDE.AKTION')) ?></span>
+</div>
+<?php
+/* Bauliste G9: steht eine Zeile der Gateway-Ampel auf Rot, sagt es der
+ * Pruefungsreiter oben - mit dem Weg dorthin, wo man es beheben kann. */
+$mg_ampel_rot = false;
+if ($mg_ampel !== null) {
+    foreach (array('container', 'anmeldung', 'werte') as $mg_ak) {
+        if (isset($mg_ampel[$mg_ak][0]) && $mg_ampel[$mg_ak][0] === 'rot') { $mg_ampel_rot = true; }
+    }
+}
+if ($mg_ampel_rot) { ?>
+<div class="sm-warnung"><?= mg_e(mg_t('TEST.AMPEL_ROT')) ?>
+<a href="index.php?form=gateway"><?= mg_e(mg_t('REITER.GATEWAY')) ?></a></div>
+<?php } ?>
 <h2><?= mg_e(mg_t('TEST.H_PRUEFUNG')) ?></h2>
 <div class="sm-hilfe"><?php echo mg_t('TEST.PRUEFUNG_HILFE'); ?></div>
 <table class="sm-tbl">
@@ -1331,12 +1765,6 @@ foreach ($mg_bausteine as $mg_ix => $mg_b) { ?>
 	<div class="sm-kachel"><?= mg_e(mg_t('FELD.ZUHAUSE')) ?><b><?= mg_jn($mg_st['ZUHAUSE']) ?></b><span class="sm-hilfe"><?= mg_z($mg_st['ENTFERNUNG'], ' km') ?></span></div>
 	<div class="sm-kachel"><?= mg_e(mg_t('FELD.ERREICHBAR')) ?><b><?= mg_jn($mg_st['ERREICHBAR']) ?></b><span class="sm-hilfe"><?= mg_z($mg_st['FZALTER'], ' min') ?></span></div>
 	<div class="sm-kachel"><?= mg_e(mg_t('FELD.ALTER')) ?><b><?= mg_z($mg_st['ALTER'], ' min') ?></b><span class="sm-hilfe"><?= (int) $mg_st['THEMEN'] ?></span></div>
-</div>
-
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-lesen"></i> <?= mg_e(mg_t('LEGENDE.LESEN')) ?></span>
-<span><i class="sm-punkt sm-b-technik"></i> <?= mg_e(mg_t('LEGENDE.TECHNIK')) ?></span>
-<span><i class="sm-punkt sm-b-aktion"></i> <?= mg_e(mg_t('LEGENDE.AKTION')) ?></span>
 </div>
 
 <h3><?= mg_e(mg_t('TEST.H_ANSEHEN')) ?></h3>
@@ -1411,6 +1839,9 @@ foreach ($mg_bausteine as $mg_ix => $mg_b) { ?>
 
 <!-- ================= Logdateien ================= -->
 <div class="sm-seite<?= $mg_tab === 'tab-log' ? ' sm-active' : '' ?>" id="tab-log">
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-aktion"></i> <?= mg_e(mg_t('LEGENDE.AKTION')) ?></span>
+</div>
 <h2><?= mg_e(mg_t('REITER.LOG')) ?></h2>
 <div class="sm-hilfe"><?php echo mg_t('LOG.HILFE'); ?><br>
 <span class="sm-mono"><?= mg_e($mg_logfile) ?></span></div>
@@ -1419,13 +1850,18 @@ foreach ($mg_bausteine as $mg_ix => $mg_b) { ?>
 <?php } else { ?>
 <div class="sm-hinweis"><?= mg_e(mg_t('LOG.LEER')) ?></div>
 <?php } ?>
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-aktion"></i> <?= mg_e(mg_t('LEGENDE.AKTION')) ?></span>
-</div>
+<?php if ($mg_cronerr) { ?>
+<h3><?= mg_e(mg_t('LOG.CRONERR')) ?></h3>
+<div class="sm-hilfe"><span class="sm-mono"><?= mg_e($mg_p['cronerr']) ?></span></div>
+<div class="sm-log"><?= mg_e(implode("\n", $mg_cronerr)) ?></div>
+<?php } ?>
 <form action="index.php" method="post">
 <input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
 <input data-role="none" type="hidden" name="activetab" value="tab-log">
 <input data-role="none" type="hidden" name="clearlog" value="1">
+<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
+<input data-role="none" type="checkbox" name="bestaetigt" value="1">
+<?= mg_e(mg_t('BESTAETIGEN.LOG')) ?></label>
 <div class="sm-knopfreihe">
 	<button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= mg_e(mg_t('KNOPF.LOG_LEEREN')) ?></button>
 </div>

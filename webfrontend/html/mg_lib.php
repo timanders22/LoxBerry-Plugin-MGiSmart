@@ -33,6 +33,27 @@ if (!defined('MG_LOXONE_EPOCHE')) {
     define('MG_LOXONE_EPOCHE', 1230768000);
 }
 
+/* Ab welchem Alter der Momentaufnahme (Minuten) OK auf 0 faellt: das
+ * Dreifache des Abruftakts (cron.01min, also 3 min) - Entscheidung 4 vom
+ * 29.09.2026. Dieselbe Grenze nutzen die Selbstpruefung und die Ampel im
+ * Reiter "Gateway einrichten"; sie steht deshalb genau hier und nirgends
+ * sonst. Bis 1.1.17 blieb OK=1 bei jedem Alter stehen. */
+if (!defined('MG_OK_ALTER_MIN')) {
+    define('MG_OK_ALTER_MIN', 3);
+}
+
+/* Der Gateway-Container, den das Plugin selbst anlegt (Entscheidung 7 vom
+ * 30.09.2026). Das Abbild steht in der README des Gateways
+ * (github.com/SAIC-iSmart-API/saic-python-mqtt-gateway, gelesen 30.09.2026).
+ * MG_GW_DEF ist die Fassung der Container-Beschreibung (Labels, Variablen,
+ * Netz): weicht sie am laufenden Container ab, zeigt die Ampel "veraltet". */
+if (!defined('MG_GW_BILD')) {
+    define('MG_GW_BILD', 'saicismartapi/saic-python-mqtt-gateway');
+}
+if (!defined('MG_GW_DEF')) {
+    define('MG_GW_DEF', '1');
+}
+
 
 /* Den LoxBerry-Wurzelordner ohne festen Systempfad bestimmen.
  *
@@ -122,6 +143,8 @@ function mg_paths()
             'config' => $home . '/config/plugins/' . $ordner . '/mg.json',
             'backup' => $home . '/config/plugins/' . $ordner . '.backup.json',
             'log' => $home . '/log/plugins/' . $ordner . '/mg.log',
+            // Fehlerausgabe des Minutentakts (cron/cron.01min, seit 1.1.18).
+            'cronerr' => $home . '/log/plugins/' . $ordner . '/cron.err',
             'datadir' => $home . '/data/plugins/' . $ordner,
             /* Je Ordner ein eigener Zwischenspeicher: bis 1.1.16 teilten
              * sich eine Zweitinstallation (mgismart01) und die erste
@@ -142,6 +165,7 @@ function mg_paths()
         'config' => $tmp . '/mg.json',
         'backup' => $tmp . '/mg.backup.json',
         'log' => $tmp . '/mg.log',
+        'cronerr' => $tmp . '/cron.err',
         'datadir' => $tmp . '/data',
         'tmp' => $tmp,
         'lbhome' => '',
@@ -244,6 +268,11 @@ function mg_vorgaben()
         'broker_pass' => '',
         'prefix' => 'saic',             // MQTT_TOPIC des Gateways
         'saic_user' => '',              // Benutzername (Teil des Topic-Pfads)
+        /* iSMART-Kennwort, seit 1.1.18: das Plugin legt den Gateway-Container
+         * selbst an und braucht es fuer "neu anlegen" (FRAGEN_7UHR Nr. 8).
+         * Es liegt wie broker_pass in dieser 0600-Datei, in der Zweitschrift
+         * und in der Sicherungsdatei - und wird nie ausgegeben. */
+        'saic_pass' => '',
         'vins' => array(),              // Fahrzeug-Kennungen, ab 1.1.0 mehrere
         'vin' => '',                    // Altbestand bis 1.0.8, wird uebernommen
 
@@ -494,8 +523,14 @@ function mg_config()
                 if (!is_dir(dirname($p['config']))) {
                     @mkdir(dirname($p['config']), 0775, true);
                 }
-                if (@copy($p['backup'], $p['config'])) {
-                    @chmod($p['config'], 0600);
+                /* Ueber mg_write_atomic(), nicht copy() + chmod(): copy() legt die
+                 * Datei mit den Rechten der umask an (0644/0664), schreibt Merkwort
+                 * und Broker-Passwort hinein und setzt 0600 erst danach - und es
+                 * kuerzt eine vorhandene Datei zuerst auf null (bis 1.1.17; Befund
+                 * C8/I4 des Durchgangs 29.09.2026). mg_write_atomic() setzt die
+                 * Rechte vor dem Inhalt und benennt erst den fertigen Stand um. */
+                $mg_heil = @file_get_contents($p['backup']);
+                if ($mg_heil !== false && mg_write_atomic($p['config'], $mg_heil, 0600)) {
                     mg_config_lage($leer ? 'aus der Zweitschrift' : 'kaputt');
                     if ($erstmals) {
                         mg_log('Die Konfiguration trug kein Merkwort und wurde aus der '
@@ -525,7 +560,13 @@ function mg_config()
     if (!is_array($cfg['vins'])) {
         $cfg['vins'] = array();
     }
-    $cfg['vins'] = array_values(array_filter(array_map('trim', $cfg['vins']), 'strlen'));
+    /* Typfest: nur Zeichenketten und Zahlen gehen durch trim(). Bis 1.1.17
+     * stand hier array_map('trim') unmittelbar - eine Sicherung mit
+     * "vins": [["x"]] warf unter PHP 8 "TypeError: trim(): Argument #1 must
+     * be of type string, array given", und zwar bei JEDEM Aufruf: Oberflaeche,
+     * Endpunkt und Takt waren tot (Befund C5/U3 vom 30.09.2026). */
+    $cfg['vins'] = array_values(array_filter(array_map('trim',
+        array_filter($cfg['vins'], 'is_scalar')), 'strlen'));
     if (!$cfg['vins'] && trim((string) $cfg['vin']) !== '') {
         $cfg['vins'] = array(trim((string) $cfg['vin']));
     }
@@ -784,8 +825,16 @@ function mg_log($msg)
         mg_write_atomic($f, implode("\n", $tail) . "\n");
     }
     $cfg = mg_config();
-    foreach (array($cfg['broker_pass'], $cfg['aktionstoken']) as $geheim) {
-        if ((string) $geheim !== '') {
+    /* Maskiert wird jedes Geheimnis, das das Plugin kennt: seit 1.1.18 auch
+     * das iSMART-Kennwort und das Broker-Kennwort des LoxBerry (general.json),
+     * das mg_broker_zugang() benutzt, wenn keine eigenen Angaben stehen. */
+    $mg_geheim = array($cfg['broker_pass'], $cfg['aktionstoken'], $cfg['saic_pass']);
+    $mg_lb = mg_general_mqtt();
+    if ($mg_lb !== null) {
+        $mg_geheim[] = $mg_lb['pass'];
+    }
+    foreach ($mg_geheim as $geheim) {
+        if (is_scalar($geheim) && (string) $geheim !== '') {
             $msg = str_replace((string) $geheim, '********', $msg);
         }
     }
@@ -924,7 +973,106 @@ function mg_broker_optionsordner()
  */
 function mg_optionswert($v)
 {
-    return trim(str_replace(array("\r", "\n", "\t"), '', (string) $v));
+    return trim(str_replace(array("\r", "\n", "\t"), '', is_scalar($v) ? (string) $v : ''));
+}
+
+/**
+ * Der MQTT-Abschnitt der general.json des LoxBerry, feldweise gelesen.
+ *
+ * Rueckgabe null, wenn es keine Wurzel, keine lesbare Datei oder keinen
+ * Abschnitt Mqtt gibt - sonst array(host, port, user, pass). Beide
+ * Schreibweisen der Schluessel (Brokeruser/brokeruser), Bauart
+ * abfahrt_mqtt_behalten_liste() aus Abfahrts-Assistent 1.6.17. Das Kennwort
+ * wird nur zurueckgegeben, nie ausgegeben oder protokolliert.
+ */
+function mg_general_mqtt()
+{
+    $p = mg_paths();
+    if ($p['lbhome'] === '') {
+        return null;
+    }
+    $f = $p['lbhome'] . '/config/system/general.json';
+    if (!is_file($f)) {
+        return null;
+    }
+    $g = json_decode((string) @file_get_contents($f), true);
+    if (!is_array($g)) {
+        return null;
+    }
+    $m = null;
+    if (isset($g['Mqtt']) && is_array($g['Mqtt'])) {
+        $m = $g['Mqtt'];
+    } elseif (isset($g['mqtt']) && is_array($g['mqtt'])) {
+        $m = $g['mqtt'];
+    }
+    if ($m === null) {
+        return null;
+    }
+    $hol = function ($gross, $klein) use ($m) {
+        $w = isset($m[$gross]) ? $m[$gross] : (isset($m[$klein]) ? $m[$klein] : '');
+        return is_scalar($w) ? (string) $w : '';
+    };
+    $host = mg_optionswert($hol('Brokerhost', 'brokerhost'));
+    $port = (int) $hol('Brokerport', 'brokerport');
+    return array(
+        'host' => $host !== '' ? $host : '127.0.0.1',
+        'port' => ($port > 0 && $port < 65536) ? $port : 1883,
+        'user' => mg_optionswert($hol('Brokeruser', 'brokeruser')),
+        'pass' => mg_optionswert($hol('Brokerpass', 'brokerpass')),
+    );
+}
+
+/**
+ * Mit welchen Daten meldet sich das Plugin beim Broker an?
+ *
+ * Entscheidung 7 vom 30.09.2026 (Befund C1/M1): ohne eigene Angaben nimmt
+ * das Plugin die Broker-Daten des LoxBerry. Am Geraet stand bis 1.1.17 ein
+ * leerer broker_user in mg.json, der Broker des LoxBerry verlangt eine
+ * Anmeldung, und mosquitto_sub endete mit rc 5 "not authorised" - es kam nie
+ * ein Wert an, obwohl der LoxBerry die Zugangsdaten die ganze Zeit kannte.
+ *
+ * "Eigene Angaben" heisst: broker_user ist gesetzt (der Haken im Reiter MQTT
+ * setzt oder leert ihn). Dann gelten Host, Port, Benutzer und Kennwort aus
+ * mg.json; sonst alle vier aus general.json -> Mqtt.
+ *
+ * Rueckgabe array(host, port, user, pass, quelle) mit quelle
+ * 'eigen' | 'loxberry' | 'keine' (general.json ohne Mqtt: Host und Port aus
+ * mg.json, ohne Anmeldung). Speist die Optionsdatei von mosquitto_sub/_pub,
+ * die Aufrufzeile, die Rueckfrage beim Broker und den Gateway-Container.
+ */
+/** Zeigt die Adresse auf diesen LoxBerry? Leer zaehlt als lokal. */
+function mg_broker_host_lokal($host)
+{
+    $h = strtolower(trim((string) $host));
+    return in_array($h, array('', '127.0.0.1', 'localhost', '::1', '[::1]'), true);
+}
+
+function mg_broker_zugang($cfg = null)
+{
+    if ($cfg === null) {
+        $cfg = mg_config();
+    }
+    $u = mg_optionswert($cfg['broker_user']);
+    $host = mg_optionswert($cfg['broker_host']);
+    $port = is_numeric($cfg['broker_port']) ? (int) $cfg['broker_port'] : 1883;
+    /* Eigene Angaben gelten, wenn ein Benutzer eingetragen ist ODER die
+     * Adresse auf einen anderen Rechner zeigt (Nacharbeit 30.09., N2): so
+     * bleibt ein anonymer Broker anderswo einstellbar, ohne neuen Schluessel.
+     * Nur ohne beides greift der Rueckfall auf general.json. */
+    $fremd = !mg_broker_host_lokal($host);
+    if ($host === '') { $host = '127.0.0.1'; }
+    if ($port <= 0 || $port > 65535) { $port = 1883; }
+    if ($u !== '' || $fremd) {
+        return array('host' => $host, 'port' => $port, 'user' => $u,
+                     'pass' => mg_optionswert($cfg['broker_pass']), 'quelle' => 'eigen');
+    }
+    $g = mg_general_mqtt();
+    if ($g === null) {
+        return array('host' => $host, 'port' => $port, 'user' => '', 'pass' => '',
+                     'quelle' => 'keine');
+    }
+    $g['quelle'] = 'loxberry';
+    return $g;
 }
 
 /**
@@ -941,10 +1089,10 @@ function mg_broker_optionsdatei($erzwingen = false)
     }
     @chmod($ordner, 0700);
 
-    $cfg = mg_config();
+    $zugang = mg_broker_zugang();
     $zeilen = '';
-    $u = mg_optionswert($cfg['broker_user']);
-    $pw = mg_optionswert($cfg['broker_pass']);
+    $u = $zugang['user'];
+    $pw = $zugang['pass'];
     if ($u !== '') {
         $zeilen .= '-u ' . $u . "\n";
     }
@@ -952,10 +1100,17 @@ function mg_broker_optionsdatei($erzwingen = false)
         $zeilen .= '-P ' . $pw . "\n";
     }
 
+    /* Neu geschrieben wird auch, wenn die general.json juenger ist: die
+     * Zugangsdaten koennen seit 1.1.18 aus ihr stammen, und nach einem neuen
+     * Broker-Kennwort im LoxBerry bliebe sonst das alte in der Optionsdatei
+     * stehen (Befund C1/M1, :957-958 in 1.1.17 verglich nur mit mg.json). */
+    $gen = $p['lbhome'] !== '' ? $p['lbhome'] . '/config/system/general.json' : '';
+    clearstatcache();
     foreach (array('mosquitto_sub', 'mosquitto_pub') as $name) {
         $datei = $ordner . '/' . $name;
         if (!$erzwingen && is_file($datei) && is_file($p['config'])
-            && filemtime($datei) >= filemtime($p['config'])) {
+            && filemtime($datei) >= filemtime($p['config'])
+            && ($gen === '' || !is_file($gen) || filemtime($datei) >= filemtime($gen))) {
             continue;
         }
         // Auch wenn nichts drinsteht, wird die Datei geschrieben (leer) -
@@ -976,9 +1131,9 @@ function mg_broker_optionsdatei($erzwingen = false)
 /** Der Teil der Aufrufzeile, der oeffentlich sein darf: Rechner und Port. */
 function mg_broker_args()
 {
-    $cfg = mg_config();
-    return ' -h ' . escapeshellarg((string) $cfg['broker_host'])
-         . ' -p ' . (int) $cfg['broker_port'];
+    $z = mg_broker_zugang();
+    return ' -h ' . escapeshellarg((string) $z['host'])
+         . ' -p ' . (int) $z['port'];
 }
 
 /** Vorspann fuer den Aufruf: setzt XDG_CONFIG_HOME auf den Optionsordner. */
@@ -1001,21 +1156,88 @@ function mg_sub($themen, $sekunden)
     foreach ((array) $themen as $thema) {
         $t .= ' -t ' . escapeshellarg((string) $thema);
     }
+    /* Die Fehlerausgabe geht in eine EIGENE Datei (Befund C2/M2). Bis 1.1.17
+     * stand hier "2>&1", und jede Zeile mit einem Leerzeichen galt als
+     * "Thema Wert": aus "Connection error: Connection Refused: not
+     * authorised." wurde das Thema "Connection", das danach wegfiel - uebrig
+     * blieb die nackte Zahl "rc=5". Eine Fehlerzeile ist nie ein Thema. */
+    $p = mg_paths();
+    if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
+    $errdatei = $p['tmp'] . '/sub_fehler.' . getmypid() . '.' . mt_rand(1000, 9999) . '.txt';
     $cmd = mg_broker_umgebung() . 'mosquitto_sub' . mg_broker_args() . $t
-         . ' -v -W ' . max(1, min(15, (int) $sekunden)) . ' 2>&1';
+         . ' -v -W ' . max(1, min(15, (int) $sekunden)) . ' 2>' . escapeshellarg($errdatei);
     $out = array();
+    $rc = 0;
     @exec($cmd, $out, $rc);
-    $werte = array();
     $fehler = array();
+    if (is_file($errdatei)) {
+        foreach (preg_split('/\r?\n/', (string) @file_get_contents($errdatei)) as $fz) {
+            if (trim($fz) !== '') { $fehler[] = trim($fz); }
+        }
+        @unlink($errdatei);
+    }
+    $werte = array();
     foreach ($out as $zeile) {
         $pos = strpos($zeile, ' ');
         if ($pos === false) {
-            if (trim($zeile) !== '') { $fehler[] = trim($zeile); }
-            continue;
+            continue;   // ein Thema ohne Nutzlast traegt nichts
         }
         $werte[substr($zeile, 0, $pos)] = trim(substr($zeile, $pos + 1));
     }
-    return array($werte, $rc, implode(' ', array_slice($fehler, 0, 3)));
+    return array($werte, (int) $rc, implode(' ', array_slice($fehler, 0, 3)));
+}
+
+/**
+ * Der Rueckgabewert von mosquitto_sub als ganzer Satz - EIN Satzvorrat fuer
+ * die Meldung nach "Werte jetzt einlesen", die Zeile im Reiter Test und die
+ * Ampel im Reiter "Gateway einrichten" (Befund C2/M2).
+ *
+ * Belegt am echten Programm ist nur rc 5 (am Geraet 30.09.2026, "not
+ * authorised"). 4, 14 und 27 folgen mosquitto.h bzw. dem CONNACK-Code und
+ * sind am Geraet noch nachzumessen (BAUBERICHT, Anmerkungen).
+ *   5, 4  der Broker weist die Anmeldung ab
+ *   14    der Broker ist nicht erreichbar
+ *   27    Zeitablauf - angemeldet, aber unter <prefix>/ liegt nichts
+ *   sonst die Nummer und die Fehlerzeile des Programms
+ */
+function mg_sub_klartext($rc, $fehlertext = '', $cfg = null)
+{
+    if ($cfg === null) {
+        $cfg = mg_config();
+    }
+    $z = mg_broker_zugang($cfg);
+    $prefix = trim((string) $cfg['prefix']) !== '' ? trim((string) $cfg['prefix']) : 'saic';
+    $rc = (int) $rc;
+    if ($rc === 5 || $rc === 4) {
+        $woher = ($z['quelle'] === 'eigen') ? mg_t('RC.QUELLE_EIGEN')
+            : (($z['quelle'] === 'loxberry') ? sprintf(mg_t('RC.QUELLE_LOXBERRY'), $z['user'])
+                                              : mg_t('RC.QUELLE_KEINE'));
+        return sprintf(mg_t('RC.ABGEWIESEN'), $rc, $woher);
+    }
+    if ($rc === 14) {
+        return sprintf(mg_t('RC.NICHT_ERREICHBAR'), $z['host'], (int) $z['port']);
+    }
+    if ($rc === 27) {
+        return sprintf(mg_t('RC.LEER'), $prefix);
+    }
+    return sprintf(mg_t('RC.ANDERS'), $rc) . ($fehlertext !== '' ? ' ' . $fehlertext : '');
+}
+
+/** Die Lage des letzten Einlesens (fuer Reiter Test und Ampel, ohne Netz). */
+function mg_lesen_lage_datei()
+{
+    return mg_paths()['tmp'] . '/lesen_lage.json';
+}
+
+function mg_lesen_lage()
+{
+    $d = mg_json_lesen(mg_lesen_lage_datei());
+    return array(
+        'zeit' => isset($d['zeit']) ? (int) $d['zeit'] : 0,
+        'rc' => isset($d['rc']) ? (int) $d['rc'] : -1,
+        'ok' => !empty($d['ok']) ? 1 : 0,
+        'text' => isset($d['text']) ? (string) $d['text'] : '',
+    );
 }
 
 /**
@@ -1047,15 +1269,40 @@ function mg_snapshot($sekunden = 3)
             $werte[$topic] = $wert;
         }
     }
-    if (!$werte) {
-        return array(0, $fehler !== '' ? $fehler : 'keine Werte empfangen (rc=' . $rc . ')');
-    }
     $p = mg_paths();
+    if (!$werte) {
+        $text = mg_sub_klartext($rc, $fehler, $cfg);
+        mg_lesen_lage_merken($rc, 0, $text);
+        return array(0, $text);
+    }
     $alt = mg_raw();
+    /* Die Verwerfung ist BEGRENZT (Befund C4/M7). Bis 1.1.17 blieb ein
+     * dauerhaft kleinerer Stand fuer immer verworfen - ein entferntes zweites
+     * Fahrzeug oder ein neu aufgesetztes Gateway, und das Plugin las bis zum
+     * naechsten Update nie wieder ein. Jetzt gilt: dreimal hintereinander
+     * derselbe kleinere Stand, dann ist er der neue. Gezaehlt wird im
+     * Zwischenspeicher; ein vollstaendiger Stand setzt die Zaehlung zurueck. */
+    $vf = $p['tmp'] . '/verwurf.json';
     if ((int) $alt['anzahl'] > 4 && count($werte) * 2 < (int) $alt['anzahl']) {
-        mg_log('Momentaufnahme verworfen: nur ' . count($werte) . ' von zuletzt '
-            . (int) $alt['anzahl'] . ' Themen - alter Stand bleibt stehen.');
-        return array(0, 'unvollstaendig (' . count($werte) . ' von ' . (int) $alt['anzahl'] . ')');
+        $v = mg_json_lesen($vf);
+        $folge = (isset($v['anzahl'], $v['folge']) && (int) $v['anzahl'] === count($werte))
+            ? (int) $v['folge'] + 1 : 1;
+        if ($folge < 3) {
+            if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
+            mg_write_json($vf, array('anzahl' => count($werte), 'folge' => $folge));
+            mg_log_if_changed('verwurf', 'Momentaufnahme verworfen: nur ' . count($werte)
+                . ' von zuletzt ' . (int) $alt['anzahl'] . ' Themen - alter Stand bleibt stehen;'
+                . ' bleibt es dreimal hintereinander bei dieser Zahl, gilt der neue Stand.');
+            $text = 'unvollstaendig (' . count($werte) . ' von ' . (int) $alt['anzahl'] . ')';
+            mg_lesen_lage_merken($rc, 0, $text);
+            return array(0, $text);
+        }
+        mg_log('Momentaufnahme: dreimal hintereinander nur ' . count($werte) . ' von zuletzt '
+            . (int) $alt['anzahl'] . ' Themen - der neue Stand gilt ab jetzt.');
+    }
+    foreach (array($vf, $p['tmp'] . '/last_verwurf.txt') as $mg_weg) {
+        // die Zaehlung und die Meldebremse zuruecksetzen
+        if (is_file($mg_weg)) { @unlink($mg_weg); }
     }
     if (!is_dir($p['datadir'])) {
         @mkdir($p['datadir'], 0775, true);
@@ -1063,7 +1310,16 @@ function mg_snapshot($sekunden = 3)
     mg_write_json($p['datadir'] . '/werte.json', array(
         'zeit' => date('c'), 'anzahl' => count($werte), 'werte' => $werte,
     ));
+    mg_lesen_lage_merken($rc, 1, count($werte) . ' Themen');
     return array(1, count($werte) . ' Themen');
+}
+
+function mg_lesen_lage_merken($rc, $ok, $text)
+{
+    $p = mg_paths();
+    if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
+    mg_write_json(mg_lesen_lage_datei(), array('zeit' => time(), 'rc' => (int) $rc,
+        'ok' => (int) $ok, 'text' => (string) $text));
 }
 
 /** Rohwerte der letzten Momentaufnahme. */
@@ -1475,8 +1731,20 @@ function mg_state($nr = 1)
     $st['VOLL'] = ($ziel > 0 && $soc >= 0) ? ($soc >= $ziel ? 1 : 0) : -1;
     /* OK heisst "Fahrzeugdaten gueltig". Dazu gehoert seit 1.1.0 auch, dass
      * das Gateway das Fahrzeug ueberhaupt erreicht hat - ERREICHBAR=0 mit
-     * retained Werten von vorgestern ist kein gueltiger Datensatz. */
-    $st['OK'] = ($st['THEMEN'] > 0 && $soc >= 0 && (int) $st['ERREICHBAR'] !== 0) ? 1 : 0;
+     * retained Werten von vorgestern ist kein gueltiger Datensatz.
+     *
+     * Seit 1.1.18 zwei weitere Bedingungen:
+     *   - die Momentaufnahme ist hoechstens MG_OK_ALTER_MIN (3) Minuten alt
+     *     (Entscheidung 4 vom 29.09.2026, Befund C3). Bis 1.1.17 blieb OK=1
+     *     bei jedem Alter stehen: scheiterte das Einlesen, las Loxone
+     *     "Fahrzeugdaten gueltig" mit dem Stand von gestern - in den Zeilen
+     *     laden und ort sogar ohne ALTER daneben. ALTER selbst bleibt.
+     *   - der Letzte Wille des Gateways sagt nicht "offline" (Befund M4):
+     *     GATEWAY=0 heisst, der Container ist tot, und jeder Wert ist ein
+     *     stehengebliebener Retain. */
+    $st['OK'] = ($st['THEMEN'] > 0 && $soc >= 0 && (int) $st['ERREICHBAR'] !== 0
+                 && (int) $st['GATEWAY'] !== 0
+                 && $st['ALTER'] >= 0 && $st['ALTER'] <= MG_OK_ALTER_MIN) ? 1 : 0;
 
     $st['PUSH'] = empty($cfg['notify']['push']) ? 0 : 1;
     $st['PUSHAKTIV'] = mg_push_active($nr);
@@ -2368,6 +2636,55 @@ function mg_abfahrt_da()
         && is_file($p['lbhome'] . '/webfrontend/html/plugins/' . mg_abfahrt_ordner() . '/termin.php');
 }
 
+/**
+ * Eine Adresse holen: Rumpf und die LETZTE Statuszeile.
+ *
+ * Ueber fopen und stream_get_meta_data(), nicht ueber file_get_contents und
+ * die magische Variable $http_response_header: die meldet PHP 8.5 schon beim
+ * Uebersetzen als "Deprecated" - auch in einem Zweig, der nie laeuft
+ * (Befund C7/U15, 1.1.17 mg_lib.php:2416-2417; unter 8.5 mit angezeigten
+ * Fehlern begann damit jede Seite und jede Endpunktantwort mit zwei
+ * Hinweiszeilen). wrapper_data traegt dieselben Zeilen, in PHP 7.4 bis 8.5
+ * gleich; mit ignore_errors oeffnet fopen auch 4xx und 5xx. Scheitert fopen,
+ * gilt http_get_last_response_headers(), wo es sie gibt (ab 8.4). Bauart
+ * abfahrt_http_holen(), Abfahrts-Assistent 1.6.17.
+ *
+ * Rueckgabe array(rumpf|false, statuszeile) - '' wenn keine kam.
+ */
+function mg_http_holen($url, $sekunden)
+{
+    $ctx = stream_context_create(array('http' => array(
+        'timeout' => (float) $sekunden, 'user_agent' => 'LoxBerry MG iSmart',
+        'ignore_errors' => true, 'follow_location' => 0, 'max_redirects' => 1)));
+    $alt = ini_get('default_socket_timeout');
+    ini_set('default_socket_timeout', (string) (int) max(1, $sekunden));
+    $roh = false;
+    $koepfe = null;
+    set_error_handler(function () { return true; });
+    $fh = fopen($url, 'rb', false, $ctx);
+    restore_error_handler();
+    if ($fh !== false) {
+        $roh = stream_get_contents($fh);
+        $meta = stream_get_meta_data($fh);
+        fclose($fh);
+        if (isset($meta['wrapper_data']) && is_array($meta['wrapper_data'])) {
+            $koepfe = $meta['wrapper_data'];
+        }
+    } elseif (function_exists('http_get_last_response_headers')) {
+        $koepfe = http_get_last_response_headers();
+    }
+    ini_set('default_socket_timeout', (string) $alt);
+    $status = '';
+    if (is_array($koepfe)) {
+        foreach ($koepfe as $kopf) {
+            if (preg_match('#^HTTP/\S+\s+\d{3}#', (string) $kopf)) {
+                $status = (string) $kopf;
+            }
+        }
+    }
+    return array($roh, $status);
+}
+
 /** Der Port des LoxBerry-Webservers (general.json, Webserver.Port; sonst 80). */
 function mg_webport()
 {
@@ -2411,10 +2728,7 @@ function mg_abfahrt_lesen()
     $port = mg_webport();
     $url = 'http://127.0.0.1' . ($port === 80 ? '' : ':' . $port)
          . '/plugins/' . mg_abfahrt_ordner() . '/termin.php';
-    $roh = @file_get_contents($url, false, stream_context_create(array('http' => array(
-        'timeout' => 4, 'user_agent' => 'LoxBerry MG iSmart', 'ignore_errors' => true))));
-    $status = (isset($http_response_header) && is_array($http_response_header)
-               && isset($http_response_header[0])) ? (string) $http_response_header[0] : '';
+    list($roh, $status) = mg_http_holen($url, 4);
     if ($roh === false || !preg_match('#^HTTP/\S+\s+200\b#', $status)) {
         $aus['lage'] = 'unbekannt';
         $aus['grund'] = 'termin.php antwortet nicht' . ($status !== '' ? ' (' . $status . ')' : '');
@@ -2602,9 +2916,22 @@ function mg_mqtt_argumente($nr, $st)
         return array();
     }
     $basis = $praefix . '/' . (int) $nr . '/';
+    $retain = mg_mqtt_retain_liste();
     $aus = array();
     foreach (mg_mqtt_werte($nr, $st) as $name => $wert) {
-        $aus[$basis . $name] = str_replace(array("\r", "\n"), ' ', (string) $wert);
+        $w = str_replace(array("\r", "\n"), ' ', (string) $wert);
+        /* Entscheidung 5 vom 29.09.2026 (Befund M5): ein zurueckbehaltener
+         * Zustand ohne Aussage geht als "-" hinaus - nie leer (eine leere
+         * Nutzlast loescht nur, mg_mqtt_behalten() schickt sie deshalb
+         * fluechtig) und nie als stehenbleibender Altwert. Bis 1.1.17 blieb
+         * klima_text "on" zurueckbehalten stehen, waehrend klima schon -1
+         * sagte. Zahlen tragen fuer "nicht bekannt" weiter -1 (FRAGEN_7UHR
+         * Nr. 4); betroffen sind also die Textzustaende. Der Strich steht
+         * NACH dem Saeubern (Regeln/07). */
+        if (trim($w) === '' && isset($retain[$name])) {
+            $w = '-';
+        }
+        $aus[$basis . $name] = $w;
     }
     return $aus;
 }
@@ -2639,6 +2966,10 @@ function mg_mqtt_argumente($nr, $st)
  *   ac_strom, ac_spannung             Messwerte mit Zeitbezug
  *   km_tag, verbrauch_tag             Tageswerte - um Mitternacht falsch
  *   push_aktiv, push_test             Fenster, die mit der Uhr enden
+ *   batterie12v, reifen_vl/vr/hl/hr   Messwerte (seit 1.1.18, Entscheidung 3
+ *                       vom 29.09.2026, "ohne Rueckfrage entschieden"); ihre
+ *                       Altwerte raeumt mg_mqtt_altlast() einmal ab, der Merker
+ *                       entsteht erst aus der Antwort des Brokers
  *   die acht Textthemen, die regelmaessig leer werden (seit 1.1.12)
  * Gemessen am empfangenen Paket in WSL, Pruefung-MGiSmart-1.1.17, Faelle R1-R3.
  */
@@ -2648,10 +2979,10 @@ function mg_mqtt_retain_liste()
     if ($l === null) {
         $l = array_fill_keys(array(
             'soc', 'energie', 'ziel', 'reichweite', 'laedt', 'stecker',
-            'kilometerstand', 'batterie12v', 'verschlossen', 'kofferraum', 'voll',
+            'kilometerstand', 'verschlossen', 'kofferraum', 'voll',
             'push', 'laeuft', 'zuhause',
             'entfernung', 'km_seit_ladung', 'tueren_offen', 'fenster_offen',
-            'reifen_vl', 'reifen_vr', 'reifen_hl', 'reifen_hr', 'ladeart',
+            'ladeart',
             'kabel_verriegelt', 'stromgrenze', 'kapazitaet', 'verbrauch_seit_ladung',
             'fertig_um', 'batterieheizung', 'klima', 'klima_soll', 'heckscheibe',
             'frontscheibe', 'sitzheizung_l', 'sitzheizung_r', 'stecker_fahrzeug',
@@ -2714,7 +3045,10 @@ function mg_mqtt_altlast_liste()
  */
 function mg_mqtt_rueckfrage(array $filter)
 {
-    $aus = array('lage' => 'unbekannt', 'grund' => '', 'behalten' => array());
+    /* 'connack' (seit 1.1.18): -1 = keine Antwort auf die Anmeldung, sonst der
+     * Rueckgabecode - die Zeile "Nimmt der Broker die Anmeldung an?" im Reiter
+     * Test braucht ihn als Zahl, nicht als Satz. */
+    $aus = array('lage' => 'unbekannt', 'grund' => '', 'behalten' => array(), 'connack' => -1);
     $soll = array();
     foreach ($filter as $f) {
         if ((string) $f !== '') { $soll[(string) $f] = true; }
@@ -2723,13 +3057,14 @@ function mg_mqtt_rueckfrage(array $filter)
         $aus['lage'] = 'ok';
         return $aus;
     }
-    $cfg = mg_config();
-    $host = trim((string) $cfg['broker_host']);
+    // Dieselben Zugangsdaten wie mosquitto_sub/_pub (mg_broker_zugang(), 1.1.18).
+    $zugang = mg_broker_zugang();
+    $host = trim((string) $zugang['host']);
     if ($host === '' || $host === 'localhost') { $host = '127.0.0.1'; }
-    $port = (int) $cfg['broker_port'];
+    $port = (int) $zugang['port'];
     if ($port <= 0 || $port > 65535) { $port = 1883; }
-    $benutzer = mg_optionswert($cfg['broker_user']);
-    $kennwort = mg_optionswert($cfg['broker_pass']);
+    $benutzer = $zugang['user'];
+    $kennwort = $zugang['pass'];
     $ziel = (strpos($host, ':') !== false) ? '[' . $host . ']' : $host;
     $errno = 0;
     $errstr = '';
@@ -2801,8 +3136,10 @@ function mg_mqtt_rueckfrage(array $filter)
     if ($ack === null || ($ack[0] >> 4) !== 2 || strlen($ack[1]) < 2) {
         $aus['grund'] = 'keine Antwort auf die Anmeldung';
     } elseif (ord($ack[1][1]) !== 0) {
+        $aus['connack'] = ord($ack[1][1]);
         $aus['grund'] = 'Anmeldung abgewiesen, CONNACK ' . ord($ack[1][1]);
     } else {
+        $aus['connack'] = 0;
         $sub = pack('n', 1);
         foreach (array_keys($soll) as $t) { $sub .= $zk($t) . chr(0); }
         @fwrite($s, chr(0x82) . $laenge(strlen($sub)) . $sub);
@@ -3192,6 +3529,154 @@ function mg_mqtt_probe($nr = 1)
 
 
 /* ==================================================================
+ * Lebenszeichen und Fehlerzweig (seit 1.1.18, Befund M3)
+ *
+ * Bis 1.1.17 ging bei einem unveraenderten Lauf NICHTS hinaus, und bei einem
+ * Lesefehler auch nicht: ok blieb im virtuellen Eingang auf der letzten 1,
+ * und ein toter Takt war von einem gesunden nicht zu unterscheiden
+ * (Regeln/07, "Lebenszeichen aus vier Themen", "bei Fehlschlag
+ * ausschliesslich ok=0").
+ *   <praefix>/status/ts       Unix-Sekunden des Laufs
+ *   <praefix>/status/zaehler  0...999, laeuft um
+ * Beide je Lauf, am Aenderungsfilter vorbei, NIE zurueckbehalten (sie
+ * stehen nicht in mg_mqtt_retain_liste()). Das vierte Thema aus Regeln/07,
+ * status/<dienst>, gibt es hier nicht: die Linie hat keinen Dauerlaeufer.
+ * ================================================================== */
+
+/** Die Lebenszeichen-Themen fuer die Tabelle im Reiter MQTT. */
+function mg_mqtt_status_themen()
+{
+    return array('status/ts' => 'MQTT.STATUS_TS', 'status/zaehler' => 'MQTT.STATUS_ZAEHLER');
+}
+
+/**
+ * Einige Themen in EINER Schale senden, jedes Argument angefuehrt.
+ * Zurueckbehalten wird nach mg_mqtt_behalten() - fuer die Themen dieses
+ * Abschnitts also nie. Rueckgabe: true, wenn jeder Aufruf mit 0 endete (der
+ * Broker hat die Nachricht angenommen - mehr sagt das nicht).
+ */
+function mg_mqtt_einzeln(array $paare)
+{
+    if (!$paare || !mg_has_mosquitto()) {
+        return false;
+    }
+    $zeilen = '';
+    foreach ($paare as $thema => $wert) {
+        $zeilen .= mg_mqtt_zeile((string) $thema, (string) $wert) . ' || exit 1' . "\n";
+    }
+    $p = mg_paths();
+    if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
+    $tmp = $p['tmp'] . '/einzeln.' . getmypid() . '.' . mt_rand(1000, 9999) . '.sh';
+    if (!mg_write_atomic($tmp, $zeilen, 0600)) {
+        return false;
+    }
+    $out = array();
+    $rc = 0;
+    @exec('sh ' . escapeshellarg($tmp) . ' 2>&1', $out, $rc);
+    if (is_file($tmp)) { @unlink($tmp); }
+    if ($rc !== 0) {
+        mg_log_if_changed('mqtt_einzeln', 'Lebenszeichen/ok nicht gesendet: '
+            . trim(implode(' ', array_slice($out, 0, 2))));
+        return false;
+    }
+    return true;
+}
+
+/** Das Lebenszeichen eines Laufs; der Zaehler liegt im Zwischenspeicher. */
+function mg_mqtt_lebenszeichen($cfg = null)
+{
+    if ($cfg === null) {
+        $cfg = mg_config();
+    }
+    $praefix = trim((string) $cfg['mqtt_praefix'], '/ ');
+    if (empty($cfg['mqtt_ein']) || $praefix === '' || !mg_has_mosquitto()) {
+        return false;
+    }
+    $p = mg_paths();
+    $f = $p['tmp'] . '/lebenszeichen_zaehler';
+    $alt = is_file($f) ? trim((string) @file_get_contents($f)) : '';
+    $n = preg_match('/^[0-9]{1,3}$/', $alt) ? ((int) $alt + 1) % 1000 : 0;
+    if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
+    mg_write_atomic($f, (string) $n);
+    return mg_mqtt_einzeln(array(
+        $praefix . '/status/ts' => (string) time(),
+        $praefix . '/status/zaehler' => (string) $n,
+    ));
+}
+
+/**
+ * Der Fehlerzweig des Takts: je Fahrzeug ok=0, fluechtig. Die Zustaende
+ * bleiben unberuehrt - sie sind das Letzte, was wirklich gemessen wurde
+ * (Regeln/07, "Ueber MQTT geht bei einer Stoerung nur das Signal hinaus").
+ * Im Merker der Veroeffentlichung steht ok danach auf 0, damit der naechste
+ * gelungene Lauf die 1 wieder sendet - der Aenderungsfilter hielte sie sonst
+ * zurueck, und ok bliebe im Miniserver auf 0.
+ */
+function mg_mqtt_ok_null($cfg = null)
+{
+    if ($cfg === null) {
+        $cfg = mg_config();
+    }
+    $praefix = trim((string) $cfg['mqtt_praefix'], '/ ');
+    if (empty($cfg['mqtt_ein']) || $praefix === '' || !mg_has_mosquitto()) {
+        return false;
+    }
+    $paare = array();
+    foreach (mg_fahrzeuge($cfg) as $nr => $fz) {
+        $paare[$praefix . '/' . (int) $nr . '/ok'] = '0';
+    }
+    if (!$paare || !mg_mqtt_einzeln($paare)) {
+        return false;
+    }
+    $p = mg_paths();
+    foreach (mg_fahrzeuge($cfg) as $nr => $fz) {
+        $merk = $p['tmp'] . '/veroeffentlicht' . (int) $nr . '.json';
+        $alt = mg_json_lesen($merk);
+        $thema = $praefix . '/' . (int) $nr . '/ok';
+        if (isset($alt['werte']) && is_array($alt['werte']) && isset($alt['werte'][$thema])) {
+            $alt['werte'][$thema] = '0';
+            mg_write_json($merk, $alt, 0600);
+        }
+    }
+    return true;
+}
+
+/**
+ * Die Abo-Datei des MQTT-Gateways: config/plugins/<ordner>/mqtt_subscriptions.cfg
+ * (seit 1.1.18, Befund M8; Bauart eb_abo_datei() aus Einspeisebremse 0.9.28,
+ * abfahrt_abo_datei() aus Abfahrts-Assistent 1.6.17).
+ *
+ * Das Gateway (V1) liest sie selbst und abonniert jede Zeile (Regeln/07, am
+ * Geraet belegt 13.09.2026). Das Archiv bringt sie mit dem Vorgabepraefix mg/#
+ * mit; das Praefix ist einstellbar, deshalb fuehrt der Reiter MQTT sie beim
+ * Speichern nach und der Minutentakt ebenso (ein Update legt die Datei des
+ * Archivs zurueck) - geschrieben wird nur, wenn sie abweicht, mit
+ * Protokollzeile. Rueckgabe: array(Pfad, traegt das Abo).
+ */
+function mg_abo_datei($praefix, $schreiben = false)
+{
+    $p = mg_paths();
+    $dir = dirname($p['config']);
+    $pfad = $dir . '/mqtt_subscriptions.cfg';
+    $soll = trim((string) $praefix, '/ ') . '/#';
+    if ($p['lbhome'] === '' || $soll === '/#') {
+        return array($pfad, false);
+    }
+    $roh = is_readable($pfad) ? (string) @file_get_contents($pfad) : '';
+    $da = in_array($soll, array_map('trim', preg_split('/\r?\n/', $roh)), true);
+    if ($schreiben && $roh !== $soll . "\n" && is_dir($dir)) {
+        if (mg_write_atomic($pfad, $soll . "\n", 0644)) {
+            mg_log('MQTT: Gateway-Abo nachgefuehrt: ' . $soll . ' (mqtt_subscriptions.cfg)');
+            $da = true;
+        } else {
+            mg_log_if_changed('abo_datei', 'MQTT: ' . $pfad . ' liess sich nicht schreiben - das'
+                . ' Gateway (V1) abonniert ' . $soll . ' dann nicht von selbst.');
+        }
+    }
+    return array($pfad, $da);
+}
+
+/* ==================================================================
  * Verwaiste Themen aus 1.1.0 bis 1.1.2 aufraeumen
  *
  * Die kaputte Veroeffentlichung jener Fassungen hat unter dem eigenen Praefix
@@ -3341,12 +3826,19 @@ function mg_mqtt_verwaiste_loeschen($themen)
  * und das wird so gesagt. Die Themen des SAIC-Gateways (<prefix>/...) bleiben
  * unberuehrt; kollidieren beide Praefixe, wird gar nichts geloescht.
  * Rueckgabe array(rc, zeilen) - rc 0 in Ordnung, 1 Warnung.
+ *
+ * $praefix (seit 1.1.18, Befund M6): ein ANDERES eigenes Praefix als das
+ * eingestellte - der Reiter MQTT raeumt damit beim Wechsel des Praefixes und
+ * beim Ausschalten die Themen unter dem ALTEN ab. Bis 1.1.17 blieben dort 41
+ * zurueckbehaltene Zustaende fuer immer liegen. Dieselbe Logik wie bei der
+ * Deinstallation: Broker fragen, nur Themen dieses Plugins, Kollisionsschutz
+ * gegen das Gateway-Praefix, nachlesen, Ergebnis melden.
  */
-function mg_mqtt_leeren()
+function mg_mqtt_leeren($praefix = null)
 {
     $z = array();
     $cfg = mg_config();
-    $praefix = trim((string) $cfg['mqtt_praefix'], '/ ');
+    $praefix = trim((string) ($praefix === null ? $cfg['mqtt_praefix'] : $praefix), '/ ');
     if ($praefix === '' || strpbrk($praefix, '#+') !== false) {
         $z[] = '<INFO> Kein eigenes MQTT-Praefix eingestellt - im Broker ist nichts abzuraeumen.';
         return array(0, $z);
@@ -3432,6 +3924,113 @@ function mg_mqtt_leeren()
     return array(0, $z);
 }
 
+/**
+ * Die Deinstallation, zweiter Teil (seit 1.1.18, Bauliste G7 Schritt 5): die
+ * zurueckbehaltenen Themen des GATEWAYS unter <prefix>/ leeren - aufgerufen
+ * von uninstall/uninstall ueber bin/cron.php --gateway-leeren, und NUR, wenn
+ * dort zuvor ein Container mit den eigenen Labels entfernt wurde. Einen
+ * handbetriebenen Gateway fasst das Skript nicht an, dessen Themen also auch
+ * nicht.
+ *
+ * Welche Themen es sind, weiss nur der Broker - blind wird hier nichts
+ * geleert. Nicht geleert wird ausserdem,
+ *  - wenn das eigene Praefix mit dem Gateway-Praefix kollidiert (das raeumt
+ *    mg_mqtt_leeren() nach seinen Regeln),
+ *  - wenn eine zweite Installation dieses Plugins (ein anderer Ordner unter
+ *    config/plugins mit einer mg.json) dasselbe Gateway-Praefix nutzt - ihr
+ *    Gateway schreibt unter denselben Baum.
+ * Rueckgabe array(rc, zeilen) - rc 0 in Ordnung, 1 Warnung.
+ */
+function mg_gateway_themen_leeren()
+{
+    $z = array();
+    $cfg = mg_config();
+    $gw = trim((string) $cfg['prefix'], '/ ');
+    if ($gw === '') {
+        $gw = 'saic';
+    }
+    if (strpbrk($gw, '#+') !== false) {
+        $z[] = '<WARNING> Das Gateway-Praefix enthaelt # oder + - im Broker wurde nichts geleert.';
+        return array(1, $z);
+    }
+    $eigen = trim((string) $cfg['mqtt_praefix'], '/ ');
+    if ($eigen !== '' && ($eigen === $gw || strncmp($eigen, $gw . '/', strlen($gw) + 1) === 0
+            || strncmp($gw, $eigen . '/', strlen($eigen) + 1) === 0)) {
+        $z[] = '<WARNING> Gateway-Praefix und eigenes Praefix kollidieren (' . $gw . ') - die Themen'
+            . ' des Gateways wurden nicht geleert.';
+        return array(1, $z);
+    }
+    $p = mg_paths();
+    foreach (glob($p['lbhome'] . '/config/plugins/*/mg.json') ?: array() as $f) {
+        if (basename(dirname($f)) === $p['plugin']) {
+            continue;
+        }
+        $d = json_decode((string) @file_get_contents($f), true);
+        $ap = (is_array($d) && isset($d['prefix']) && is_string($d['prefix'])) ? trim($d['prefix'], '/ ') : '';
+        if ($ap === '') {
+            $ap = 'saic';
+        }
+        if ($ap === $gw) {
+            $z[] = '<INFO> Eine weitere Installation (' . basename(dirname($f)) . ') nutzt dasselbe'
+                . ' Gateway-Praefix ' . $gw . '/ - dessen Themen bleiben im Broker.';
+            return array(0, $z);
+        }
+    }
+    if (!mg_has_mosquitto()) {
+        $z[] = '<WARNING> mosquitto_pub fehlt - die zurueckbehaltenen Themen des Gateways unter '
+            . $gw . '/ bleiben im Broker.';
+        return array(1, $z);
+    }
+    $f = mg_mqtt_rueckfrage(array($gw . '/#'));
+    if ($f['lage'] !== 'ok') {
+        $z[] = '<WARNING> Der Broker liess sich nicht befragen (' . $f['grund'] . ') - die Themen des'
+            . ' Gateways unter ' . $gw . '/ wurden nicht geleert (blind geht es hier nicht).'
+            . ' Von Hand: mosquitto_sub -t \'' . $gw . '/#\' --retained-only';
+        return array(1, $z);
+    }
+    $ziel = array();
+    foreach (array_keys($f['behalten']) as $t) {
+        if (strncmp((string) $t, $gw . '/', strlen($gw) + 1) === 0) {
+            $ziel[] = (string) $t;
+        }
+    }
+    if (!$ziel) {
+        $z[] = '<OK> Unter ' . $gw . '/ liegt nichts zurueckbehalten im Broker (vom Broker bestaetigt).';
+        return array(0, $z);
+    }
+    $zeilen = '';
+    foreach ($ziel as $t) {
+        $zeilen .= mg_broker_umgebung() . 'mosquitto_pub' . mg_broker_args()
+                 . ' -r -t ' . escapeshellarg($t) . " -m '' || echo MGFEHL\n";
+    }
+    if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
+    $datei = $p['tmp'] . '/gwleeren.' . getmypid() . '.sh';
+    if (!mg_write_atomic($datei, $zeilen, 0600)) {
+        $z[] = '<WARNING> Die Befehlsdatei liess sich nicht schreiben - die Themen des Gateways'
+            . ' bleiben im Broker.';
+        return array(1, $z);
+    }
+    $out = array();
+    @exec('sh ' . escapeshellarg($datei) . ' 2>&1', $out, $rc);
+    @unlink($datei);
+    usleep(300000);
+    $g = mg_mqtt_rueckfrage($ziel);
+    if ($g['lage'] !== 'ok') {
+        $z[] = '<WARNING> ' . count($ziel) . ' Themen des Gateways leer gesendet; das Nachlesen gelang'
+            . ' nicht (' . $g['grund'] . ') - nicht nachpruefbar.';
+        return array(1, $z);
+    }
+    $rest = array_values(array_intersect($ziel, array_keys($g['behalten'])));
+    if ($rest) {
+        $z[] = '<WARNING> ' . count($rest) . ' von ' . count($ziel) . ' Themen des Gateways stehen'
+            . ' weiter im Broker: ' . implode(', ', array_slice($rest, 0, 10));
+        return array(1, $z);
+    }
+    $z[] = '<OK> ' . count($ziel) . ' zurueckbehaltene Themen des Gateways unter ' . $gw
+        . '/ geleert (vom Broker bestaetigt).';
+    return array(0, $z);
+}
+
 /** Hausstandard: Gateway-Autostart aus general.json. */
 function mg_mqtt_gateway_autostart()
 {
@@ -3473,13 +4072,705 @@ function mg_mqtt_gateway_info()
 }
 
 /* ==================================================================
+ * Der Gateway-Container - das Plugin legt ihn selbst an (seit 1.1.18)
+ *
+ * Entscheidung 7 vom 30.09.2026. Bis 1.1.17 bot der Reiter "Gateway
+ * einrichten" nur einen docker-Befehl zum Abtippen, und der trug so nicht:
+ * 127.0.0.1 ohne --network host zeigt im Container auf den Container selbst,
+ * die Broker-Anmeldung fehlte, SAIC_REST_URI zeigte auf gateway-sm-eu statt
+ * auf die Vorgabe des Gateways (gateway-mg-eu). Am Geraet gab es keinen
+ * Container.
+ *
+ * Grundsaetze:
+ *   - Nur der EIGENE Container wird angefasst: gefunden ueber das Label
+ *     de.loxberry.plugin.folder=<ordner> und gegengeprueft mit docker inspect
+ *     auf beide Labels (folder UND name). Nie nach dem Namen allein - ein von
+ *     Hand angelegter Container gleichen Namens bleibt unberuehrt.
+ *   - Jeder docker-Aufruf argumentweise (proc_open mit Liste, keine Schale)
+ *     und mit timeout.
+ *   - Kennwoerter nie auf eine Befehlszeile: sie gehen ueber eine
+ *     Umgebungsdatei (0600, umask 077), die nach docker run in jedem Fall
+ *     geloescht wird. docker inspect zeigt sie trotzdem, und wer in der
+ *     Gruppe docker ist, sieht sie - das sagt die Hilfe.
+ *   - Kein Takt und kein Haken ruft run, stop oder rm (G6). Das Anlegen
+ *     laeuft im Hintergrund (bin/gateway_vorgang.php), weil das Holen des
+ *     Abbilds Minuten dauern kann; Neustart und Entfernen laufen im Handler.
+ * ================================================================== */
+
+/** Der Name des eigenen Containers. */
+function mg_gw_name()
+{
+    return 'lb-' . mg_paths()['plugin'] . '-saic-gateway';
+}
+
+/** Pfad zum docker-Programm, oder ''. */
+function mg_docker_bin()
+{
+    static $pfad = null;
+    if ($pfad === null) {
+        $out = array();
+        @exec('command -v docker 2>/dev/null', $out);
+        $k = isset($out[0]) ? trim($out[0]) : '';
+        $pfad = ($k !== '' && is_file($k)) ? $k : '';
+    }
+    return $pfad;
+}
+
+/**
+ * docker argumentweise ausfuehren, begrenzt durch timeout.
+ * Rueckgabe array(rc, stdout, stderr); rc 124 heisst Zeitablauf, 127 docker
+ * fehlt. proc_open mit einer Liste gibt es seit PHP 7.4 - keine Schale, also
+ * kann kein Argument als Befehl gelesen werden.
+ */
+function mg_docker(array $args, $sekunden)
+{
+    $bin = mg_docker_bin();
+    if ($bin === '' || !function_exists('proc_open')) {
+        return array(127, '', 'docker fehlt');
+    }
+    $cmd = array('timeout', (string) max(1, (int) $sekunden), $bin);
+    foreach ($args as $a) {
+        $cmd[] = (string) $a;
+    }
+    $desk = array(0 => array('file', '/dev/null', 'r'), 1 => array('pipe', 'w'), 2 => array('pipe', 'w'));
+    $pipes = array();
+    $proc = @proc_open($cmd, $desk, $pipes);
+    if (!is_resource($proc)) {
+        return array(127, '', 'proc_open gescheitert');
+    }
+    stream_set_blocking($pipes[1], false);
+    stream_set_blocking($pipes[2], false);
+    $aus = array(1 => '', 2 => '');
+    $offen = array(1 => $pipes[1], 2 => $pipes[2]);
+    $runden = 0;
+    while ($offen && $runden < 100000) {
+        $runden++;
+        $lesen = array_values($offen);
+        $w = null;
+        $e = null;
+        if (@stream_select($lesen, $w, $e, 1) === false) {
+            break;
+        }
+        foreach ($offen as $n => $h) {
+            $t = fread($h, 65536);
+            if ($t !== false && $t !== '' && strlen($aus[$n]) < 1048576) {
+                $aus[$n] .= $t;
+            }
+            if (feof($h)) {
+                fclose($h);
+                unset($offen[$n]);
+            }
+        }
+    }
+    foreach ($offen as $h) {
+        fclose($h);
+    }
+    $rc = proc_close($proc);
+    return array((int) $rc, $aus[1], $aus[2]);
+}
+
+/**
+ * Ist Docker erreichbar? Rueckgabe array(lage, satz) mit lage
+ * ok | fehlt | kein_zugriff | dienst_aus | haengt | fehler.
+ * Bauart dk_zustand() aus Docker NG 1.3.9.
+ */
+function mg_docker_lage($sekunden = 10)
+{
+    if (mg_docker_bin() === '') {
+        return array('fehlt', mg_t('GW.DOCKER_FEHLT'));
+    }
+    list($rc, $out, $err) = mg_docker(array('info', '--format', '{{.ServerVersion}}'), $sekunden);
+    if ($rc === 0) {
+        return array('ok', sprintf(mg_t('GW.DOCKER_OK'), trim($out)));
+    }
+    if ($rc === 124) {
+        return array('haengt', sprintf(mg_t('GW.DOCKER_HAENGT'), (int) $sekunden));
+    }
+    $t = strtolower($err);
+    if (strpos($t, 'permission denied') !== false) {
+        return array('kein_zugriff', mg_t('GW.DOCKER_KEIN_ZUGRIFF'));
+    }
+    if (strpos($t, 'cannot connect') !== false || strpos($t, 'daemon running') !== false) {
+        return array('dienst_aus', mg_t('GW.DOCKER_DIENST_AUS'));
+    }
+    return array('fehler', sprintf(mg_t('GW.DOCKER_FEHLER'), $rc) . ' ' . mg_kuerzen(trim($err), 200));
+}
+
+/** docker inspect eines Containers (Kennung oder Name); null, wenn es ihn nicht gibt. */
+function mg_gw_inspect($ref, $sekunden = 20)
+{
+    list($rc, $out, ) = mg_docker(array('inspect', '--type', 'container', (string) $ref), $sekunden);
+    if ($rc !== 0) {
+        return null;
+    }
+    $d = json_decode($out, true);
+    return (is_array($d) && isset($d[0]) && is_array($d[0])) ? $d[0] : null;
+}
+
+/** Traegt dieser Container BEIDE eigenen Labels? */
+function mg_gw_ist_eigen($info)
+{
+    $l = (is_array($info) && isset($info['Config']['Labels']) && is_array($info['Config']['Labels']))
+        ? $info['Config']['Labels'] : array();
+    return isset($l['de.loxberry.plugin.folder'], $l['de.loxberry.plugin.name'])
+        && $l['de.loxberry.plugin.folder'] === mg_paths()['plugin']
+        && $l['de.loxberry.plugin.name'] === 'mgismart';
+}
+
+/**
+ * Die eigenen Container: per Label gesucht, per inspect gegengeprueft.
+ * Rueckgabe array(ok, liste) - ok false, wenn docker nicht zu fragen war.
+ */
+function mg_gw_eigene($sekunden = 20)
+{
+    list($rc, $out, ) = mg_docker(array('ps', '-a', '-q', '--no-trunc', '--filter',
+        'label=de.loxberry.plugin.folder=' . mg_paths()['plugin']), $sekunden);
+    if ($rc !== 0) {
+        return array(false, array());
+    }
+    $liste = array();
+    foreach (preg_split('/\s+/', trim($out)) as $id) {
+        if (!preg_match('/^[0-9a-f]{12,64}\z/', $id)) {
+            continue;
+        }
+        $info = mg_gw_inspect($id, $sekunden);
+        if ($info !== null && mg_gw_ist_eigen($info)) {
+            $liste[] = $info;
+        }
+    }
+    return array(true, $liste);
+}
+
+/** Kurzfassung des Zustands aus docker inspect. */
+function mg_gw_kurz($info)
+{
+    $s = isset($info['State']) && is_array($info['State']) ? $info['State'] : array();
+    $l = isset($info['Config']['Labels']) && is_array($info['Config']['Labels'])
+        ? $info['Config']['Labels'] : array();
+    $start = isset($s['StartedAt']) ? strtotime((string) $s['StartedAt']) : false;
+    return array(
+        'id' => isset($info['Id']) ? substr((string) $info['Id'], 0, 12) : '',
+        'id_voll' => isset($info['Id']) ? (string) $info['Id'] : '',
+        'laeuft' => !empty($s['Running']),
+        'status' => isset($s['Status']) ? (string) $s['Status'] : '',
+        'neustarts' => isset($info['RestartCount']) ? (int) $info['RestartCount'] : 0,
+        'seit' => ($start !== false && $start > 0) ? max(0, time() - $start) : -1,
+        'def' => isset($l['de.loxberry.plugin.def']) ? (string) $l['de.loxberry.plugin.def'] : '',
+        'brokerhash' => isset($l['de.loxberry.plugin.brokerhash'])
+            ? (string) $l['de.loxberry.plugin.brokerhash'] : '',
+    );
+}
+
+/** Der Fingerabdruck des Broker-Zugangs, der im Label des Containers steht (G4). */
+function mg_gw_brokerhash($zugang)
+{
+    return substr(hash('sha256', $zugang['host'] . "\n" . (int) $zugang['port'] . "\n"
+        . $zugang['user'] . "\n" . $zugang['pass']), 0, 12);
+}
+
+/**
+ * Die Umgebungsdatei des Containers bauen (Variablen laut README des
+ * Gateways, gelesen 30.09.2026). SAIC_REST_URI und SAIC_REGION werden
+ * NICHT gesetzt - es gilt die Vorgabe des Gateways (gateway-mg-eu, eu; G0).
+ * Rueckgabe array(ok, inhalt | grund).
+ */
+function mg_gw_env($cfg, $zugang)
+{
+    $user = is_string($cfg['saic_user']) ? $cfg['saic_user'] : '';
+    $pass = is_string($cfg['saic_pass']) ? $cfg['saic_pass'] : '';
+    if (trim($user) === '') {
+        return array(false, mg_t('GW.FEHLT_USER'));
+    }
+    if ($pass === '') {
+        return array(false, mg_t('GW.FEHLT_PASS'));
+    }
+    $prefix = trim((string) $cfg['prefix']) !== '' ? trim((string) $cfg['prefix']) : 'saic';
+    $host = ($zugang['host'] === 'localhost') ? '127.0.0.1' : $zugang['host'];
+    if (strpos($host, ':') !== false && $host[0] !== '[') {
+        $host = '[' . $host . ']';
+    }
+    $v = array(
+        'SAIC_USER' => $user,
+        'SAIC_PASSWORD' => $pass,
+        // --network host: 127.0.0.1 ist im Container der LoxBerry selbst.
+        'MQTT_URI' => 'tcp://' . $host . ':' . (int) $zugang['port'],
+        'MQTT_TOPIC' => $prefix,
+        'HA_DISCOVERY_ENABLED' => 'False',
+    );
+    if ($zugang['user'] !== '') {
+        $v['MQTT_USER'] = $zugang['user'];
+        $v['MQTT_PASSWORD'] = $zugang['pass'];
+    }
+    $kap = array();
+    $k = is_numeric($cfg['capacity']) ? (float) $cfg['capacity'] : 0;
+    foreach ($cfg['vins'] as $vin) {
+        if ($k > 0 && preg_match('/^[A-Za-z0-9]{6,32}\z/', (string) $vin)) {
+            $kap[] = $vin . '=' . rtrim(rtrim(number_format($k, 1, '.', ''), '0'), '.');
+        }
+    }
+    if ($kap) {
+        $v['BATTERY_CAPACITY_MAPPING'] = implode(',', $kap);
+    }
+    $zeilen = '';
+    foreach ($v as $name => $wert) {
+        // Eine Zeile je Variable: ein Zeilenumbruch im Wert ergaebe eine zweite.
+        if (preg_match('/[\r\n\x00]/', (string) $wert)) {
+            return array(false, sprintf(mg_t('GW.WERT_ZEILENUMBRUCH'), $name));
+        }
+        $zeilen .= $name . '=' . $wert . "\n";
+    }
+    return array(true, $zeilen);
+}
+
+/** Geheimnisse in einem Text unkenntlich machen (Protokoll, Fehlerausgabe). */
+function mg_gw_maskiert($text, $cfg = null)
+{
+    if ($cfg === null) {
+        $cfg = mg_config();
+    }
+    $geheim = array($cfg['saic_pass'], $cfg['broker_pass'], $cfg['aktionstoken']);
+    $g = mg_general_mqtt();
+    if ($g !== null) {
+        $geheim[] = $g['pass'];
+    }
+    foreach ($geheim as $s) {
+        if (is_scalar($s) && strlen((string) $s) >= 3) {
+            $text = str_replace((string) $s, '********', (string) $text);
+        }
+    }
+    return (string) $text;
+}
+
+/** Datei des Hintergrundvorgangs, und der Merker "Container einer frueheren Installation" (G8). */
+function mg_gw_vorgang_datei()
+{
+    return mg_paths()['datadir'] . '/gateway_vorgang.json';
+}
+
+/**
+ * Die Merkdatei "dieses Plugin hat einen Gateway-Container angelegt"
+ * (Nacharbeit 30.09., N1): config/plugins/<ordner>.gateway_angelegt, NEBEN
+ * dem Konfigordner wie die Zweitschrift - sie uebersteht den purge eines
+ * Upgrades. Inhalt: Kurzkennung und Zeit, Rechte 0600. uninstall liest nur,
+ * OB sie da ist: fehlt docker, warnt es dann (rc 1), sonst nur eine INFO.
+ * Kein Schluessel in mg.json - Sicherungen bleiben kompatibel.
+ */
+function mg_gw_merkdatei()
+{
+    $p = mg_paths();
+    return dirname($p['backup']) . '/' . $p['plugin'] . '.gateway_angelegt';
+}
+
+function mg_gw_frueher_datei()
+{
+    return mg_paths()['datadir'] . '.gateway_frueher';
+}
+
+function mg_gw_vorgang_schreiben(array $d)
+{
+    $p = mg_paths();
+    if (!is_dir($p['datadir'])) { @mkdir($p['datadir'], 0775, true); }
+    return mg_write_json(mg_gw_vorgang_datei(), $d, 0600);
+}
+
+/** Laeuft der Prozess $pid wirklich als bin/gateway_vorgang.php? (argumentweise) */
+function mg_gw_vorgang_prozess($pid)
+{
+    $pid = (int) $pid;
+    if ($pid <= 0 || !is_readable('/proc/' . $pid . '/cmdline')) {
+        return false;
+    }
+    $a = explode("\0", (string) @file_get_contents('/proc/' . $pid . '/cmdline'));
+    return isset($a[1]) && basename($a[1]) === 'gateway_vorgang.php'
+        && preg_match('#(^|/)php[0-9.]*$#', (string) $a[0]);
+}
+
+/**
+ * Der Stand des Hintergrundvorgangs. zustand: keiner | gestartet | laeuft |
+ * fertig | fehler | abgebrochen. "abgebrochen": die Datei sagt "laeuft",
+ * aber der Prozess ist fort - oder er ist nach 20 s nie angelaufen.
+ */
+function mg_gw_vorgang()
+{
+    $d = mg_json_lesen(mg_gw_vorgang_datei());
+    if (!isset($d['zustand'])) {
+        return array('zustand' => 'keiner');
+    }
+    $d += array('start' => 0, 'pid' => 0, 'meldung' => '', 'schritt' => '');
+    if ($d['zustand'] === 'laeuft' && !mg_gw_vorgang_prozess($d['pid'])) {
+        $d['zustand'] = 'abgebrochen';
+    }
+    if ($d['zustand'] === 'gestartet' && time() - (int) $d['start'] > 20) {
+        $d['zustand'] = 'abgebrochen';
+    }
+    return $d;
+}
+
+/** Das Programm des Hintergrundvorgangs. */
+function mg_gw_vorgang_programm()
+{
+    $p = mg_paths();
+    if ($p['lbhome'] !== '') {
+        return $p['lbhome'] . '/bin/plugins/' . $p['plugin'] . '/gateway_vorgang.php';
+    }
+    return dirname(dirname(__DIR__)) . '/bin/gateway_vorgang.php';
+}
+
+/**
+ * Das Anlegen im Hintergrund starten. Kein Warten im Seitenaufbau: die Seite
+ * zeigt danach "wird angelegt ... seit N s" und laedt sich neu, solange der
+ * Vorgang laeuft. Gemeldet wird erst, wenn der Vorgang nachweislich
+ * angelaufen ist (seine Prozessnummer steht in der Datei), nicht auf den
+ * Rueckgabewert der Schale - die meldet nur, dass sie abgezweigt hat.
+ * Rueckgabe array(ok, satz).
+ */
+function mg_gw_vorgang_starten()
+{
+    $v = mg_gw_vorgang();
+    if (in_array($v['zustand'], array('gestartet', 'laeuft'), true)) {
+        return array(false, mg_t('GW.VORGANG_LAEUFT_SCHON'));
+    }
+    $prog = mg_gw_vorgang_programm();
+    if (!is_file($prog) || !function_exists('proc_open')) {
+        return array(false, sprintf(mg_t('GW.VORGANG_FEHLT'), $prog));
+    }
+    if (!mg_gw_vorgang_schreiben(array('vorgang' => 'anlegen', 'zustand' => 'gestartet',
+            'start' => time(), 'pid' => 0, 'schritt' => '', 'meldung' => ''))) {
+        return array(false, mg_t('GW.VORGANG_DATEI'));
+    }
+    $desk = array(0 => array('file', '/dev/null', 'r'), 1 => array('file', '/dev/null', 'w'),
+                  2 => array('file', '/dev/null', 'w'));
+    $pipes = array();
+    // setsid loest den Vorgang von Apache; "&" laesst die Schale sofort enden.
+    $proc = @proc_open(array('sh', '-c', 'setsid "$0" "$@" </dev/null >/dev/null 2>&1 &',
+        'php', $prog, 'anlegen'), $desk, $pipes);
+    if (!is_resource($proc)) {
+        return array(false, mg_t('GW.VORGANG_START'));
+    }
+    proc_close($proc);
+    for ($i = 0; $i < 20; $i++) {
+        $v = mg_gw_vorgang();
+        if ($v['zustand'] !== 'gestartet') {
+            return array(true, mg_t('GW.VORGANG_GESTARTET'));
+        }
+        usleep(100000);
+    }
+    return array(true, mg_t('GW.VORGANG_GESTARTET'));
+}
+
+/**
+ * Den Container anlegen - vom Hintergrundvorgang gerufen.
+ * Rueckgabe array(ok, satz, kurzkennung).
+ */
+function mg_gw_anlegen()
+{
+    $cfg = mg_config();
+    list($lage, $satz) = mg_docker_lage();
+    if ($lage !== 'ok') {
+        return array(false, $satz, '');
+    }
+    $zugang = mg_broker_zugang($cfg);
+    list($ok, $env) = mg_gw_env($cfg, $zugang);
+    if (!$ok) {
+        return array(false, $env, '');
+    }
+    $name = mg_gw_name();
+    $da = mg_gw_inspect($name);
+    if ($da !== null) {
+        if (!mg_gw_ist_eigen($da)) {
+            // Namenskollision mit einem Container ohne das eigene Label: nichts anlegen.
+            return array(false, sprintf(mg_t('GW.NAME_BELEGT'), $name), '');
+        }
+        // "Neu anlegen": nur der eigene Container - anhalten, entfernen, anlegen.
+        mg_docker(array('stop', '-t', '20', (string) $da['Id']), 60);
+        mg_docker(array('rm', (string) $da['Id']), 30);
+        if (mg_gw_inspect((string) $da['Id']) !== null) {
+            return array(false, mg_t('GW.ALT_BLEIBT'), substr((string) $da['Id'], 0, 12));
+        }
+    }
+    $p = mg_paths();
+    if (!is_dir($p['datadir'])) { @mkdir($p['datadir'], 0775, true); }
+    $envdatei = $p['datadir'] . '/gateway.env';
+    $alt_umask = umask(077);
+    $rc = 1;
+    $err = '';
+    try {
+        if (!mg_write_atomic($envdatei, $env, 0600)) {
+            return array(false, mg_t('GW.ENV_DATEI'), '');
+        }
+        list($rc, , $err) = mg_docker(array('run', '-d', '--name', $name,
+            '--restart', 'unless-stopped', '--network', 'host',
+            '--label', 'de.loxberry.plugin.folder=' . $p['plugin'],
+            '--label', 'de.loxberry.plugin.name=mgismart',
+            '--label', 'de.loxberry.plugin.def=' . MG_GW_DEF,
+            '--label', 'de.loxberry.plugin.brokerhash=' . mg_gw_brokerhash($zugang),
+            '--env-file', $envdatei, MG_GW_BILD), 900);
+    } finally {
+        // Die Umgebungsdatei traegt beide Kennwoerter - fort, auch im Fehlerfall.
+        umask($alt_umask);
+        if (is_file($envdatei)) {
+            @unlink($envdatei);
+        }
+    }
+    if ($rc === 124) {
+        return array(false, mg_t('GW.RUN_ZEITABLAUF'), '');
+    }
+    if ($rc !== 0) {
+        return array(false, sprintf(mg_t('GW.RUN_FEHLER'), $rc) . ' '
+            . mg_kuerzen(mg_gw_maskiert(trim($err), $cfg), 300), '');
+    }
+    $neu = mg_gw_inspect($name);
+    if ($neu === null || !mg_gw_ist_eigen($neu)) {
+        return array(false, mg_t('GW.NICHT_DA'), '');
+    }
+    $k = mg_gw_kurz($neu);
+    if (is_file(mg_gw_frueher_datei())) {
+        @unlink(mg_gw_frueher_datei());
+    }
+    return array($k['laeuft'], sprintf(mg_t($k['laeuft'] ? 'GW.ANGELEGT' : 'GW.ANGELEGT_STEHT'),
+        $k['id'], $k['status']), $k['id']);
+}
+
+/** Den eigenen Container neu starten. Rueckgabe array(ok, satz). */
+function mg_gw_neustart()
+{
+    list($ok, $liste) = mg_gw_eigene();
+    if (!$ok) {
+        return array(false, mg_docker_lage()[1]);
+    }
+    if (!$liste) {
+        return array(false, mg_t('GW.KEIN_EIGENER'));
+    }
+    $saetze = array();
+    $alle = true;
+    foreach ($liste as $info) {
+        $k = mg_gw_kurz($info);
+        list($rc, , $err) = mg_docker(array('restart', '-t', '20', $k['id_voll']), 60);
+        $nach = mg_gw_inspect($k['id_voll']);
+        $laeuft = $nach !== null && mg_gw_kurz($nach)['laeuft'];
+        $alle = $alle && $rc === 0 && $laeuft;
+        $saetze[] = sprintf(mg_t($rc === 0 && $laeuft ? 'GW.NEU_GESTARTET' : 'GW.NEUSTART_FEHLER'),
+            $k['id'], $rc === 124 ? mg_t('GW.ZEITABLAUF') : mg_kuerzen(trim($err), 120));
+    }
+    return array($alle, implode(' ', $saetze));
+}
+
+/** Den eigenen Container entfernen. Rueckgabe array(ok, satz). */
+function mg_gw_entfernen()
+{
+    list($ok, $liste) = mg_gw_eigene();
+    if (!$ok) {
+        return array(false, mg_docker_lage()[1]);
+    }
+    if (!$liste) {
+        return array(false, mg_t('GW.KEIN_EIGENER'));
+    }
+    $saetze = array();
+    $alle = true;
+    foreach ($liste as $info) {
+        $k = mg_gw_kurz($info);
+        list($rc1, , ) = mg_docker(array('stop', '-t', '20', $k['id_voll']), 60);
+        list($rc2, , ) = mg_docker(array('rm', $k['id_voll']), 30);
+        list($rc3, $out, ) = mg_docker(array('ps', '-a', '-q', '--no-trunc', '--filter',
+            'id=' . $k['id_voll']), 20);
+        $weg = ($rc3 === 0 && trim($out) === '');
+        $alle = $alle && $weg;
+        $saetze[] = sprintf(mg_t($weg ? 'GW.ENTFERNT' : 'GW.ENTFERNEN_FEHLER'), $k['id'],
+            ($rc1 === 124 || $rc2 === 124) ? mg_t('GW.ZEITABLAUF') : '');
+    }
+    if ($alle && is_file(mg_gw_frueher_datei())) {
+        @unlink(mg_gw_frueher_datei());
+    }
+    // Die Merkdatei (N1) erst nach BESTAETIGTEM Entfernen aller eigenen.
+    if ($alle && is_file(mg_gw_merkdatei())) {
+        @unlink(mg_gw_merkdatei());
+    }
+    return array($alle, implode(' ', $saetze));
+}
+
+/** Die letzten 50 Zeilen des eigenen Containers, maskiert, ohne Farbcodes. */
+function mg_gw_protokoll()
+{
+    list($ok, $liste) = mg_gw_eigene();
+    if (!$ok) {
+        return array(false, mg_docker_lage()[1]);
+    }
+    if (!$liste) {
+        return array(false, mg_t('GW.KEIN_EIGENER'));
+    }
+    $k = mg_gw_kurz($liste[0]);
+    list($rc, $out, $err) = mg_docker(array('logs', '--tail', '50', $k['id_voll']), 20);
+    if ($rc !== 0) {
+        return array(false, sprintf(mg_t('GW.LOGS_FEHLER'), $rc));
+    }
+    // Das Gateway schreibt auf beide Kanaele; Farbcodes stoeren beim Lesen (Regeln/03).
+    $text = preg_replace('/\x1B\[[0-9;]*[A-Za-z]/', '', trim($out . "\n" . $err));
+    return array(true, mg_gw_maskiert($text));
+}
+
+/** Fahrzeug-Kennungen, die das Gateway meldet, aber noch nicht eingetragen sind. */
+function mg_gw_gefundene_vins($cfg = null)
+{
+    if ($cfg === null) {
+        $cfg = mg_config();
+    }
+    $user = trim((string) $cfg['saic_user']);
+    $prefix = trim((string) $cfg['prefix']) !== '' ? trim((string) $cfg['prefix']) : 'saic';
+    if ($user === '') {
+        return array();
+    }
+    $muster = '#^' . preg_quote($prefix . '/' . $user . '/vehicles/', '#') . '([A-Za-z0-9]{6,32})/#';
+    $gefunden = array();
+    foreach (array_keys(mg_raw()['werte']) as $t) {
+        if (preg_match($muster, (string) $t, $m) && !in_array($m[1], $cfg['vins'], true)) {
+            $gefunden[$m[1]] = true;
+        }
+    }
+    return array_keys($gefunden);
+}
+
+/**
+ * Die Ampel des Reiters "Gateway einrichten" (G1) und des Reiters Test (G9).
+ *
+ * $messen = false liefert die zuletzt gemessene Ampel (Zwischenspeicher, mit
+ * Messzeit) - kein docker-Aufruf im Seitenaufbau eines anderen Reiters.
+ * $messen = true fragt docker (kurze Zeitgrenzen) und liest die
+ * Momentaufnahme; $lesen = true liest vorher den Broker neu ("Zustand neu
+ * messen"). Farben: gruen, gelb, rot, grau (grau = nicht feststellbar).
+ * Protokollzeilen des Gateways zu Erfolg und Misserfolg der Anmeldung sind
+ * NICHT belegt - auf sie baut hier nichts.
+ */
+function mg_gw_ampel($messen = false, $lesen = false)
+{
+    $p = mg_paths();
+    $datei = $p['tmp'] . '/gw_ampel.json';
+    if (!$messen) {
+        $d = mg_json_lesen($datei);
+        return isset($d['zeit']) ? $d : null;
+    }
+    $cfg = mg_config();
+    if ($lesen) {
+        mg_snapshot(3);
+    }
+    list($lage, $lagesatz) = mg_docker_lage(5);
+    $a = array('zeit' => time(), 'docker' => $lage, 'docker_satz' => $lagesatz,
+               'container' => array('grau', $lagesatz), 'anmeldung' => array('grau', ''),
+               'werte' => array('grau', ''), 'laeuft' => 0, 'eigen' => 0, 'id' => '');
+    $k = null;
+    if ($lage === 'ok') {
+        list($ok, $liste) = mg_gw_eigene(10);
+        if (!$ok) {
+            $a['container'] = array('grau', mg_t('GW.A_DOCKER_STUMM'));
+        } elseif (!$liste) {
+            $fremd = mg_gw_inspect(mg_gw_name(), 10);
+            $a['container'] = ($fremd !== null)
+                ? array('rot', sprintf(mg_t('GW.NAME_BELEGT'), mg_gw_name()))
+                : array('rot', mg_t('GW.A_NICHT_ANGELEGT'));
+        } else {
+            $k = mg_gw_kurz($liste[0]);
+            $a['eigen'] = 1;
+            $a['id'] = $k['id'];
+            $a['laeuft'] = $k['laeuft'] ? 1 : 0;
+            if (!$k['laeuft']) {
+                $a['container'] = array('rot', sprintf(mg_t('GW.A_ANGEHALTEN'), $k['status']));
+            } elseif ($k['neustarts'] > 5) {
+                $a['container'] = array('rot', sprintf(mg_t('GW.A_SCHLEIFE'), $k['neustarts']));
+            } else {
+                $a['container'] = array('gruen', sprintf(mg_t('GW.A_LAEUFT'),
+                    mg_dauer_text($k['seit']), $k['neustarts']));
+            }
+            /* G4: weicht der Broker-Zugang oder die Beschreibung ab, zeigt die
+             * Ampel gelb - geaendert wird nichts selbsttaetig. */
+            if ($a['container'][0] !== 'rot' && ($k['def'] !== MG_GW_DEF
+                    || $k['brokerhash'] !== mg_gw_brokerhash(mg_broker_zugang($cfg)))) {
+                $a['container'] = array('gelb', mg_t('GW.A_VERALTET'));
+            }
+            // G8: ein Container, den eine fruehere Installation hinterlassen hat.
+            $frueher = is_file(mg_gw_frueher_datei())
+                ? trim((string) @file_get_contents(mg_gw_frueher_datei())) : '';
+            if ($frueher !== '' && strpos($k['id_voll'], $frueher) === 0) {
+                $a['container'] = array('gelb', mg_t('GW.A_FRUEHER'));
+            }
+        }
+    }
+    // Zeile 2: Anmeldung bei MG - am Broker abgelesen, nicht am Protokoll.
+    $roh = mg_raw();
+    $prefix = trim((string) $cfg['prefix']) !== '' ? trim((string) $cfg['prefix']) : 'saic';
+    $user = trim((string) $cfg['saic_user']);
+    $fz = 0;
+    if ($user !== '') {
+        $muster = '#^' . preg_quote($prefix . '/' . $user . '/vehicles/', '#') . '([^/]+)/#';
+        $vins = array();
+        foreach (array_keys($roh['werte']) as $t) {
+            if (preg_match($muster, (string) $t, $m)) { $vins[$m[1]] = true; }
+        }
+        $fz = count($vins);
+    }
+    $lwt = mg_bool_wert(mg_pick_abs($prefix . '/_internal/lwt'), -1);
+    if ($user === '') {
+        $a['anmeldung'] = array('grau', mg_t('GW.A_KEIN_USER'));
+    } elseif ($a['laeuft'] && $lwt === 0) {
+        $a['anmeldung'] = array('rot', mg_t('GW.A_LWT_OFFLINE'));
+    } elseif ($fz > 0) {
+        $a['anmeldung'] = array('gruen', sprintf(mg_t('GW.A_ANGEMELDET'), $user, $fz));
+    } elseif (!$a['laeuft']) {
+        $a['anmeldung'] = array('grau', mg_t('GW.A_KEIN_CONTAINER'));
+    } elseif ($k !== null && $k['seit'] >= 0 && $k['seit'] < 300) {
+        $a['anmeldung'] = array('grau', sprintf(mg_t('GW.A_WARTEN'), (int) $k['seit']));
+    } else {
+        $a['anmeldung'] = array('grau', sprintf(mg_t('GW.A_NICHTS'), $prefix . '/' . $user . '/vehicles/'));
+    }
+    // Zeile 3: Werte kommen - Alter der Momentaufnahme, Klartext des Einlesens.
+    $alter = $roh['zeit'] !== '' ? (int) round((time() - strtotime($roh['zeit'])) / 60) : -1;
+    $ll = mg_lesen_lage();
+    if ($alter >= 0 && $alter <= MG_OK_ALTER_MIN && (int) $roh['anzahl'] > 0) {
+        $a['werte'] = array('gruen', sprintf(mg_t('GW.A_WERTE'), $alter, (int) $roh['anzahl']));
+    } elseif ($ll['zeit'] > 0 && !$ll['ok'] && in_array($ll['rc'], array(4, 5, 14), true)) {
+        $a['werte'] = array('rot', $ll['text']);
+    } elseif ($alter < 0) {
+        $a['werte'] = array('rot', mg_t('GW.A_NIE') . ($ll['text'] !== '' ? ' ' . $ll['text'] : ''));
+    } else {
+        $a['werte'] = array('rot', sprintf(mg_t('GW.A_ALT'), $alter)
+            . ($ll['zeit'] > 0 && !$ll['ok'] && $ll['text'] !== '' ? ' ' . $ll['text'] : ''));
+    }
+    if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
+    mg_write_json($datei, $a);
+    return $a;
+}
+
+/** Eine Dauer in Sekunden fuer Menschen (Sekunde, Minute, Stunde, Tag). */
+function mg_dauer_text($s)
+{
+    $s = (int) $s;
+    if ($s < 0) {
+        return mg_t('WORT.UNBEKANNT');
+    }
+    if ($s < 120) {
+        return sprintf(mg_t('DAUER.S'), $s);
+    }
+    if ($s < 7200) {
+        return sprintf(mg_t('DAUER.M'), (int) round($s / 60));
+    }
+    if ($s < 172800) {
+        return sprintf(mg_t('DAUER.H'), (int) round($s / 3600));
+    }
+    return sprintf(mg_t('DAUER.T'), (int) round($s / 86400));
+}
+
+/* ==================================================================
  * Selbstpruefung - beantwortet OHNE Loxone, ob die Einrichtung traegt
  *
  * ok = 1 Haken, 0 Kreuz, 2 Strich ("nicht feststellbar"). Ein Strich ist
  * ausdruecklich KEIN Haken: was nicht gemessen werden konnte, sagt das.
  * ================================================================== */
 
-function mg_selbsttest()
+/**
+ * $live = true (nur wenn der Reiter Test serverseitig der offene ist, Regeln/04):
+ * die Zeilen, die das Netz oder docker fragen, messen jetzt - die Anmeldung
+ * beim Broker, der eigene Endpunkt, die Ampel. Sonst nennen sie den letzten
+ * gemessenen Stand oder einen Strich mit Grund.
+ */
+function mg_selbsttest($live = false)
 {
     $cfg = mg_config();
     $z = array();
@@ -3497,10 +4788,56 @@ function mg_selbsttest()
     $add('PRUEF.BENUTZER', trim((string) $cfg['saic_user']) !== '' ? 1 : 0,
         trim((string) $cfg['saic_user']));
 
+    /* Nimmt der Broker die Anmeldung des Plugins an? (seit 1.1.18, Befund
+     * U10/C2). Bis 1.1.17 zeigte der Reiter bei abgewiesener Anmeldung und
+     * bei fehlendem Container dieselben Kreuze, und die Meldung sagte nur
+     * "rc=5". Gemessen wird mit denselben Zugangsdaten wie mosquitto_sub
+     * (mg_broker_zugang()); ohne offenen Reiter Test gilt das letzte
+     * Einlesen des Takts. */
+    $prefix = trim((string) $cfg['prefix']) !== '' ? trim((string) $cfg['prefix']) : 'saic';
+    $angenommen = -1;       // -1 unbekannt, 0 abgewiesen, 1 angenommen
+    $lwt_live = null;
+    if ($live) {
+        $rf = mg_mqtt_rueckfrage(array($prefix . '/_internal/lwt'));
+        if ($rf['lage'] === 'ok' || $rf['connack'] === 0) {
+            $angenommen = 1;
+            $zug = mg_broker_zugang($cfg);
+            $add('PRUEF.ANMELDUNG', 1, sprintf(mg_t('RC.ANGENOMMEN'), mg_t($zug['quelle'] === 'eigen'
+                ? 'RC.QUELLE_EIGEN' : ($zug['quelle'] === 'loxberry' ? 'RC.QUELLE_LOXBERRY_KURZ'
+                                                                       : 'RC.QUELLE_KEINE'))));
+            if ($rf['lage'] === 'ok') {
+                $t = $prefix . '/_internal/lwt';
+                $lwt_live = isset($rf['behalten'][$t]) ? mg_bool_wert($rf['behalten'][$t], -1) : -1;
+            }
+        } elseif ($rf['connack'] > 0) {
+            $angenommen = 0;
+            $add('PRUEF.ANMELDUNG', 0, mg_sub_klartext($rf['connack'] === 4 ? 4 : 5, '', $cfg));
+        } elseif (strpos($rf['grund'], 'keine Verbindung') === 0) {
+            $angenommen = 0;
+            $add('PRUEF.ANMELDUNG', 0, mg_sub_klartext(14, '', $cfg));
+        } else {
+            $add('PRUEF.ANMELDUNG', 2, $rf['grund']);
+        }
+    } else {
+        $ll = mg_lesen_lage();
+        if ($ll['zeit'] <= 0) {
+            $add('PRUEF.ANMELDUNG', 2, mg_t('RC.NICHT_GEMESSEN'));
+        } elseif (in_array($ll['rc'], array(4, 5, 14), true) && !$ll['ok']) {
+            $angenommen = 0;
+            $add('PRUEF.ANMELDUNG', 0, $ll['text'] . ' ' . sprintf(mg_t('RC.STAND'), date('H:i', $ll['zeit'])));
+        } elseif ($ll['ok'] || $ll['rc'] === 27) {
+            $angenommen = 1;
+            $add('PRUEF.ANMELDUNG', 1, sprintf(mg_t('RC.STAND'), date('H:i', $ll['zeit'])));
+        } else {
+            $add('PRUEF.ANMELDUNG', 2, $ll['text']);
+        }
+    }
+
     $roh = mg_raw();
     $add('PRUEF.THEMEN', $roh['anzahl'] > 0 ? 1 : 0, (string) (int) $roh['anzahl']);
     $alter = $roh['zeit'] !== '' ? (int) round((time() - strtotime($roh['zeit'])) / 60) : -1;
-    $add('PRUEF.MOMENTAUFNAHME', ($alter >= 0 && $alter <= 5) ? 1 : ($alter < 0 ? 0 : 2),
+    // Dieselbe Grenze wie OK im Endpunkt (Entscheidung 4): bis 1.1.17 5 min.
+    $add('PRUEF.MOMENTAUFNAHME', ($alter >= 0 && $alter <= MG_OK_ALTER_MIN) ? 1 : ($alter < 0 ? 0 : 2),
         $alter >= 0 ? ($alter . ' min') : '');
 
     // Trifft der eingetragene Basispfad wirklich etwas?
@@ -3511,10 +4848,17 @@ function mg_selbsttest()
     $add('PRUEF.BASISPFAD', ($anzahl > 0 && $treffer === $anzahl) ? 1 : ($treffer > 0 ? 2 : 0),
         $treffer . '/' . $anzahl);
 
-    $prefix = trim((string) $cfg['prefix']) !== '' ? trim((string) $cfg['prefix']) : 'saic';
-    $lwt = mg_bool_wert(mg_pick_abs($prefix . '/_internal/lwt'), -1);
-    $add('PRUEF.GATEWAY', $lwt === 1 ? 1 : ($lwt === 0 ? 0 : 2),
-        $lwt === 1 ? 'online' : ($lwt === 0 ? 'offline' : ''));
+    $lwt = ($lwt_live !== null) ? $lwt_live : mg_bool_wert(mg_pick_abs($prefix . '/_internal/lwt'), -1);
+    /* Kein Letzter Wille, aber der Broker nimmt die Anmeldung an: dann
+     * meldet sich schlicht kein Gateway - das ist ein Befund, kein Strich
+     * (seit 1.1.18, Befund U10; bis 1.1.17 stand hier in dieser Lage ein
+     * Strich, genau wie bei abgewiesener Anmeldung). */
+    if ($lwt === -1 && $angenommen === 1) {
+        $add('PRUEF.GATEWAY', 0, mg_t('RC.KEIN_GATEWAY'));
+    } else {
+        $add('PRUEF.GATEWAY', $lwt === 1 ? 1 : ($lwt === 0 ? 0 : 2),
+            $lwt === 1 ? 'online' : ($lwt === 0 ? 'offline' : ''));
+    }
 
     $erreicht = 0;
     foreach (mg_fahrzeuge($cfg) as $nr => $f) {
@@ -3595,7 +4939,8 @@ function mg_selbsttest()
     }
     $re_nie = array('ok', 'themen', 'erreichbar', 'gateway', 'fehler', 'alter', 'fahrzeugalter', 'restzeit', 'leistung', 'tempo',
                     'innentemperatur', 'aussentemperatur', 'ac_leistung', 'ac_strom',
-                    'ac_spannung', 'km_tag', 'verbrauch_tag', 'push_aktiv', 'push_test');
+                    'ac_spannung', 'km_tag', 'verbrauch_tag', 'push_aktiv', 'push_test',
+                    'batterie12v', 'reifen_vl', 'reifen_vr', 'reifen_hl', 'reifen_hr');
     $re_fehler = array();
     if (mg_mqtt_behalten('x/1/mg_unbekannt', '1')) { $re_fehler[] = 'mg_unbekannt'; }
     foreach ($re_nie as $re_n) {
@@ -3625,7 +4970,99 @@ function mg_selbsttest()
             ($h['themen'] && $gefunden === count($h['themen'])) ? 1 : ($gefunden ? 2 : 0),
             $gefunden . '/' . count($h['themen']));
     }
+
+    /* Die Pflichtzeilen aus Regeln/04 (seit 1.1.18, Befund U13): der eigene
+     * Endpunkt wird wirklich aufgerufen (nur im offenen Reiter Test), und der
+     * Cron-Eintrag wird an ALLEN Cron-Orten gesucht. */
+    if ($live) {
+        list($ep_ok, $ep_text) = mg_endpunkt_probe($cfg);
+        $add('PRUEF.ENDPUNKT', $ep_ok, $ep_text);
+    } else {
+        $add('PRUEF.ENDPUNKT', 2, mg_t('PRUEF.NUR_LIVE'));
+    }
+    list($cr_ok, $cr_text) = mg_cron_probe();
+    $add('PRUEF.CRON', $cr_ok, $cr_text);
+
+    /* Docker und die drei Zeilen der Ampel (G9), je mit ganzem Satz. Gelb
+     * ("veraltet", "fruehere Installation") verlangt eine Handlung und steht
+     * deshalb als Kreuz; grau ist "nicht feststellbar". Gemessen hat der
+     * Aufrufer (index.php misst im offenen Reiter Test oder Gateway einmal);
+     * hier wird nur gelesen, damit docker nicht zweimal gefragt wird. */
+    $amp = mg_gw_ampel(false);
+    if ($amp === null) {
+        foreach (array('PRUEF.DOCKER', 'PRUEF.GW_CONTAINER', 'PRUEF.GW_ANMELDUNG', 'PRUEF.GW_WERTE') as $b) {
+            $add($b, 2, mg_t('GW.A_UNGEMESSEN'));
+        }
+    } else {
+        $bei = ' ' . sprintf(mg_t('GW.A_MESSZEIT'), date('d.m.Y H:i', (int) $amp['zeit']));
+        $add('PRUEF.DOCKER', $amp['docker'] === 'ok' ? 1 : ($amp['docker'] === 'fehlt' ? 2 : 0),
+            $amp['docker_satz'] . $bei);
+        foreach (array('container' => 'PRUEF.GW_CONTAINER', 'anmeldung' => 'PRUEF.GW_ANMELDUNG',
+                       'werte' => 'PRUEF.GW_WERTE') as $zk => $b) {
+            $farbe = $amp[$zk][0];
+            $add($b, $farbe === 'gruen' ? 1 : ($farbe === 'grau' ? 2 : 0), $amp[$zk][1] . $bei);
+        }
+    }
     return $z;
+}
+
+/**
+ * Antwortet der eigene Endpunkt? Ein echter Aufruf auf 127.0.0.1 (Regeln/04):
+ * nur er findet getrennte Baeume, in denen mg.php mit HTTP 500 antwortet.
+ * Drei Ausgaenge: 1 HTTP 200 mit der erwarteten Kennung, 0 eine andere
+ * Antwort (mit Code und Rumpfanfang), 2 gar keine Antwort - ein Webserver,
+ * der nur eine Anfrage zugleich bedient, kann sich nicht selbst aufrufen.
+ */
+function mg_endpunkt_probe($cfg = null)
+{
+    if ($cfg === null) {
+        $cfg = mg_config();
+    }
+    $token = is_string($cfg['aktionstoken']) ? $cfg['aktionstoken'] : '';
+    if ($token === '' || mg_paths()['lbhome'] === '') {
+        return array(2, mg_t('PRUEF.ENDPUNKT_KEIN'));
+    }
+    $port = mg_webport();
+    $url = 'http://127.0.0.1' . ($port === 80 ? '' : ':' . $port)
+         . mg_endpunkt(false, 'selftest=1&token=' . rawurlencode($token));
+    list($roh, $status) = mg_http_holen($url, 3);
+    if ($roh === false && $status === '') {
+        return array(2, mg_t('PRUEF.ENDPUNKT_STUMM'));
+    }
+    if (preg_match('#^HTTP/\S+\s+200\b#', $status) && strpos((string) $roh, 'SELFTEST;OK=1;TOKEN=OK') !== false) {
+        return array(1, 'HTTP 200, SELFTEST;OK=1;TOKEN=OK');
+    }
+    return array(0, trim($status) . ' - ' . mg_kuerzen(trim(preg_replace('/\s+/', ' ', (string) $roh)), 80));
+}
+
+/**
+ * Steht der Cron-Eintrag? Gesucht an ALLEN Cron-Orten (glob ueber
+ * system/cron/cron.*), Bauart Raumklima 0.11.8: ein fester Pfad zeigte dort
+ * am Geraet einen Strich. Ein Verzeichnis an der Stelle ist ein Befund - es
+ * laeuft nie (Regeln/06).
+ */
+function mg_cron_probe()
+{
+    $p = mg_paths();
+    if ($p['lbhome'] === '') {
+        return array(2, mg_t('PRUEF.CRON_KEINE_WURZEL'));
+    }
+    $dateien = array();
+    $verz = array();
+    foreach (glob($p['lbhome'] . '/system/cron/cron.*/' . $p['plugin']) ?: array() as $f) {
+        if (is_dir($f)) {
+            $verz[] = $f;
+        } elseif (is_file($f)) {
+            $dateien[] = $f;
+        }
+    }
+    if ($verz) {
+        return array(0, sprintf(mg_t('PRUEF.CRON_VERZEICHNIS'), implode(', ', $verz)));
+    }
+    if (!$dateien) {
+        return array(0, sprintf(mg_t('PRUEF.CRON_FEHLT'), 'system/cron/cron.*/' . $p['plugin']));
+    }
+    return array(1, implode(', ', $dateien));
 }
 
 /**
@@ -3963,9 +5400,18 @@ function mg_vorlage($nr = 1, $zeile = 'mg')
     $cmds = array();
     foreach (mg_felder_von($zeile) as $feld => $info) {
         $einheit = $info['einheit'];
+        /* Der Comment wird in Loxone Config zum Kachelnamen (Regeln/07) und
+         * soll 40 Zeichen nicht ueberschreiten. Die Feldbeschreibung hat zwei
+         * Abnehmer: die Spalte "Bedeutung" braucht den ganzen Satz, die
+         * Vorlage einen kurzen Namen. Seit 1.1.18 (Befund U16, 10 von 56
+         * Befehlen ueber 40 Zeichen) steht der kurze in [KACHEL]; fehlt einer,
+         * gilt der lange. Der TITEL bleibt, sonst legte ein erneuter Import
+         * neue Bausteine an. */
+        $kachel = mg_t('KACHEL.' . $feld);
+        $name = ($kachel !== 'KACHEL.' . $feld) ? $kachel : mg_t($info['bez']);
         $cmds[] = array(
             'title' => $praefix . $feld,
-            'comment' => mg_t($info['bez']) . ($einheit !== '' ? ' [' . $einheit . ']' : ''),
+            'comment' => $name . ($einheit !== '' ? ' [' . $einheit . ']' : ''),
             'check' => mg_check($feld),
             'unit' => ($einheit !== '' ? '<v.1> ' . $einheit : '<v.1>'),
             'analog' => $info['analog'], 'min' => $info['min'], 'max' => $info['max'],
@@ -4073,6 +5519,263 @@ function mg_abo_text()
          . sprintf(mg_t('MQTTR.ABO_GEMESSEN'), $f) . '</span>';
 }
 
+/* ==================================================================
+ * Werte pruefen - EINE Regel je Einstellung (seit 1.1.18)
+ *
+ * Dieselbe Pruefung fuer die Formulare (Befund U8) und fuer das
+ * Zurueckspielen einer Sicherung (Bauart E, Befund C5/U2). Bis 1.1.17
+ * wurden Formularwerte still verbogen ("abc" wurde zur Kapazitaet 1, der
+ * Port 70000 zu 65535, "saic test" zu "saictest"), und eine Sicherung wurde
+ * nur an ihren Schluesseln geprueft, nicht an den Werten: ein Aktionstoken
+ * als Liste landete in mg.json, danach nahm der Endpunkt "token=Array" an;
+ * eine Liste von Listen unter "vins" legte das Plugin unter PHP 8 still.
+ *
+ * Arten:
+ *   ganz min max     ganze Zahl im Bereich
+ *   zahl min max     Dezimalzahl im Bereich (im Formular auch mit Komma)
+ *   flag             0 oder 1 (nur Datei; im Formular ist es ein Haken)
+ *   muster re grund  Zeichenkette, die auf das Muster passt
+ *   frei max         Zeichenkette ohne Steuerzeichen, hoechstens max Byte
+ *   koord max        leer oder Dezimalzahl bis +-max
+ *   uhrzeit          HH:MM (auch HH:MM:SS, gespeichert als HH:MM)
+ *   modus            eine Betriebsart des Ladeplans
+ *   befehl           ein Befehlsname, den mg_befehl_aufloesen() ohne Zusatz kennt
+ *   vins, namen, notify, token   eigene Pruefung
+ *
+ * Die Grenzen sind die des Formulars (min/max der Eingabefelder und bis
+ * 1.1.17 die Klemmen im Speicher-Handler). ladungen_max hat kein Feld; 10 bis
+ * 10000 ist eine eigene Wahl (mg_ladung_pruefen() nimmt mindestens 10).
+ * ================================================================== */
+function mg_wert_regeln()
+{
+    $praefix = array('muster', '/^(?=.*[A-Za-z0-9_\-])[A-Za-z0-9_\-\/]{1,64}\z/', 'WERT.PRAEFIX');
+    return array(
+        'broker_host' => array('muster', '/^[A-Za-z0-9.\-:\[\]]{1,253}\z/', 'WERT.HOST'),
+        'broker_port' => array('ganz', 1, 65535),
+        'broker_user' => array('frei', 256),
+        'broker_pass' => array('frei', 256),
+        'prefix' => $praefix,
+        'saic_user' => array('frei', 256),
+        'saic_pass' => array('frei', 256),
+        'vins' => array('vins'),
+        'vin' => array('muster', '/^([A-Za-z0-9]{6,32})?\z/', 'WERT.VIN'),
+        'capacity' => array('zahl', 1, 200),
+        'namen' => array('namen'),
+        'commands' => array('flag'),
+        'gefahr_ein' => array('flag'),
+        'befehl_abstand' => array('ganz', 0, 3600),
+        'strom_abstand' => array('ganz', 0, 3600),
+        'befehle_stunde' => array('ganz', 1, 500),
+        'wirkung_pruefen' => array('flag'),
+        'wartezeit' => array('ganz', 2, 20),
+        'ort_ein' => array('flag'),
+        'heim_breite' => array('koord', 90),
+        'heim_laenge' => array('koord', 180),
+        'heim_radius' => array('ganz', 20, 20000),
+        'notify' => array('notify'),
+        'notify.push_minutes' => array('ganz', 1, 60),
+        'mqtt_ein' => array('flag'),
+        'mqtt_praefix' => $praefix,
+        'abfahrt_ein' => array('flag'),
+        'abfahrt_praefix' => $praefix,
+        'abfahrt_vorlauf' => array('ganz', 1, 180),
+        'abfahrt_temp' => array('ganz', 16, 30),
+        'abfahrt_fahrzeug' => array('ganz', 1, 9),
+        'ladeempf_ein' => array('flag'),
+        'ladeempf_thema' => array('muster', '/^[^\s"\'\x00-\x1F\x7F]{0,200}\z/', 'WERT.THEMA'),
+        'ladeempf_grenze' => array('zahl', -1000000000, 1000000000),
+        'ladeempf_unter' => array('flag'),
+        'ladeempf_hoch' => array('befehl'),
+        'ladeempf_runter' => array('befehl'),
+        'ladeempf_fahrzeug' => array('ganz', 1, 9),
+        'plan_ein' => array('flag'),
+        'plan_von' => array('uhrzeit'),
+        'plan_bis' => array('uhrzeit'),
+        'plan_modus' => array('modus'),
+        'heizplan_von' => array('uhrzeit'),
+        'ladungen_ein' => array('flag'),
+        'ladungen_max' => array('ganz', 10, 10000),
+        'aktionstoken' => array('token'),
+    );
+}
+
+/** Eine Zahl so schreiben, wie sie in der Meldung stehen soll. */
+function mg_wert_zahltext($z)
+{
+    return rtrim(rtrim(number_format((float) $z, 6, ',', ''), '0'), ',');
+}
+
+/**
+ * Einen Wert pruefen.
+ *
+ * $formular = true: der Wert kommt als Text aus einem Formular (schon am Rand
+ * beschnitten - das Formular darf trimmen, wenn es den beschnittenen Wert
+ * speichert). false: der Wert kommt aus einer Datei; dann muss auch der TYP
+ * zu dem der Vorgabe passen, und ein Rand wird nicht beschnitten, sondern
+ * abgewiesen (Regeln/05, "geprueft wird der Wert, der gespeichert wird").
+ *
+ * Rueckgabe array(ok, wert, grund) - wert in der Form, die gespeichert wird;
+ * grund ein Satzteil fuer die Meldung.
+ */
+function mg_wert_pruefen($k, $w, $formular = false)
+{
+    $regeln = mg_wert_regeln();
+    $vorg = mg_vorgaben();
+    if (!isset($regeln[$k])) {
+        return array(false, null, mg_t('WERT.UNBEKANNT'));
+    }
+    $r = $regeln[$k];
+    $art = $r[0];
+    $d = array_key_exists($k, $vorg) ? $vorg[$k] : 0;
+    /* Der Typ. Aus einem Formular kommt immer Text; aus einer Datei muss er
+     * zur Vorgabe passen: Zahl zu Zahl, Text zu Text, Liste zu Liste. */
+    if ($formular) {
+        if (!is_string($w)) {
+            return array(false, null, mg_t('WERT.TYP_TEXT'));
+        }
+    } elseif (is_array($d)) {
+        if (!is_array($w)) {
+            return array(false, null, mg_t('WERT.TYP_LISTE'));
+        }
+    } elseif (is_int($d) || is_float($d)) {
+        if (!is_int($w) && !is_float($w)) {
+            return array(false, null, mg_t('WERT.TYP_ZAHL'));
+        }
+    } elseif (!is_string($w)) {
+        return array(false, null, mg_t('WERT.TYP_TEXT'));
+    }
+
+    if ($art === 'ganz' || $art === 'zahl') {
+        $s = is_string($w) ? $w : (is_int($w) ? (string) $w
+            : rtrim(rtrim(sprintf('%.6F', $w), '0'), '.'));
+        if ($formular && $art === 'zahl' && substr_count($s, ',') === 1 && strpos($s, '.') === false) {
+            $s = str_replace(',', '.', $s);
+        }
+        $muster = ($art === 'ganz') ? '/^-?[0-9]{1,10}\z/' : '/^-?[0-9]{1,10}(\.[0-9]{1,6})?\z/';
+        $grund = sprintf(mg_t($art === 'ganz' ? 'WERT.GANZ' : 'WERT.ZAHL'),
+            mg_wert_zahltext($r[1]), mg_wert_zahltext($r[2]));
+        if (!preg_match($muster, $s)) {
+            return array(false, null, $grund);
+        }
+        $z = ($art === 'ganz') ? (int) $s : (float) $s;
+        if ($z < $r[1] || $z > $r[2]) {
+            return array(false, null, $grund);
+        }
+        return array(true, $z, '');
+    }
+    if ($art === 'flag') {
+        if ((is_int($w) || is_float($w)) && ((float) $w === 0.0 || (float) $w === 1.0)) {
+            return array(true, (int) $w, '');
+        }
+        return array(false, null, mg_t('WERT.FLAG'));
+    }
+    if ($art === 'muster') {
+        if (!is_string($w) || !preg_match($r[1], $w)) {
+            return array(false, null, mg_t($r[2]));
+        }
+        return array(true, $w, '');
+    }
+    if ($art === 'frei') {
+        if (!is_string($w) || strlen($w) > $r[1] || preg_match('/[\x00-\x1F\x7F]/', $w)) {
+            return array(false, null, sprintf(mg_t('WERT.TEXT'), $r[1]));
+        }
+        return array(true, $w, '');
+    }
+    if ($art === 'koord') {
+        $s = is_string($w) ? $w : '';
+        if ($formular) {
+            $s = str_replace(',', '.', $s);
+        }
+        if ($s === '') {
+            return array(true, '', '');
+        }
+        if (!preg_match('/^-?[0-9]{1,3}(\.[0-9]{1,8})?\z/', $s) || abs((float) $s) > $r[1]) {
+            return array(false, null, sprintf(mg_t('WERT.KOORD'), $r[1]));
+        }
+        return array(true, $s, '');
+    }
+    if ($art === 'uhrzeit') {
+        $u = is_string($w) ? mg_uhrzeit($w) : '';
+        if ($u === '' || (!$formular && trim($w) !== $w)) {
+            return array(false, null, mg_t('WERT.UHRZEIT'));
+        }
+        return array(true, $u, '');
+    }
+    if ($art === 'modus') {
+        if (!is_string($w) || !in_array($w, mg_planmodi(), true)) {
+            return array(false, null, sprintf(mg_t('WERT.MODUS'), implode(', ', mg_planmodi())));
+        }
+        return array(true, $w, '');
+    }
+    if ($art === 'befehl') {
+        $ok = false;
+        if (is_string($w) && $w !== '') {
+            list($ok, , , , ) = mg_befehl_aufloesen($w, null);
+        }
+        return $ok ? array(true, $w, '') : array(false, null, mg_t('WERT.BEFEHL'));
+    }
+    if ($art === 'token') {
+        if (!is_string($w) || !preg_match('/^[A-Za-z0-9_.\-]{0,64}\z/', $w)) {
+            return array(false, null, mg_t('WERT.TOKEN'));
+        }
+        return array(true, $w, '');
+    }
+    if ($art === 'vins') {
+        if (!is_array($w) || count($w) > 20 || ($w && array_keys($w) !== range(0, count($w) - 1))) {
+            return array(false, null, mg_t('WERT.VINS'));
+        }
+        foreach ($w as $v) {
+            if (!is_string($v) || !preg_match('/^[A-Za-z0-9]{6,32}\z/', $v)) {
+                return array(false, null, mg_t('WERT.VINS'));
+            }
+        }
+        return array(true, array_values($w), '');
+    }
+    if ($art === 'namen') {
+        if (!is_array($w) || count($w) > 20) {
+            return array(false, null, mg_t('WERT.NAMEN'));
+        }
+        foreach ($w as $v) {
+            if (!is_string($v) || strlen($v) > 256 || preg_match('/[\x00-\x1F\x7F]/', $v)) {
+                return array(false, null, mg_t('WERT.NAMEN'));
+            }
+        }
+        return array(true, array_values($w), '');
+    }
+    if ($art === 'notify') {
+        if (!is_array($w)) {
+            return array(false, null, mg_t('WERT.NOTIFY'));
+        }
+        $aus = array();
+        foreach ($w as $nk => $nv) {
+            if (in_array($nk, array('push', 'soc_voll', 'stecker', 'offen', 'fenster', 'fehler'), true)) {
+                list($ok, $nw, ) = mg_wert_pruefen('commands', $nv, false);
+            } elseif ($nk === 'push_minutes') {
+                list($ok, $nw, ) = mg_wert_pruefen('notify.push_minutes', $nv, false);
+            } else {
+                $ok = false;
+            }
+            if (!$ok) {
+                return array(false, null, mg_t('WERT.NOTIFY'));
+            }
+            $aus[$nk] = $nw;
+        }
+        return array(true, $aus, '');
+    }
+    return array(false, null, mg_t('WERT.UNBEKANNT'));
+}
+
+/**
+ * Schluessel, die eine Sicherung aus einer FRUEHEREN Fassung nicht tragen
+ * kann. Fehlt einer davon, behaelt er seinen jetzigen Wert, statt die ganze
+ * Datei abzuweisen - sonst waere jede Sicherung aus 1.1.17 mit dem Einbau
+ * des iSMART-Kennworts (1.1.18) wertlos geworden. Jeder andere fehlende
+ * Schluessel bleibt eine Beanstandung.
+ */
+function mg_sicherung_neue_schluessel()
+{
+    return array('saic_pass');
+}
 
 /**
  * Eine Sicherungsdatei einlesen - und dabei NICHTS durchgehen lassen.
@@ -4084,60 +5787,128 @@ function mg_abo_text()
  * sieht es ihr nicht an.
  *
  * Unbekannte Schluessel sind eine Beanstandung, kein stiller Verlust: sie
- * stammen aus einer anderen Fassung oder einem anderen Plugin.
+ * stammen aus einer anderen Fassung oder einem anderen Plugin. Der lesbare
+ * Kopf (_hinweis, _stand - alles, was mit _ beginnt) wird uebergangen (seit
+ * 1.1.18, Befund U7; bis 1.1.17 wurde eine Datei mit Kopf als "unbekannte
+ * Einstellung _stand" abgewiesen).
  *
- * Rueckgabe: array(Konfiguration|null, Beanstandungen[], uebernommene Werte).
+ * Seit 1.1.18 wird JEDER Wert vor dem Zusammenfuehren gegen Typ und Regel
+ * der Vorgabe geprueft (mg_wert_pruefen(), Bauart E). Ein leeres Merkwort
+ * heisst "kein Merkwort gesichert": es gilt das jetzige (Befund C5/U4 - bis
+ * 1.1.17 wurde es leer gespeichert, die Selbstheilung kopierte danach die
+ * Zweitschrift darueber, und die Meldung "44 Werte uebernommen" stimmte fuer
+ * keinen einzigen Wert).
+ *
+ * Die Beanstandungen tragen KEINE Auszeichnung und werden hier NICHT
+ * maskiert: die Oberflaeche gibt sie maskiert aus (Befund U6 - bis 1.1.17
+ * stand dort "&lt;b&gt;nicht&lt;/b&gt;" und ein doppelt maskierter Name).
+ *
+ * Rueckgabe: array(Konfiguration|null, Beanstandungen[], Werte in der Datei).
  */
-function mg_sicherung_lesen($roh)
+function mg_sicherung_lesen($roh, $jetzt = null)
 {
     $mangel = array();
     $daten = json_decode((string) $roh, true);
     if (!is_array($daten)) {
         return array(null, array(mg_t('EINST.SICH_KEIN_JSON')), 0);
     }
-    $neu = mg_vorgaben();
-    $bekannt = array_keys($neu);
+    $vorg = mg_vorgaben();
+    $neu = array();
     $anzahl = 0;
     foreach ($daten as $k => $w) {
-        if (!in_array($k, $bekannt, true)) {
-            $mangel[] = sprintf(mg_t('EINST.SICH_FREMD'),
-                                 htmlspecialchars((string) $k, ENT_QUOTES, 'UTF-8'));
+        $k = (string) $k;
+        // Der lesbare Kopf wird UEBERGANGEN, nicht beanstandet.
+        if ($k !== '' && $k[0] === '_') {
             continue;
         }
-        $neu[$k] = $w;
+        if (!array_key_exists($k, $vorg)) {
+            $mangel[] = sprintf(mg_t('EINST.SICH_FREMD'), $k);
+            continue;
+        }
+        list($ok, $wert, $grund) = mg_wert_pruefen($k, $w, false);
+        if (!$ok) {
+            $mangel[] = sprintf(mg_t('EINST.SICH_WERT'), $k, $grund);
+            continue;
+        }
+        $neu[$k] = $wert;
         $anzahl++;
     }
-    if ($anzahl === 0) {
+    if ($anzahl === 0 && !$mangel) {
         $mangel[] = mg_t('EINST.SICH_LEER');
     }
     /* FEHLENDE Schluessel sind eine Beanstandung, kein stiller Rueckfall.
      *
-     * Bis hierher war die Vorgabenliste der Ausgangspunkt, und nur was in
-     * der Datei stand wurde darueber geschrieben. Eine Datei mit einem
-     * einzigen Schluessel lief damit ohne Beanstandung durch, wurde
-     * gespeichert, und alle uebrigen Einstellungen fielen auf Werk
-     * zurueck - quittiert mit "1 Wert uebernommen".
-     *
-     * Gemessen an VolkswagenID 0.9.11 am 03.09.2026 unter PHP 7.4 und 8.4:
-     * dort fiel dabei auch das Aktionstoken auf '', und jede im Miniserver
-     * eingetragene Adresse war stumm ungueltig. Am 07.09.2026 ueber den
-     * Bestand ausgerollt (30 Linien).
-     *
-     * Der Hausstandard sagt: eine halb gueltige Datei aendert gar nichts.
-     * Verglichen wird gegen die VORGABEN, nicht gegen $bekannt: was
-     * ausserhalb der Konfigurationsdatei liegt - Zugangsdaten in einer
-     * eigenen Datei - faellt nicht auf Werk zurueck und darf hier fehlen. */
+     * Eine Datei mit einem einzigen Schluessel lief bis 1.1.x ohne
+     * Beanstandung durch, wurde gespeichert, und alle uebrigen Einstellungen
+     * fielen auf Werk zurueck - quittiert mit "1 Wert uebernommen" (gemessen
+     * an VolkswagenID 0.9.11 am 03.09.2026, am 07.09.2026 ueber den Bestand
+     * ausgerollt). Ausgenommen sind nur die Schluessel, die eine aeltere
+     * Fassung nicht kennen konnte (mg_sicherung_neue_schluessel()). */
     $fehlend = array();
-    foreach (array_keys(mg_vorgaben()) as $fk) {
-        if (!array_key_exists($fk, $daten)) {
+    $behalten = array();
+    foreach (array_keys($vorg) as $fk) {
+        if (array_key_exists($fk, $daten)) {
+            continue;
+        }
+        if (in_array($fk, mg_sicherung_neue_schluessel(), true)) {
+            $behalten[] = $fk;
+        } else {
             $fehlend[] = $fk;
         }
     }
     if ($fehlend) {
-        $mangel[] = sprintf(mg_t('EINST.SICH_FEHLEND'), count($fehlend),
-            htmlspecialchars(implode(', ', $fehlend), ENT_QUOTES, 'UTF-8'));
+        $mangel[] = sprintf(mg_t('EINST.SICH_FEHLEND'), count($fehlend), implode(', ', $fehlend));
     }
-    return array($mangel ? null : $neu, $mangel, $anzahl);
+    if ($mangel) {
+        return array(null, $mangel, 0);
+    }
+    if ($jetzt === null) {
+        $jetzt = mg_config();
+    }
+    foreach ($behalten as $fk) {
+        $neu[$fk] = $jetzt[$fk];
+    }
+    if ($neu['aktionstoken'] === '') {
+        $neu['aktionstoken'] = is_string($jetzt['aktionstoken']) ? $jetzt['aktionstoken'] : '';
+    }
+    return array($neu + $vorg, array(), $anzahl);
+}
+
+/* ==================================================================
+ * Einmalmeldung fuer die Umleitung nach jedem POST (seit 1.1.18, Befund U1)
+ *
+ * Jeder POST-Zweig der Oberflaeche endet mit 303 auf index.php?form=...
+ * (Regeln/04). Das Ergebnis reist in data/plugins/<ordner>/einmalmeldung.json,
+ * 0600, wird NUR beim GET gelesen, dabei geloescht, und ist nach 120 s
+ * verworfen. Bis 1.1.17 wiederholte F5 jede Aktion - auch einen Befehl ans
+ * Fahrzeug. Bauart abf_flash_*() aus Abfahrts-Assistent 1.6.17.
+ * ================================================================== */
+function mg_flash_datei()
+{
+    return mg_paths()['datadir'] . '/einmalmeldung.json';
+}
+
+function mg_flash_schreiben(array $inhalt)
+{
+    $p = mg_paths();
+    if (!is_dir($p['datadir'])) { @mkdir($p['datadir'], 0775, true); }
+    $inhalt['zeit'] = time();
+    $js = json_encode($inhalt, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    return $js !== false && mg_write_atomic(mg_flash_datei(), $js, 0600);
+}
+
+function mg_flash_lesen()
+{
+    $f = mg_flash_datei();
+    if (!is_file($f)) {
+        return array();
+    }
+    $d = json_decode((string) @file_get_contents($f), true);
+    @unlink($f);
+    if (!is_array($d) || !isset($d['zeit']) || time() - (int) $d['zeit'] > 120) {
+        return array();
+    }
+    return $d;
 }
 
 /* Der Escape-Helfer gehoert in die Bibliothek, nicht in

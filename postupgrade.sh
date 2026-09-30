@@ -189,6 +189,21 @@ if [ -n "$ARGV1" ] && [ -f "$ARGV1/mg.json" ] && ! hat_inhalt "$CF" && hat_inhal
         echo "<WARNING> Die Konfiguration von vor dem Upgrade liess sich nicht nach $CF kopieren."
     fi
 fi
+# Eine UNBRAUCHBARE, nicht leere Ablage (etwa eine beim Schreiben abgeschnittene
+# mg.json) wurde bis 1.1.17 ohne Meldung verworfen - und mit ihr die letzte
+# Stelle, an der das alte Merkwort fuer die Loxone-Adressen noch stand
+# (Installer-Pruefer 30.09.2026, Fall C3, Bauliste I5). Seit 1.1.18 kommt sie
+# nach mg.json.kaputt (0600), mit einer <WARNING> samt Pfad. Ein Merkwort in
+# mg.json sagt dabei nichts: der Takt kann dort in der Luecke schon ein NEUES
+# erzeugt haben.
+if [ -n "$ARGV1" ] && [ -s "$ARGV1/mg.json" ] && ! hat_inhalt "$ARGV1/mg.json" \
+   && [ "$(tr -d ' \t\r\n' < "$ARGV1/mg.json" 2>/dev/null)" != "{}" ]; then
+    if mg_kopieren "$ARGV1/mg.json" "$CF.kaputt" 600; then
+        echo "<WARNING> Die vor dem Upgrade beiseitegelegte Konfiguration ist unbrauchbar und wurde nicht eingespielt. Sie liegt unter $CF.kaputt - dort laesst sich zum Beispiel das alte Merkwort von Hand nachlesen."
+    else
+        echo "<WARNING> Die vor dem Upgrade beiseitegelegte Konfiguration ist unbrauchbar und liess sich nicht nach $CF.kaputt legen."
+    fi
+fi
 if [ -n "$ARGV1" ] && [ -f "$ARGV1/mg.log" ] && [ ! -s "$LDIR/mg.log" ]; then
     if cp -p "$ARGV1/mg.log" "$LDIR/mg.log" 2>/dev/null \
        && cmp -s "$ARGV1/mg.log" "$LDIR/mg.log"; then

@@ -149,11 +149,105 @@ for D in /proc/[0-9]*; do
 done
 [ "$GEFUNDEN" -eq 0 ] && echo "<INFO> Es lief kein Abruf."
 
+# Seit 1.1.18 (Entscheidung 7, Bauliste G7): den Gateway-Container, den DIESES
+# Plugin angelegt hat, entfernen. Gesucht per Label, gegengeprueft per inspect
+# auf beide Labels (Ordner und Name) - nie nach dem Namen allein. Ein Container
+# gleichen Namens ohne Label (von Hand betrieben) bleibt, ebenso das Abbild.
+# Jeder docker-Aufruf mit timeout. <OK> erst, wenn der Container fort ist.
+MG_RC=0
+MG_GW_WEG=0
+MG_GWNAME="lb-$PDIR-saic-gateway"
+MG_GWBILD="saicismartapi/saic-python-mqtt-gateway"
+MG_HAND="docker ps -a --filter label=de.loxberry.plugin.folder=$PDIR, dann docker rm -f <Kennung>"
+mg_gw_labels() {   # $1 Kennung -> "<ordner> <name>" der beiden Labels
+    timeout 30 docker inspect --type container \
+        --format '{{index .Config.Labels "de.loxberry.plugin.folder"}} {{index .Config.Labels "de.loxberry.plugin.name"}}' \
+        "$1" 2>/dev/null
+}
+# Die Merkdatei (Nacharbeit 30.09., N1): liegt sie (oder ihre .alt-Ablage
+# aus preinstall.sh), hat dieses Plugin einmal einen Container angelegt. Nur
+# dann ist ein fehlendes oder stummes docker eine Warnung; sonst hat der
+# Anwender den Gateway-Knopf nie benutzt, und es gibt nichts zu entfernen.
+# Gesucht wird mit docker trotzdem immer per Label, unabhaengig von ihr.
+MG_MERK="$BASE/config/plugins/$PDIR.gateway_angelegt"
+MG_MERK_DA=0
+{ [ -e "$MG_MERK" ] || [ -e "$MG_MERK.alt" ]; } && MG_MERK_DA=1
+MG_DOCKER_WEG=""
+if ! command -v docker >/dev/null 2>&1 || ! command -v timeout >/dev/null 2>&1; then
+    MG_DOCKER_WEG="docker ist nicht aufzurufen"
+elif ! timeout 10 docker info --format '{{.ServerVersion}}' >/dev/null 2>&1; then
+    MG_DOCKER_WEG="Docker antwortet nicht (docker info)"
+fi
+if [ -n "$MG_DOCKER_WEG" ] && [ "$MG_MERK_DA" = 1 ]; then
+    echo "<WARNING> $MG_DOCKER_WEG - der Gateway-Container, den dieses Plugin angelegt hat, wurde nicht entfernt. Von Hand: $MG_HAND"
+    MG_RC=1
+elif [ -n "$MG_DOCKER_WEG" ]; then
+    echo "<INFO> Kein Gateway-Container von diesem Plugin angelegt ($MG_DOCKER_WEG) - nichts zu entfernen."
+else
+    MG_IDS=$(timeout 30 docker ps -a -q --no-trunc --filter "label=de.loxberry.plugin.folder=$PDIR" 2>/dev/null)
+    MG_PSRC=$?
+    if [ "$MG_PSRC" != 0 ]; then
+        echo "<WARNING> Die Suche nach dem Gateway-Container scheiterte (rc=$MG_PSRC). Von Hand: $MG_HAND"
+        MG_RC=1
+    fi
+    MG_EIGENE=0
+    for MG_ID in $MG_IDS; do
+        case "$MG_ID" in
+            *[!0-9a-f]*) continue ;;
+        esac
+        MG_KURZ=$(printf '%.12s' "$MG_ID")
+        if [ "$(mg_gw_labels "$MG_ID")" != "$PDIR mgismart" ]; then
+            echo "<INFO> Container $MG_KURZ traegt nicht beide Labels dieses Plugins - nicht angefasst."
+            continue
+        fi
+        MG_EIGENE=$((MG_EIGENE + 1))
+        timeout 60 docker stop -t 20 "$MG_ID" >/dev/null 2>&1
+        timeout 30 docker rm "$MG_ID" >/dev/null 2>&1
+        MG_NOCH=$(timeout 30 docker ps -a -q --no-trunc --filter "id=$MG_ID" 2>/dev/null)
+        MG_NRC=$?
+        if [ "$MG_NRC" = 0 ] && [ -z "$MG_NOCH" ]; then
+            echo "<OK> Gateway-Container $MG_KURZ entfernt."
+            MG_GW_WEG=1
+        elif [ "$MG_NRC" != 0 ]; then
+            echo "<WARNING> Ob der Gateway-Container $MG_KURZ fort ist, liess sich nicht nachsehen (rc=$MG_NRC). Von Hand: docker rm -f $MG_KURZ"
+            MG_RC=1
+        else
+            echo "<WARNING> Der Gateway-Container $MG_KURZ liess sich nicht entfernen. Von Hand: docker rm -f $MG_KURZ"
+            MG_RC=1
+        fi
+    done
+    [ "$MG_EIGENE" -eq 0 ] && [ "$MG_PSRC" = 0 ] && echo "<INFO> Es gab keinen Gateway-Container dieses Plugins."
+    if timeout 30 docker inspect --type container --format '{{.Id}}' "$MG_GWNAME" >/dev/null 2>&1 \
+       && [ "$(mg_gw_labels "$MG_GWNAME")" != "$PDIR mgismart" ]; then
+        echo "<INFO> Ein Container namens $MG_GWNAME ohne die Labels dieses Plugins bleibt unberuehrt."
+    fi
+    echo "<INFO> Das Abbild $MG_GWBILD bleibt (es kann von anderen genutzt werden). Von Hand: docker image rm $MG_GWBILD"
+fi
+
+# Erst NACH einem entfernten eigenen Container: die zurueckbehaltenen Themen
+# des Gateways unter <prefix>/ (bin/cron.php --gateway-leeren, mit Bestaetigung
+# durch den Broker; Vorgabe aus Frage 5). Ohne entfernten Container stammen sie
+# von einem Gateway, das dieses Plugin nicht angelegt hat - sie bleiben.
+MG_CRON="$BASE/bin/plugins/$PDIR/cron.php"
+if [ "$MG_GW_WEG" = 1 ]; then
+    if command -v php >/dev/null 2>&1 && [ -f "$MG_CRON" ] \
+       && { [ -r "$PCONFIG/mg.json" ] || [ -r "$BK" ]; }; then
+        if [ "$(id -u)" = "0" ] && id loxberry >/dev/null 2>&1; then
+            su -s /bin/bash loxberry -c "$(printf '%q ' env "LBHOMEDIR=$BASE" "LBPPLUGINDIR=$PDIR" \
+                timeout 90 php "$MG_CRON" --gateway-leeren)" < /dev/null 2>&1
+        else
+            env "LBHOMEDIR=$BASE" "LBPPLUGINDIR=$PDIR" timeout 90 php "$MG_CRON" --gateway-leeren \
+                < /dev/null 2>&1
+        fi
+    else
+        echo "<INFO> PHP, cron.php oder die Konfiguration fehlt - die Themen des Gateways wurden nicht geleert."
+    fi
+fi
+
 # Die zurueckbehaltenen MQTT-Themen dieses Plugins abraeumen: bin/cron.php
 # --mqtt-leeren fragt den Broker, leert und liest nach (mg_mqtt_leeren() in
 # mg_lib.php). Wurzel und Ordner werden ausdruecklich genannt, sonst hielte
 # sich die Bibliothek fuer ein Archiv. Als loxberry, wie der Minutentakt.
-MG_CRON="$BASE/bin/plugins/$PDIR/cron.php"
 if command -v php >/dev/null 2>&1 && [ -f "$MG_CRON" ] \
    && { [ -r "$PCONFIG/mg.json" ] || [ -r "$BK" ]; }; then
     if [ "$(id -u)" = "0" ] && id loxberry >/dev/null 2>&1; then
@@ -174,8 +268,12 @@ fi
 # meldete trotzdem, Broker-Passwort und Merkwort seien fort; ebenso, wenn rm
 # scheiterte (gemessen 18.09.2026 in WSL, Pruefung-MGiSmart-1.1.14, Faelle
 # U3/U4). Gemeldet wird jetzt, was nachgesehen wurde.
+# Seit 1.1.18 (Bauliste I1/I2): auch die .alt-Ablagen von preinstall.sh und
+# die Nebendateien eines abgebrochenen mg_write_atomic() auf die Zweitschrift
+# (<datei>.<pid>.<zufall>.tmp) - sie tragen dasselbe. Die Schlussmeldung
+# steht erst NACH dieser Zaehlung.
 MG_ENTFERNT=0; MG_BLEIBT=0
-for MG_F in "$BK" "$BK.kaputt"; do
+for MG_F in "$BK" "$BK.kaputt" "$BK.alt" "$BK.kaputt.alt" "$BK".*.tmp; do
     [ -e "$MG_F" ] || continue
     rm -f "$MG_F" 2>/dev/null
     if [ -e "$MG_F" ]; then
@@ -205,10 +303,29 @@ if [ -d "$TMP" ]; then
     rm -rf "$TMP" && echo "<OK> Zwischenspeicher $TMP entfernt."
 fi
 
-echo "<INFO> Das SAIC-MQTT-Gateway ist ein eigenstaendiger Docker-Container"
-echo "<INFO> und wurde nicht von diesem Plugin angelegt - es bleibt unberuehrt."
-echo "<INFO> Die Themen des Gateways ($PREFIX/...) stammen nicht von diesem Plugin"
-echo "<INFO> und bleiben im Broker. Zurueckbehaltene Themen unter einem FRUEHER"
-echo "<INFO> eingestellten eigenen Praefix raeumt dieses Skript nicht ab. Nachsehen:"
-echo "<INFO> mosquitto_sub -t '<praefix>/#' --retained-only"
-exit 0
+# Die Merker neben dem Datenordner (seit 1.1.18): die Upgrade-Marke
+# (Entscheidung 1) und die Kennung eines liegengebliebenen Containers (G8).
+# Dazu die Merkdatei des angelegten Containers samt .alt (N1) - abgeraeumt
+# erst hier, nachdem oben entschieden wurde; jede Datei wird nachgesehen.
+for MG_F in "$BASE/data/plugins/$PDIR.upgrade_laeuft" "$BASE/data/plugins/$PDIR.gateway_frueher"             "$MG_MERK" "$MG_MERK.alt"; do
+    [ -e "$MG_F" ] || continue
+    rm -f "$MG_F" 2>/dev/null
+    if [ -e "$MG_F" ]; then
+        echo "<WARNING> Liess sich nicht entfernen: $MG_F"
+    else
+        echo "<OK> Entfernt: $(basename "$MG_F")"
+    fi
+done
+
+# Der Schlusstext haengt davon ab, was oben geschah (Bauliste G7 Schritt 7):
+# bis 1.1.17 hiess es pauschal, der Container stamme nicht von diesem Plugin.
+if [ "$MG_GW_WEG" = 1 ]; then
+    echo "<INFO> Zurueckbehaltene Themen unter einem FRUEHER eingestellten eigenen Praefix"
+    echo "<INFO> raeumt dieses Skript nicht ab. Nachsehen: mosquitto_sub -t '<praefix>/#' --retained-only"
+else
+    echo "<INFO> Ein von Hand betriebenes SAIC-MQTT-Gateway (ohne die Labels dieses Plugins)"
+    echo "<INFO> bleibt unberuehrt, ebenso seine Themen ($PREFIX/...) im Broker."
+    echo "<INFO> Zurueckbehaltene Themen unter einem FRUEHER eingestellten eigenen Praefix"
+    echo "<INFO> raeumt dieses Skript nicht ab. Nachsehen: mosquitto_sub -t '<praefix>/#' --retained-only"
+fi
+exit $MG_RC

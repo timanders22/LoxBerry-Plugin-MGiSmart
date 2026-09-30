@@ -1,8 +1,8 @@
 #!/bin/sh
 # MG iSmart - liest jede Minute die Werte des SAIC-MQTT-Gateways ein.
 #
-# Den bin-Pfad <home>/bin/plugins/<ordner> setzt der Installer in der
-# Befehlszeile ein.
+# Den bin-Pfad und den Log-Pfad <home>/.../plugins/<ordner> setzt der
+# Installer in den Befehlszeilen ein.
 #
 # WARUM bin/ UND NICHT webfrontend/html/
 # Bis 1.0.2 stand hier <HTML-Ordner des Plugins>/cron.php - das Skript lag also im
@@ -13,6 +13,26 @@
 # einen PHP-Arbeiter fest. Das war ein unbeabsichtigter, unauthentifizierter
 # Endpunkt, den niemand brauchte: Der Cron ruft das Skript ueber das
 # Dateisystem auf, nicht ueber HTTP.
-if [ -f REPLACELBPBINDIR/cron.php ]; then
-  /usr/bin/php REPLACELBPBINDIR/cron.php >/dev/null 2>&1
+#
+# DIE FEHLERAUSGABE GEHT NACH cron.err (Hausstandard, Regeln/06; Bauform
+# Docker NG 1.3.7). LoxBerry ruft jede Cron-Datei mit "> /dev/null 2>&1" auf
+# (/etc/cron.d/lbdefaults). Bis 1.1.17 stand hier zusaetzlich ">/dev/null 2>&1"
+# am php-Aufruf: fehlte die Bibliothek, endete der Takt mit rc 1 und
+# "mg_lib.php nicht gefunden", und davon blieb nirgends eine Spur (Befund I3).
+# Das Verzeichnis wird vorher angelegt, sonst scheitert schon die Umlenkung;
+# touch frischt die Aenderungszeit auf (ein Anhaengen ohne Inhalt tut das
+# nicht, gemessen am Abfahrts-Assistenten 1.6.9); ueber 256 kB bleiben die
+# letzten 300 Zeilen - log/ liegt im Arbeitsspeicher. Der Reiter Logdateien
+# zeigt die Datei, sobald etwas darin steht.
+LOGV="REPLACELBPLOGDIR"
+ERR="$LOGV/cron.err"
+mkdir -p "$LOGV" 2>/dev/null
+touch "$ERR" 2>/dev/null
+if [ -f "$ERR" ] && [ "$(stat -c %s "$ERR" 2>/dev/null || echo 0)" -gt 262144 ]; then
+  tail -n 300 "$ERR" > "$ERR.neu" 2>/dev/null && mv -f "$ERR.neu" "$ERR"
 fi
+if [ ! -f REPLACELBPBINDIR/cron.php ]; then
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] cron.01min: REPLACELBPBINDIR/cron.php fehlt - Plugin neu installieren." >> "$ERR"
+  exit 1
+fi
+/usr/bin/php REPLACELBPBINDIR/cron.php >/dev/null 2>>"$ERR"

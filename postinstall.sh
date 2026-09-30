@@ -71,6 +71,15 @@ DDIR="$BASE/data/plugins/$PFOLDER"
 LDIR="$BASE/log/plugins/$PFOLDER"
 CF="$CDIR/mg.json"
 BK="$BASE/config/plugins/$PFOLDER.backup.json"
+# Seit 1.1.18 (Entscheidung 1 vom 29.09.2026): zurueckgespielt wird nur bei liegender Marke; abgeraeumt per trap.
+MARKE="$BASE/data/plugins/$PFOLDER.upgrade_laeuft"
+mg_marke_weg() {
+    mg_rc=$?
+    rm -f "$MARKE" 2>/dev/null
+    [ -e "$MARKE" ] && echo "<WARNING> Die Marke $MARKE liess sich nicht entfernen - bitte von Hand loeschen."
+    exit $mg_rc
+}
+trap mg_marke_weg EXIT
 
 mkdir -p "$CDIR" "$DDIR" "$LDIR" 2>/dev/null
 
@@ -141,7 +150,7 @@ fi
 # Endpunkts - sie geht niemanden ausser loxberry etwas an.
 chmod 600 "$CF" 2>/dev/null
 
-if [ -f "$BK" ] && ! hat_inhalt "$CF" && hat_inhalt "$BK"; then
+if [ -f "$MARKE" ] && [ -f "$BK" ] && ! hat_inhalt "$CF" && hat_inhalt "$BK"; then
     # Was verdraengt wird, bleibt liegen - es koennen Zugangsdaten darin
     # stehen, und "{}" ist nichts wert.
     if [ -s "$CF" ] && [ "$(tr -d ' \t\r\n' < "$CF" 2>/dev/null)" != "{}" ]; then

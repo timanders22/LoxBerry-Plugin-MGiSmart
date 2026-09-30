@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.17
+Version 1.1.18
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -8,6 +8,79 @@ Klima, Standort — und schickt Befehle zurück: Laden stoppen, Ziel-Ladestand,
 Ladestrombegrenzung, Standklima, „Auto finden".
 
 Kompatibel mit LoxBerry 3.x und **LoxBerry 4** (reines PHP, PHP 7.4 und 8.x).
+
+## Neu in 1.1.18
+
+Durchgang vom 29./30.09.2026 mit vier Prüfern (Code, Oberfläche, Installer,
+MQTT). Anlass war ein LoxBerry, auf dem nichts ankam: „keine Werte empfangen
+(rc=5)“. Zwei Ursachen, beide nachgestellt: Das Plugin las die Broker-Daten
+des LoxBerry nie, und es gab keinen Gateway-Container. Befunde mit Datei:Zeile:
+`Pruefung-Durchgang-2026-09-29/MGiSmart_BEFUNDE_UND_VERBESSERUNGEN.md`.
+
+**Gateway per Knopf.** Der Reiter *Gateway einrichten* legt den
+SAIC-MQTT-Gateway-Container selbst an. Einzutragen sind nur die iSMART-E-Mail
+und das Kennwort, dann *Gateway anlegen und starten*.
+
+* **Anlegen:** Das Plugin legt den Container mit `--network host` an und
+  setzt die Broker-Daten des LoxBerry ein. Der Container trägt die Labels
+  `de.loxberry.plugin.folder`/`de.loxberry.plugin.name` und heißt
+  `lb-<ordner>-saic-gateway`. Beim ersten Mal lädt Docker das Programm aus
+  dem Internet; das läuft im Hintergrund.
+* **Ampel:** Sie zeigt „Container läuft“, „Anmeldung bei MG“ und „Werte
+  kommen“, dazu Knöpfe für Neustart, Protokoll und Entfernen (mit Häkchen).
+* **Eigener Container:** Das Plugin fasst nur den eigenen, gekennzeichneten
+  Container an, nie einen von Hand betriebenen, auch nicht bei gleichem Namen.
+* **Deinstallation:** Sie entfernt den eigenen Container und räumt danach
+  seine Themen ab.
+* **Kennwort:** Das Kennwort geht über eine Umgebungsdatei (0600) an Docker,
+  die gleich danach gelöscht wird, und steht nie auf einer Befehlszeile.
+  **Docker bewahrt es trotzdem in der Container-Beschreibung auf**
+  (`docker inspect`); wer zur Gruppe `docker` gehört, kann es lesen.
+* **Adresse:** `SAIC_REST_URI` setzt das Plugin nicht mehr; es gilt die
+  Vorgabe des Gateways. Der alte Befehl zum Abtippen nannte `gateway-sm-eu`
+  statt `gateway-mg-eu`.
+* **Grenze:** Nur mit einer Attrappe von Docker gemessen. Der erste echte
+  Lauf an einem LoxBerry steht aus.
+
+**Broker.** Ohne eigene Angaben nimmt das Plugin Adresse, Benutzer und Kennwort
+des LoxBerry-Brokers (`general.json`). Eigene Angaben gelten, sobald ein
+Benutzer eingetragen ist oder der Broker auf einem anderen Rechner liegt. Die
+Oberfläche zeigt, welche Angaben gelten.
+
+**Klare Sätze statt „rc=…“.** Abgewiesene Anmeldung, nicht erreichbarer Broker
+und „angemeldet, aber es kommt nichts – läuft der Gateway-Container?“ sind
+jetzt unterscheidbar, im Reiter Test und beim Einlesen. Vorher las das Plugin
+die Fehlerzeile von `mosquitto_sub` als Thema.
+
+**Endpunkt und MQTT**
+
+* `OK=0`, wenn die Momentaufnahme älter als 3 Minuten ist oder der Letzte
+  Wille des Gateways „offline“ sagt. Vorher stand `OK=1` bei beliebig alten
+  Werten.
+* Lebenszeichen `status/ts` und `status/zaehler` (flüchtig). Bei einem
+  Lesefehler geht `ok 0` hinaus.
+* Retained Texte ohne Aussage gehen als `-` hinaus, nicht als Altwert.
+* `batterie12v` und `reifen_*` sind Messwerte und gehen flüchtig hinaus; die
+  alten retained Werte räumt das Plugin einmal ab.
+* Beim Präfixwechsel räumt es die Themen des alten Präfixes ab. Vorher räumte
+  es das neue ab.
+* Die Abodatei `mqtt_subscriptions.cfg` führt das Plugin selbst.
+
+**Sicherung und Oberfläche**
+
+* Beim Zurückspielen wird jeder Wert geprüft. Bis 1.1.17 legte eine Sicherung
+  mit `vins: [["x"]]` unter PHP 8.x Oberfläche und Endpunkt dauerhaft lahm,
+  und `token=Array` wurde angenommen.
+* Jedes Absenden endet mit einer Umleitung. F5 wiederholt nichts mehr, auch
+  keinen Fahrzeugbefehl.
+* Falsche Eingaben werden abgewiesen und benannt, statt still verbogen zu
+  werden.
+
+**Installation**
+
+* Eine Neuinstallation spielt die Zweitschrift einer früheren Installation
+  nicht mehr ein, sondern legt sie nach `.alt` (`preinstall.sh`).
+* `cron.err` zeigt, wenn der Minutentakt nicht arbeiten kann.
 
 ## Was 1.1.2 behebt
 
@@ -218,8 +291,8 @@ bildet dieses Protokoll nach und veröffentlicht die Fahrzeugdaten per MQTT.
 Fahrzeug ─ iSMART-Server ─ SAIC-MQTT-Gateway (Docker) ─ MQTT-Broker ─ dieses Plugin ─ Loxone
 ```
 
-Der Reiter **Gateway einrichten** enthält den kompletten `docker run`-Befehl
-und die Stolperfallen.
+Den Gateway-Container legt der Reiter **Gateway einrichten** per Knopf an
+(seit 1.1.18); die Ampel dort zeigt, ob er läuft, angemeldet ist und liefert.
 
 ## Endpunkte
 
@@ -351,15 +424,17 @@ Zwei Dinge sind praktisch wichtig:
 
 ## Datenschutz
 
-Das **iSMART-Passwort kennt nur der Gateway-Container** — dieses Plugin
-braucht es nicht.
+Seit 1.1.18 kennt das Plugin das **iSMART-Passwort**: Es steht in `mg.json`
+(0600), in der Zweitschrift und in der Sicherungsdatei, damit „Gateway neu
+anlegen“ ohne erneutes Eintippen geht. Docker bewahrt es zusätzlich in der
+Container-Beschreibung auf (`docker inspect`).
 
 Zugangsdaten liegen an **vier** Stellen, und wer das Gerät weitergibt, sollte
 alle vier kennen:
 
 | Datei | Inhalt | Rechte |
 |---|---|---|
-| `config/plugins/mgismart/mg.json` | Broker-Passwort, Merkwort | 0600 |
+| `config/plugins/mgismart/mg.json` | Broker-Passwort, Merkwort, iSMART-Passwort | 0600 |
 | `config/plugins/mgismart.backup.json` | dieselbe Datei, überlebt das Upgrade | 0600 |
 | `data/plugins/mgismart/mosquitto/mosquitto_sub` | Broker-Benutzer und -Passwort im Klartext | 0600 im Ordner 0700 |
 | `data/plugins/mgismart/mosquitto/mosquitto_pub` | dasselbe | 0600 im Ordner 0700 |

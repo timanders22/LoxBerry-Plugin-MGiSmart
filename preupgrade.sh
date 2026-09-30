@@ -73,6 +73,17 @@ if [ -z "$BASE" ]; then
     echo "<WARNING> Die Einstellungen holt dann die Zweitschrift neben dem Konfigordner (<ordner>.backup.json) zurueck."
     exit 1
 fi
+# Seit 1.1.18 (Entscheidung 1 vom 29.09.2026): die Upgrade-Marke NEBEN dem Datenordner, als Erstes nach der
+# Wurzel. preinstall.sh erkennt daran die Aktualisierung, postinstall.sh spielt nur mit ihr
+# zurueck und raeumt sie ab. Ohne Marke hielte preinstall.sh das Update fuer eine
+# Neuinstallation - deshalb Abbruch mit rc 2, VOR purge_installation.
+MARKE="$BASE/data/plugins/$PFOLDER.upgrade_laeuft"
+{ date +%s > "$MARKE"; } 2>/dev/null
+if ! grep -qx '[0-9][0-9]*' "$MARKE" 2>/dev/null; then
+    echo "<FAIL> Die Marke $MARKE liess sich nicht anlegen - die Aktualisierung wird abgebrochen,"
+    echo "<FAIL> die bisherige Fassung bleibt unveraendert installiert."
+    exit 2
+fi
 if [ -z "$ABLAGE" ]; then
     echo "<WARNING> Kein brauchbarer Ablageort fuer das Update (Argument 1 und 6) - nichts beiseitegelegt."
     echo "<WARNING> Die Einstellungen holt dann die Zweitschrift neben dem Konfigordner (<ordner>.backup.json) zurueck."

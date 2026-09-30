@@ -67,15 +67,39 @@ if (in_array('--mqtt-leeren', array_slice(isset($argv) ? $argv : array(), 1), tr
     }
     exit($mg_rc);
 }
+/* Seit 1.1.18 (Bauliste G7): die zurueckbehaltenen Themen des GATEWAYS unter
+ * <prefix>/ - nur aus uninstall/uninstall und nur, nachdem dort ein Container
+ * mit den eigenen Labels entfernt wurde (mg_gateway_themen_leeren()). */
+if (in_array('--gateway-leeren', array_slice(isset($argv) ? $argv : array(), 1), true)) {
+    mg_nur_lesen(true);
+    list($mg_rc, $mg_zeilen) = mg_gateway_themen_leeren();
+    foreach ($mg_zeilen as $mg_z) {
+        echo $mg_z . "\n";
+    }
+    exit($mg_rc);
+}
 
 $cfg = mg_config();
 if (trim((string) $cfg['saic_user']) === '' || mg_fahrzeug_anzahl($cfg) === 0) {
     exit;   // noch nicht eingerichtet
 }
 
+/* Die Abo-Datei des MQTT-Gateways nachfuehren (seit 1.1.18, Befund M8): ein
+ * Update legt die mitgelieferte mit dem Vorgabepraefix zurueck. Geschrieben
+ * wird nur, wenn sie abweicht - wie beim Speichern im Reiter MQTT. */
+mg_abo_datei($cfg['mqtt_praefix'], true);
+
 list($ok, $info) = mg_snapshot(3);
+/* Das Lebenszeichen geht bei JEDEM Lauf hinaus, am Aenderungsfilter vorbei
+ * und fluechtig (seit 1.1.18, Befund M3) - auch wenn das Einlesen scheitert:
+ * es sagt, dass der Takt laeuft, nicht, dass die Werte stimmen. */
+mg_mqtt_lebenszeichen($cfg);
 if (!$ok) {
     mg_log_if_changed('verbindung', 'keine Werte vom Broker (' . $info . ')');
+    /* Fehlerzweig: je Fahrzeug ok=0, fluechtig; die Zustaende bleiben stehen.
+     * Bis 1.1.17 ging hier nichts hinaus, und ok hielt im Miniserver die
+     * letzte 1. */
+    mg_mqtt_ok_null($cfg);
     exit;
 }
 mg_log_if_changed('verbindung', 'Broker erreichbar (' . $info . ')');
