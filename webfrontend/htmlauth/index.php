@@ -92,6 +92,11 @@ $mg_plugin = $mg_p['plugin'];
 $mg_meldungen = array();
 $mg_fehler = array();
 $mg_verwaiste = array();
+/* Nr. 16 und X-2 (Verbesserungsbau 01.10.2026): welche Felder beanstandet
+ * wurden (mg_formfeld() und die Handler tragen sie ein) und die Eingaben,
+ * die dann mit der Einmalmeldung reisen (mg_eingaben_sammeln()). */
+$mg_beanstandet = array();
+$mg_eingaben = null;
 $mg_fmt = mg_formtoken();
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($mg_fmt === '') {
@@ -174,8 +179,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['vorlage'])) {
  * mg_sicherung_lesen() uebergeht ihn. Wie jeder Download steht dieser Zweig
  * vor lbheader() und ohne Umleitung. */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mg_sichern'])) {
+    /* X-3 (Verbesserungsbau 01.10.2026): wuerde diese Sicherung das eigene
+     * Zurueckspielen nicht bestehen, steht das als _warnung im Kopf - nur
+     * Namen, nie Werte. Geliefert wird sie trotzdem vollstaendig; das
+     * Zurueckspielen uebergeht Schluessel mit '_'. */
+    $mg_sich = mg_config();
+    $mg_sich_namen = mg_rueckspiel_maengel($mg_sich);
     $mg_js = json_encode(array('_hinweis' => mg_t('EINST.SICH_KOPF'), '_stand' => date('Y-m-d H:i'))
-        + mg_config(), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        + ($mg_sich_namen ? array('_warnung' => sprintf(mg_t('EINST.SICH_WARN_KOPF'), implode(', ', $mg_sich_namen)))
+                          : array())
+        + $mg_sich, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     if ($mg_js !== false) {
         header('Content-Type: application/json; charset=utf-8');
         header('Content-Disposition: attachment; filename="mgismart_einstellungen_'
@@ -299,6 +312,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mqtt_save'])) {
     $mg_neu = mg_config();
     $mg_alt_praefix = trim((string) $mg_neu['mqtt_praefix'], '/ ');
     $mg_alt_ein = !empty($mg_neu['mqtt_ein']);
+    $mg_f0 = count($mg_fehler);   // Nr. 16: kam etwas dazu, wird nichts gespeichert
     /* Broker: ohne eigene Angaben gelten die Daten des LoxBerry
      * (Entscheidung 7, Befund U11/C1). Eigene Angaben nur mit dem Haken
      * "eigene Broker-Angaben verwenden"; ohne ihn werden eigener Benutzer und
@@ -309,20 +323,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mqtt_save'])) {
     if (!empty($_POST['broker_eigen'])) {
         mg_formfeld('broker_host', 'MQTTR.HOST', $mg_neu, $mg_fehler);
         mg_formfeld('broker_port', 'MQTTR.PORT', $mg_neu, $mg_fehler);
-        $mg_neu['broker_user'] = mg_optionswert(isset($_POST['broker_user']) ? $_POST['broker_user'] : '');
+        /* Beschnitten wird am Rand - ein aus der Zwischenablage eingefuegter
+         * Wert mit angehaengtem \r ergaebe sonst ein stilles Falschpasswort in
+         * der Optionsdatei. Ein Zeilenumbruch oder Tabulator IM Innern wurde
+         * bis 1.1.20 still herausgenommen; jetzt ist er eine Beanstandung
+         * (Nr. 16, Nachtrag B: stilles Zurechtbiegen zaehlt als Beanstandung). */
+        $mg_roh = (isset($_POST['broker_user']) && is_string($_POST['broker_user'])) ? $_POST['broker_user'] : '';
+        if (mg_optionswert($mg_roh) !== trim($mg_roh)) {
+            $mg_fehler[] = sprintf(mg_t('FEHLER.FELD'), mg_t('MQTTR.USER'), mg_t('WERT.STEUERZEICHEN'));
+            $mg_beanstandet[] = 'broker_user';
+        } else {
+            $mg_neu['broker_user'] = mg_optionswert($mg_roh);
+        }
         // Leeres Feld loescht nicht: ein gespeichertes Passwort bleibt stehen.
-        // Beschnitten wird es wie der Benutzername - ein aus der Zwischenablage
-        // eingefuegtes Passwort mit angehaengtem \r ergaebe sonst ein stilles
-        // Falschpasswort in der Optionsdatei.
-        $mg_pw = mg_optionswert(isset($_POST['broker_pass']) ? $_POST['broker_pass'] : '');
-        if ($mg_pw !== '') { $mg_neu['broker_pass'] = $mg_pw; }
+        $mg_roh = (isset($_POST['broker_pass']) && is_string($_POST['broker_pass'])) ? $_POST['broker_pass'] : '';
+        $mg_pw = mg_optionswert($mg_roh);
+        if ($mg_pw !== trim($mg_roh)) {
+            $mg_fehler[] = sprintf(mg_t('FEHLER.FELD'), mg_t('MQTTR.PASS'), mg_t('WERT.STEUERZEICHEN'));
+            $mg_beanstandet[] = 'broker_pass';
+            $mg_pw = '';
+        } elseif ($mg_pw !== '') {
+            $mg_neu['broker_pass'] = $mg_pw;
+        }
         if (!empty($_POST['broker_pass_loeschen'])) { $mg_neu['broker_pass'] = ''; }
         // Ohne Benutzer ist nur ein Broker auf einem ANDEREN Rechner eine
         // eigene Angabe (Nacharbeit N2); lokal gaelte ohnehin general.json.
-        if ($mg_neu['broker_user'] === '') {
+        if ($mg_neu['broker_user'] === '' && !in_array('broker_user', $mg_beanstandet, true)) {
+            // Nr. 16: ein eingetipptes Kennwort ohne Benutzer fiel bis 1.1.20 still weg.
+            if ($mg_pw !== '') {
+                $mg_fehler[] = mg_t('MQTTR.PASS_OHNE_BENUTZER');
+                $mg_beanstandet[] = 'broker_pass';
+                $mg_beanstandet[] = 'broker_user';
+            }
             $mg_neu['broker_pass'] = '';
             if (mg_broker_host_lokal($mg_neu['broker_host'])) {
                 $mg_fehler[] = mg_t('MQTTR.EIGEN_OHNE_BENUTZER');
+                $mg_beanstandet[] = 'broker_user';
             }
         }
     } else {
@@ -337,25 +373,47 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mqtt_save'])) {
      * "saic test" das Praefix "saictest". Jetzt bleibt der gespeicherte
      * Wert stehen, und die Meldung nennt Feld und Grenze. */
     mg_formfeld('prefix', 'MQTTR.PREFIX', $mg_neu, $mg_fehler);
-    $mg_neu['saic_user'] = trim(preg_replace('/[\x00-\x1F\x7F"\']/', '',
-        (string) (isset($_POST['saic_user']) ? $_POST['saic_user'] : '')));
+    /* Nr. 16: Steuer- und Anfuehrungszeichen im iSMART-Benutzer wurden bis
+     * 1.1.20 still entfernt - jetzt Beanstandung, am Rand wird beschnitten. */
+    $mg_roh = (isset($_POST['saic_user']) && is_string($_POST['saic_user'])) ? trim($_POST['saic_user']) : '';
+    if (preg_match('/[\x00-\x1F\x7F"\']/', $mg_roh)) {
+        $mg_fehler[] = sprintf(mg_t('FEHLER.FELD'), mg_t('MQTTR.SAIC_USER'), mg_t('WERT.ZEICHEN'));
+        $mg_beanstandet[] = 'saic_user';
+    } else {
+        $mg_neu['saic_user'] = $mg_roh;
+    }
 
-    /* Fahrzeuge: eine halb ausgefuellte Zeile wird UEBERGANGEN und gemeldet,
-     * sie verhindert aber nicht das Speichern der uebrigen. */
+    /* Fahrzeuge (Nr. 16, Verbesserungsbau 01.10.2026): bis 1.1.20 wurde eine
+     * unbrauchbare Zeile uebergangen und der Rest gespeichert, Leer-, Steuer-
+     * und Anfuehrungszeichen verschwanden still aus VIN und Name, und ein
+     * Name ohne VIN fiel still weg. Jetzt ist jedes davon eine Beanstandung,
+     * und gespeichert wird nichts. Eine ganz leere Zeile bleibt leer. */
     $mg_vins = array();
     $mg_namen = array();
     $mg_rohvins = isset($_POST['vin']) && is_array($_POST['vin']) ? $_POST['vin'] : array();
     $mg_rohnamen = isset($_POST['fzname']) && is_array($_POST['fzname']) ? $_POST['fzname'] : array();
     foreach ($mg_rohvins as $mg_i => $mg_v) {
-        $mg_v = trim(preg_replace('/[\x00-\x1F\x7F"\'\s]/', '', (string) $mg_v));
-        if ($mg_v === '') { continue; }
+        $mg_v = is_string($mg_v) ? trim($mg_v) : '';
+        $mg_n = (isset($mg_rohnamen[$mg_i]) && is_string($mg_rohnamen[$mg_i])) ? trim($mg_rohnamen[$mg_i]) : '';
+        if ($mg_v === '') {
+            if ($mg_n !== '') {
+                $mg_fehler[] = mg_t('FEHLER.FZ_OHNE_VIN') . ' ' . mg_kuerzen($mg_n, 40);
+                $mg_beanstandet[] = 'vin.' . (int) $mg_i;
+            }
+            continue;
+        }
         if (!preg_match('/^[A-Za-z0-9]{6,32}$/', $mg_v)) {
             $mg_fehler[] = mg_t('FEHLER.VIN') . ' ' . mg_kuerzen($mg_v, 24);
+            $mg_beanstandet[] = 'vin.' . (int) $mg_i;
+            continue;
+        }
+        if (strlen($mg_n) > 256 || preg_match('/[\x00-\x1F\x7F"\']/', $mg_n)) {
+            $mg_fehler[] = mg_t('FEHLER.FZNAME') . ' ' . mg_kuerzen($mg_n, 40);
+            $mg_beanstandet[] = 'fzname.' . (int) $mg_i;
             continue;
         }
         $mg_vins[] = $mg_v;
-        $mg_namen[] = trim(preg_replace('/[\x00-\x1F\x7F"\']/', '',
-            (string) (isset($mg_rohnamen[$mg_i]) ? $mg_rohnamen[$mg_i] : '')));
+        $mg_namen[] = $mg_n;
     }
     $mg_neu['vins'] = $mg_vins;
     $mg_neu['namen'] = $mg_namen;
@@ -375,10 +433,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mqtt_save'])) {
             || strncmp($mg_gw, $mg_ep . '/', strlen($mg_ep) + 1) === 0)) {
         $mg_fehler[] = sprintf(mg_t('FEHLER.PRAEFIX_KOLLISION'),
                                mg_kuerzen($mg_ep, 40));
-        $mg_neu['mqtt_praefix'] = (string) $mg_cfg['mqtt_praefix'];
+        // Nr. 16: bis 1.1.20 still der alte Wert und der Rest gespeichert.
+        $mg_beanstandet[] = 'mqtt_praefix';
+        $mg_beanstandet[] = 'prefix';
     }
 
-    if (mg_config_save($mg_neu)) {
+    if (count($mg_fehler) > $mg_f0) {
+        $mg_fehler[] = mg_t('FEHLER.NICHTS_GESPEICHERT');   // Nr. 16 (MQTT)
+        $mg_eingaben = mg_eingaben_sammeln('mqtt', $mg_beanstandet);   // X-2
+    } elseif (mg_config_save($mg_neu)) {
         $mg_meldungen[] = mg_t('MELDUNG.GESPEICHERT');
         $mg_cfg = mg_config();
         $mg_fmt = mg_formtoken($mg_cfg);
@@ -411,14 +474,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mqtt_save'])) {
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
     $mg_neu = mg_config();
+    $mg_f0 = count($mg_fehler);   // Nr. 16: kam etwas dazu, wird nichts gespeichert
     /* Abweisen statt verbiegen (seit 1.1.18, Befund U8): bis 1.1.17 wurde
      * jede Zahl still in ihre Grenzen geklemmt ("abc" -> Kapazitaet 1,
      * Wartezeit 25 -> 20, Radius 5 -> 20 ...) und "Konfiguration
-     * gespeichert" gemeldet. Jetzt bleibt der gespeicherte Wert stehen, und
-     * die Meldung nennt Feld und Grenze; die uebrigen Felder werden
-     * gespeichert (Regeln/05, "Beanstandungen melden, nicht das ganze
-     * Speichern verhindern"). Die Regeln stehen in mg_wert_regeln() - dieselben
-     * prueft das Zurueckspielen einer Sicherung. */
+     * gespeichert" gemeldet. Die Meldung nennt Feld und Grenze. Seit dem
+     * Verbesserungsbau 01.10.2026 (Entscheidung Nr. 16) wird bei einer
+     * Beanstandung NICHTS gespeichert, auch nicht die uebrigen Felder; die
+     * eingetippten Werte stehen wieder im Formular (X-2). Bis 1.1.20 wurden
+     * die uebrigen gespeichert (Bestandsmessung B, index.php:494). Die
+     * Regeln stehen in mg_wert_regeln() - dieselben prueft das Zurueckspielen
+     * einer Sicherung. */
     mg_formfeld('capacity', 'EINST.KAPAZITAET', $mg_neu, $mg_fehler);
     $mg_neu['commands'] = isset($_POST['commands']) ? 1 : 0;
     $mg_neu['gefahr_ein'] = isset($_POST['gefahr_ein']) ? 1 : 0;
@@ -437,6 +503,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
             $mg_neu[$mg_f] = $mg_w;
         } else {
             $mg_fehler[] = mg_t('FEHLER.KOORDINATE') . ' ' . mg_kuerzen($mg_w, 20);
+            $mg_beanstandet[] = $mg_f;
         }
     }
     mg_formfeld('heim_radius', 'EINST.HEIM_RADIUS', $mg_neu, $mg_fehler);
@@ -454,23 +521,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
 
     $mg_neu['ladungen_ein'] = isset($_POST['ladungen_ein']) ? 1 : 0;
 
-    /* Lade- und Batterieheizplan. Eine unbrauchbare Uhrzeit wird GEMELDET und
-     * die Zeile uebergangen - sie verhindert aber nicht das Speichern der
-     * uebrigen Einstellungen. */
+    /* Lade- und Batterieheizplan. Eine unbrauchbare Uhrzeit ist eine
+     * Beanstandung, und gespeichert wird nichts (Nr. 16; bis 1.1.20 wurde sie
+     * uebergangen und der Rest gespeichert). Seit Entscheidung Nr. 19
+     * (01.10.2026) auch ein GELEERTES Zeitfeld (bis 1.1.20 blieb still der
+     * alte Wert) und Sekunden (bis 1.1.20 still abgeschnitten). */
     $mg_neu['plan_ein'] = isset($_POST['plan_ein']) ? 1 : 0;
     foreach (array('plan_von', 'plan_bis', 'heizplan_von') as $mg_f) {
-        $mg_w = (string) (isset($_POST[$mg_f]) ? $_POST[$mg_f] : '');
+        if (!isset($_POST[$mg_f]) || !is_string($_POST[$mg_f])) {
+            continue;   // gehoert zu einem anderen Formular
+        }
+        $mg_w = $_POST[$mg_f];
         $mg_u = mg_uhrzeit($mg_w);
-        if ($mg_u !== '') {
+        if ($mg_u !== '' && $mg_u === trim($mg_w)) {
             $mg_neu[$mg_f] = $mg_u;
-        } elseif (trim($mg_w) !== '') {
+        } else {
             $mg_fehler[] = mg_t('FEHLER.UHRZEIT') . ' ' . mg_kuerzen($mg_w, 20);
+            $mg_beanstandet[] = $mg_f;
         }
     }
-    $mg_w = strtolower((string) (isset($_POST['plan_modus']) ? $_POST['plan_modus'] : ''));
-    if (in_array($mg_w, mg_planmodi(), true)) {
-        $mg_neu['plan_modus'] = $mg_w;
-    }
+    /* Nr. 16: ein unbekannter Modus blieb bis 1.1.20 still beim alten Wert. */
+    mg_formfeld('plan_modus', 'EINST.PLAN_MODUS', $mg_neu, $mg_fehler);
 
     $mg_neu['abfahrt_ein'] = isset($_POST['abfahrt_ein']) ? 1 : 0;
     /* abfahrt_praefix: seit 1.1.17 ungenutzt (die Vorklimatisierung liest
@@ -482,8 +553,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
     mg_formfeld('abfahrt_fahrzeug', 'EINST.ABFAHRT_FAHRZEUG', $mg_neu, $mg_fehler);
 
     $mg_neu['ladeempf_ein'] = isset($_POST['ladeempf_ein']) ? 1 : 0;
-    $mg_neu['ladeempf_thema'] = trim(preg_replace('/[\x00-\x1F\x7F"\'\s]/', '',
-        (string) (isset($_POST['ladeempf_thema']) ? $_POST['ladeempf_thema'] : '')));
+    /* Nr. 16: Leer-, Steuer- und Anfuehrungszeichen im Thema wurden bis 1.1.20
+     * still entfernt - jetzt Beanstandung nach der Regel des Zurueckspielens. */
+    mg_formfeld('ladeempf_thema', 'EINST.LADEEMPF_THEMA', $mg_neu, $mg_fehler);
     mg_formfeld('ladeempf_grenze', 'EINST.LADEEMPF_GRENZE', $mg_neu, $mg_fehler);
     $mg_neu['ladeempf_unter'] = isset($_POST['ladeempf_unter']) ? 1 : 0;
     mg_formfeld('ladeempf_fahrzeug', 'EINST.LADEEMPF_FAHRZEUG', $mg_neu, $mg_fehler);
@@ -491,7 +563,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
     mg_formfeld('ladeempf_hoch', 'EINST.LADEEMPF_HOCH', $mg_neu, $mg_fehler);
     mg_formfeld('ladeempf_runter', 'EINST.LADEEMPF_RUNTER', $mg_neu, $mg_fehler);
 
-    if (mg_config_save($mg_neu)) {
+    if (count($mg_fehler) > $mg_f0) {
+        $mg_fehler[] = mg_t('FEHLER.NICHTS_GESPEICHERT');   // Nr. 16 (Einstellungen)
+        $mg_eingaben = mg_eingaben_sammeln('settings', $mg_beanstandet);   // X-2
+    } elseif (mg_config_save($mg_neu)) {
         $mg_meldungen[] = mg_t('MELDUNG.GESPEICHERT');
         $mg_cfg = mg_config();
         $mg_fmt = mg_formtoken($mg_cfg);
@@ -576,6 +651,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $mg_formular === 'gateway') {
      * zurechtgebogen. */
     if (!preg_match('/^[^\s@\/#+"\'<>\x00-\x1F\x7F]+@[^\s@\/#+"\'<>\x00-\x1F\x7F]+\z/', $mg_mail)) {
         $mg_fehler[] = sprintf(mg_t('FEHLER.FELD'), mg_t('GW.MAIL'), mg_t('WERT.EMAIL'));
+        $mg_beanstandet[] = 'saic_user';
         $mg_ok = false;
     } else {
         $mg_neu['saic_user'] = $mg_mail;
@@ -588,20 +664,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $mg_formular === 'gateway') {
             $mg_neu['saic_pass'] = $mg_pw;
         } else {
             $mg_fehler[] = sprintf(mg_t('FEHLER.FELD'), mg_t('GW.PASS'), $mg_grund);
+            $mg_beanstandet[] = 'saic_pass';
             $mg_ok = false;
         }
     }
     if ($mg_loeschen) {
         $mg_neu['saic_pass'] = '';
     }
-    if ($mg_ok || $mg_loeschen) {
-        if (!mg_config_save($mg_neu)) {
-            $mg_fehler[] = mg_t('FEHLER.SPEICHERN');
-            $mg_ok = false;
-        } elseif ($mg_loeschen) {
-            $mg_meldungen[] = mg_t('GW.PASS_GELOESCHT');
-            $mg_ok = false;   // ohne Kennwort wird nichts angelegt
-        }
+    /* Nr. 16 (Verbesserungsbau 01.10.2026): bis 1.1.20 wurde mit dem Haken
+     * "Kennwort loeschen" auch bei beanstandeter E-Mail gespeichert. */
+    if (!$mg_ok) {
+        $mg_fehler[] = mg_t('FEHLER.NICHTS_GESPEICHERT');   // Nr. 16 (Gateway)
+        $mg_eingaben = mg_eingaben_sammeln('gateway', $mg_beanstandet);   // X-2
+    } elseif (!mg_config_save($mg_neu)) {
+        $mg_fehler[] = mg_t('FEHLER.SPEICHERN');
+        $mg_ok = false;
+    } elseif ($mg_loeschen) {
+        $mg_meldungen[] = mg_t('GW.PASS_GELOESCHT');
+        $mg_ok = false;   // ohne Kennwort wird nichts angelegt
     }
     if ($mg_ok) {
         $mg_neu = mg_config();
@@ -615,8 +695,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $mg_formular === 'gateway') {
     $mg_tab = 'tab-gateway';
 }
 
+/* a1 (Verbesserungsbau 01.10.2026): Neustart und Entfernen laufen wie das
+ * Anlegen im Hintergrundvorgang (mg_gw_vorgang_starten); die Seite antwortet
+ * sofort mit der Umleitung und zeigt danach "seit N s". Bis 1.1.20 liefen sie
+ * hier im Seitenaufbau, und ein haengendes Docker hielt die Seite bis etwa
+ * 2 min auf. */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $mg_formular === 'gw_neustart') {
-    list($mg_gok, $mg_gtext) = mg_gw_neustart();
+    list($mg_gok, $mg_gtext) = mg_gw_vorgang_starten('neustart');
     if ($mg_gok) { $mg_meldungen[] = $mg_gtext; } else { $mg_fehler[] = $mg_gtext; }
     $mg_tab = 'tab-gateway';
 }
@@ -635,7 +720,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $mg_formular === 'gw_entfernen') {
     if (!$mg_bestaetigt) {
         $mg_fehler[] = mg_t('FEHLER.NICHT_BESTAETIGT');
     } else {
-        list($mg_gok, $mg_gtext) = mg_gw_entfernen();
+        list($mg_gok, $mg_gtext) = mg_gw_vorgang_starten('entfernen');   // a1
         if ($mg_gok) { $mg_meldungen[] = $mg_gtext; } else { $mg_fehler[] = $mg_gtext; }
     }
     $mg_tab = 'tab-gateway';
@@ -676,8 +761,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $mg_formular === 'gw_vins') {
  * (Vorlagen, Sicherung) haben oben schon mit exit geendet.
  * ================================================================== */
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    // X-2: die Eingaben reisen nur nach einer Beanstandung mit (mg_eingaben_sammeln).
     mg_flash_schreiben(array('meldungen' => $mg_meldungen, 'fehler' => $mg_fehler,
-                             'verwaiste' => $mg_verwaiste));
+                             'verwaiste' => $mg_verwaiste)
+                       + ($mg_eingaben !== null ? array('eingaben' => $mg_eingaben) : array()));
     header('Location: index.php?form=' . rawurlencode(substr($mg_tab, 4)), true, 303);
     exit;
 }
@@ -690,6 +777,9 @@ foreach (array('meldungen' => 'mg_meldungen', 'fehler' => 'mg_fehler') as $mg_fk
             if (is_string($mg_m)) { ${$mg_fv}[] = $mg_m; }
         }
     }
+}
+if (isset($mg_flash['eingaben'])) {
+    mg_eingaben_setzen($mg_flash['eingaben']);   // X-2
 }
 if (isset($mg_flash['verwaiste']) && is_array($mg_flash['verwaiste'])) {
     $mg_verwaiste = $mg_flash['verwaiste'];
@@ -771,6 +861,8 @@ function mg_formfeld($k, $bez, array &$neu, array &$fehler, $regel = null)
     list($ok, $w, $grund) = mg_wert_pruefen($regel === null ? $k : $regel, trim($_POST[$k]), true);
     if (!$ok) {
         $fehler[] = sprintf(mg_t('FEHLER.FELD'), mg_t($bez), $grund);
+        // Nr. 16/X-2: das Feld merken (die Handler laufen auf oberster Ebene).
+        $GLOBALS['mg_beanstandet'][] = $k;
         return;
     }
     if ($regel === 'notify.push_minutes') {
@@ -908,6 +1000,8 @@ if (class_exists('LBWeb', false)) {
 .sm-ampel-gelb  { background: #e0b40d; }
 .sm-ampel-rot   { background: #b00000; }
 .sm-ampel-grau  { background: #9e9e9e; }
+/* X-2: das beanstandete Feld nach der Umleitung (eigene Zutat, nicht aus der Vorlage). */
+.sm-beanstandet { outline: 2px solid #b00000 !important; outline-offset: 1px; }
 </style>
 <div class="sm-wrap">
 <h2 style="margin-top:6px;">MG iSmart<?php if ($mg_ver !== '') { ?> <span class="sm-hilfe" style="font-weight:400;"><?= mg_e($mg_ver) ?></span><?php } ?></h2>
@@ -958,98 +1052,98 @@ if (class_exists('LBWeb', false)) {
 <h2><?= mg_e(mg_t('EINST.H_FAHRZEUG')) ?></h2>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.KAPAZITAET')) ?></label>
-	<input data-role="none" type="text" name="capacity" value="<?= mg_e($mg_cfg['capacity']) ?>" placeholder="61,1">
+	<input data-role="none" type="text" name="capacity" value="<?= mg_e(mg_eingabe('settings', 'capacity', $mg_cfg['capacity'])) ?>" placeholder="61,1"<?= mg_markierung('settings', 'capacity') ?>>
 	<div class="sm-hilfe"><?php echo mg_t('EINST.KAPAZITAET_HILFE'); ?></div>
 </div>
 
 <h2><?= mg_e(mg_t('EINST.H_STEUERUNG')) ?></h2>
 <div class="sm-feld">
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
-	<input data-role="none" type="checkbox" name="commands" <?= !empty($mg_cfg['commands']) ? 'checked' : '' ?>>
+	<input data-role="none" type="checkbox" name="commands" <?= mg_eingabe_an('settings', 'commands', !empty($mg_cfg['commands'])) ? 'checked' : '' ?>>
 	<?= mg_e(mg_t('EINST.COMMANDS')) ?></label>
 	<div class="sm-hilfe"><?php echo mg_t('EINST.COMMANDS_HILFE'); ?></div>
 </div>
 <div class="sm-feld">
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
-	<input data-role="none" type="checkbox" name="gefahr_ein" <?= !empty($mg_cfg['gefahr_ein']) ? 'checked' : '' ?>>
+	<input data-role="none" type="checkbox" name="gefahr_ein" <?= mg_eingabe_an('settings', 'gefahr_ein', !empty($mg_cfg['gefahr_ein'])) ? 'checked' : '' ?>>
 	<?= mg_e(mg_t('EINST.GEFAHR')) ?></label>
 	<div class="sm-hilfe"><?php echo mg_t('EINST.GEFAHR_HILFE'); ?></div>
 </div>
 <div class="sm-feld">
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
-	<input data-role="none" type="checkbox" name="wirkung_pruefen" <?= !empty($mg_cfg['wirkung_pruefen']) ? 'checked' : '' ?>>
+	<input data-role="none" type="checkbox" name="wirkung_pruefen" <?= mg_eingabe_an('settings', 'wirkung_pruefen', !empty($mg_cfg['wirkung_pruefen'])) ? 'checked' : '' ?>>
 	<?= mg_e(mg_t('EINST.WIRKUNG')) ?></label>
 	<div class="sm-hilfe"><?php echo mg_t('EINST.WIRKUNG_HILFE'); ?></div>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.WARTEZEIT')) ?></label>
-	<input data-role="none" type="number" name="wartezeit" min="2" max="20" value="<?= (int) $mg_cfg['wartezeit'] ?>">
+	<input data-role="none" type="number" name="wartezeit" min="2" max="20" value="<?= mg_e(mg_eingabe('settings', 'wartezeit', (int) $mg_cfg['wartezeit'])) ?>"<?= mg_markierung('settings', 'wartezeit') ?>>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.BEFEHL_ABSTAND')) ?></label>
-	<input data-role="none" type="number" name="befehl_abstand" min="0" max="3600" value="<?= (int) $mg_cfg['befehl_abstand'] ?>">
+	<input data-role="none" type="number" name="befehl_abstand" min="0" max="3600" value="<?= mg_e(mg_eingabe('settings', 'befehl_abstand', (int) $mg_cfg['befehl_abstand'])) ?>"<?= mg_markierung('settings', 'befehl_abstand') ?>>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.STROM_ABSTAND')) ?></label>
-	<input data-role="none" type="number" name="strom_abstand" min="0" max="3600" value="<?= (int) $mg_cfg['strom_abstand'] ?>">
+	<input data-role="none" type="number" name="strom_abstand" min="0" max="3600" value="<?= mg_e(mg_eingabe('settings', 'strom_abstand', (int) $mg_cfg['strom_abstand'])) ?>"<?= mg_markierung('settings', 'strom_abstand') ?>>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.BEFEHLE_STUNDE')) ?></label>
-	<input data-role="none" type="number" name="befehle_stunde" min="1" max="500" value="<?= (int) $mg_cfg['befehle_stunde'] ?>">
+	<input data-role="none" type="number" name="befehle_stunde" min="1" max="500" value="<?= mg_e(mg_eingabe('settings', 'befehle_stunde', (int) $mg_cfg['befehle_stunde'])) ?>"<?= mg_markierung('settings', 'befehle_stunde') ?>>
 	<div class="sm-hilfe"><?php echo mg_t('EINST.DROSSEL_HILFE'); ?></div>
 </div>
 
 <h2><?= mg_e(mg_t('EINST.H_ORT')) ?></h2>
 <div class="sm-feld">
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
-	<input data-role="none" type="checkbox" name="ort_ein" <?= !empty($mg_cfg['ort_ein']) ? 'checked' : '' ?>>
+	<input data-role="none" type="checkbox" name="ort_ein" <?= mg_eingabe_an('settings', 'ort_ein', !empty($mg_cfg['ort_ein'])) ? 'checked' : '' ?>>
 	<?= mg_e(mg_t('EINST.ORT_EIN')) ?></label>
 	<div class="sm-hilfe"><?php echo mg_t('EINST.ORT_HILFE'); ?></div>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.HEIM_BREITE')) ?></label>
-	<input data-role="none" type="text" name="heim_breite" value="<?= mg_e($mg_cfg['heim_breite']) ?>" placeholder="51.3183">
+	<input data-role="none" type="text" name="heim_breite" value="<?= mg_e(mg_eingabe('settings', 'heim_breite', $mg_cfg['heim_breite'])) ?>" placeholder="51.3183"<?= mg_markierung('settings', 'heim_breite') ?>>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.HEIM_LAENGE')) ?></label>
-	<input data-role="none" type="text" name="heim_laenge" value="<?= mg_e($mg_cfg['heim_laenge']) ?>" placeholder="9.4896">
+	<input data-role="none" type="text" name="heim_laenge" value="<?= mg_e(mg_eingabe('settings', 'heim_laenge', $mg_cfg['heim_laenge'])) ?>" placeholder="9.4896"<?= mg_markierung('settings', 'heim_laenge') ?>>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.HEIM_RADIUS')) ?></label>
-	<input data-role="none" type="number" name="heim_radius" min="20" max="20000" value="<?= (int) $mg_cfg['heim_radius'] ?>">
+	<input data-role="none" type="number" name="heim_radius" min="20" max="20000" value="<?= mg_e(mg_eingabe('settings', 'heim_radius', (int) $mg_cfg['heim_radius'])) ?>"<?= mg_markierung('settings', 'heim_radius') ?>>
 </div>
 
 <h2><?= mg_e(mg_t('EINST.H_MELDUNGEN')) ?></h2>
 <div class="sm-feld">
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
-	<input data-role="none" type="checkbox" name="notify_push" <?= !empty($mg_notify['push']) ? 'checked' : '' ?>>
+	<input data-role="none" type="checkbox" name="notify_push" <?= mg_eingabe_an('settings', 'notify_push', !empty($mg_notify['push'])) ? 'checked' : '' ?>>
 	<?= mg_e(mg_t('EINST.N_PUSH')) ?></label><br>
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
-	<input data-role="none" type="checkbox" name="n_voll" <?= !empty($mg_notify['soc_voll']) ? 'checked' : '' ?>>
+	<input data-role="none" type="checkbox" name="n_voll" <?= mg_eingabe_an('settings', 'n_voll', !empty($mg_notify['soc_voll'])) ? 'checked' : '' ?>>
 	<?= mg_e(mg_t('EINST.N_VOLL')) ?></label><br>
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
-	<input data-role="none" type="checkbox" name="n_stecker" <?= !empty($mg_notify['stecker']) ? 'checked' : '' ?>>
+	<input data-role="none" type="checkbox" name="n_stecker" <?= mg_eingabe_an('settings', 'n_stecker', !empty($mg_notify['stecker'])) ? 'checked' : '' ?>>
 	<?= mg_e(mg_t('EINST.N_STECKER')) ?></label><br>
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
-	<input data-role="none" type="checkbox" name="n_offen" <?= !empty($mg_notify['offen']) ? 'checked' : '' ?>>
+	<input data-role="none" type="checkbox" name="n_offen" <?= mg_eingabe_an('settings', 'n_offen', !empty($mg_notify['offen'])) ? 'checked' : '' ?>>
 	<?= mg_e(mg_t('EINST.N_OFFEN')) ?></label><br>
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
-	<input data-role="none" type="checkbox" name="n_fenster" <?= !empty($mg_notify['fenster']) ? 'checked' : '' ?>>
+	<input data-role="none" type="checkbox" name="n_fenster" <?= mg_eingabe_an('settings', 'n_fenster', !empty($mg_notify['fenster'])) ? 'checked' : '' ?>>
 	<?= mg_e(mg_t('EINST.N_FENSTER')) ?></label><br>
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
-	<input data-role="none" type="checkbox" name="n_fehler" <?= !empty($mg_notify['fehler']) ? 'checked' : '' ?>>
+	<input data-role="none" type="checkbox" name="n_fehler" <?= mg_eingabe_an('settings', 'n_fehler', !empty($mg_notify['fehler'])) ? 'checked' : '' ?>>
 	<?= mg_e(mg_t('EINST.N_FEHLER')) ?></label>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.PUSH_MINUTEN')) ?></label>
-	<input data-role="none" type="number" name="push_minutes" min="1" max="60" value="<?= (int) $mg_notify['push_minutes'] ?>">
+	<input data-role="none" type="number" name="push_minutes" min="1" max="60" value="<?= mg_e(mg_eingabe('settings', 'push_minutes', (int) $mg_notify['push_minutes'])) ?>"<?= mg_markierung('settings', 'push_minutes') ?>>
 	<div class="sm-hilfe"><?php echo mg_t('EINST.PUSH_HILFE'); ?></div>
 </div>
 
 <h2><?= mg_e(mg_t('EINST.H_AUTOMATIK')) ?></h2>
 <div class="sm-feld">
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
-	<input data-role="none" type="checkbox" name="abfahrt_ein" <?= !empty($mg_cfg['abfahrt_ein']) ? 'checked' : '' ?>>
+	<input data-role="none" type="checkbox" name="abfahrt_ein" <?= mg_eingabe_an('settings', 'abfahrt_ein', !empty($mg_cfg['abfahrt_ein'])) ? 'checked' : '' ?>>
 	<?= mg_e(mg_t('EINST.ABFAHRT_EIN')) ?></label>
 	<div class="sm-hilfe"><?php echo mg_t('EINST.ABFAHRT_HILFE'); ?></div>
 <?php if (!mg_abfahrt_da()) { ?>
@@ -1058,95 +1152,98 @@ if (class_exists('LBWeb', false)) {
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.ABFAHRT_VORLAUF')) ?></label>
-	<input data-role="none" type="number" name="abfahrt_vorlauf" min="1" max="180" value="<?= (int) $mg_cfg['abfahrt_vorlauf'] ?>">
+	<input data-role="none" type="number" name="abfahrt_vorlauf" min="1" max="180" value="<?= mg_e(mg_eingabe('settings', 'abfahrt_vorlauf', (int) $mg_cfg['abfahrt_vorlauf'])) ?>"<?= mg_markierung('settings', 'abfahrt_vorlauf') ?>>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.ABFAHRT_TEMP')) ?></label>
-	<input data-role="none" type="number" name="abfahrt_temp" min="16" max="30" value="<?= (int) $mg_cfg['abfahrt_temp'] ?>">
+	<input data-role="none" type="number" name="abfahrt_temp" min="16" max="30" value="<?= mg_e(mg_eingabe('settings', 'abfahrt_temp', (int) $mg_cfg['abfahrt_temp'])) ?>"<?= mg_markierung('settings', 'abfahrt_temp') ?>>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.ABFAHRT_FAHRZEUG')) ?></label>
-	<input data-role="none" type="number" name="abfahrt_fahrzeug" min="1" max="9" value="<?= (int) $mg_cfg['abfahrt_fahrzeug'] ?>">
+	<input data-role="none" type="number" name="abfahrt_fahrzeug" min="1" max="9" value="<?= mg_e(mg_eingabe('settings', 'abfahrt_fahrzeug', (int) $mg_cfg['abfahrt_fahrzeug'])) ?>"<?= mg_markierung('settings', 'abfahrt_fahrzeug') ?>>
 </div>
 
 <div class="sm-feld">
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
-	<input data-role="none" type="checkbox" name="ladeempf_ein" <?= !empty($mg_cfg['ladeempf_ein']) ? 'checked' : '' ?>>
+	<input data-role="none" type="checkbox" name="ladeempf_ein" <?= mg_eingabe_an('settings', 'ladeempf_ein', !empty($mg_cfg['ladeempf_ein'])) ? 'checked' : '' ?>>
 	<?= mg_e(mg_t('EINST.LADEEMPF_EIN')) ?></label>
 	<div class="sm-hilfe"><?php echo mg_t('EINST.LADEEMPF_HILFE'); ?></div>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.LADEEMPF_THEMA')) ?></label>
-	<input data-role="none" type="text" name="ladeempf_thema" value="<?= mg_e($mg_cfg['ladeempf_thema']) ?>" placeholder="pv/ueberschuss">
+	<input data-role="none" type="text" name="ladeempf_thema" value="<?= mg_e(mg_eingabe('settings', 'ladeempf_thema', $mg_cfg['ladeempf_thema'])) ?>" placeholder="pv/ueberschuss"<?= mg_markierung('settings', 'ladeempf_thema') ?>>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.LADEEMPF_GRENZE')) ?></label>
-	<input data-role="none" type="text" name="ladeempf_grenze" value="<?= mg_e($mg_cfg['ladeempf_grenze']) ?>">
+	<input data-role="none" type="text" name="ladeempf_grenze" value="<?= mg_e(mg_eingabe('settings', 'ladeempf_grenze', $mg_cfg['ladeempf_grenze'])) ?>"<?= mg_markierung('settings', 'ladeempf_grenze') ?>>
 </div>
 <div class="sm-feld">
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
-	<input data-role="none" type="checkbox" name="ladeempf_unter" <?= !empty($mg_cfg['ladeempf_unter']) ? 'checked' : '' ?>>
+	<input data-role="none" type="checkbox" name="ladeempf_unter" <?= mg_eingabe_an('settings', 'ladeempf_unter', !empty($mg_cfg['ladeempf_unter'])) ? 'checked' : '' ?>>
 	<?= mg_e(mg_t('EINST.LADEEMPF_UNTER')) ?></label>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.LADEEMPF_HOCH')) ?></label>
-	<select data-role="none" name="ladeempf_hoch">
+	<?php $mg_sel = mg_eingabe('settings', 'ladeempf_hoch', $mg_cfg['ladeempf_hoch']); /* X-2 */ ?>
+	<select data-role="none" name="ladeempf_hoch"<?= mg_markierung('settings', 'ladeempf_hoch') ?>>
 	<?php foreach ($mg_cmds as $mg_k => $mg_c) { if (!empty($mg_c['zusatz']) || !empty($mg_c['gefahr'])) { continue; } ?>
-		<option value="<?= mg_e($mg_k) ?>"<?= $mg_cfg['ladeempf_hoch'] === $mg_k ? ' selected' : '' ?>><?= mg_e(mg_t($mg_c['bez'])) ?></option>
+		<option value="<?= mg_e($mg_k) ?>"<?= $mg_sel === $mg_k ? ' selected' : '' ?>><?= mg_e(mg_t($mg_c['bez'])) ?></option>
 	<?php } foreach (mg_aliasse() as $mg_k => $mg_a) { ?>
-		<option value="<?= mg_e($mg_k) ?>"<?= $mg_cfg['ladeempf_hoch'] === $mg_k ? ' selected' : '' ?>><?= mg_e($mg_k) ?></option>
+		<option value="<?= mg_e($mg_k) ?>"<?= $mg_sel === $mg_k ? ' selected' : '' ?>><?= mg_e($mg_k) ?></option>
 	<?php } ?>
 	</select>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.LADEEMPF_RUNTER')) ?></label>
-	<select data-role="none" name="ladeempf_runter">
+	<?php $mg_sel = mg_eingabe('settings', 'ladeempf_runter', $mg_cfg['ladeempf_runter']); /* X-2 */ ?>
+	<select data-role="none" name="ladeempf_runter"<?= mg_markierung('settings', 'ladeempf_runter') ?>>
 	<?php foreach ($mg_cmds as $mg_k => $mg_c) { if (!empty($mg_c['zusatz']) || !empty($mg_c['gefahr'])) { continue; } ?>
-		<option value="<?= mg_e($mg_k) ?>"<?= $mg_cfg['ladeempf_runter'] === $mg_k ? ' selected' : '' ?>><?= mg_e(mg_t($mg_c['bez'])) ?></option>
+		<option value="<?= mg_e($mg_k) ?>"<?= $mg_sel === $mg_k ? ' selected' : '' ?>><?= mg_e(mg_t($mg_c['bez'])) ?></option>
 	<?php } foreach (mg_aliasse() as $mg_k => $mg_a) { ?>
-		<option value="<?= mg_e($mg_k) ?>"<?= $mg_cfg['ladeempf_runter'] === $mg_k ? ' selected' : '' ?>><?= mg_e($mg_k) ?></option>
+		<option value="<?= mg_e($mg_k) ?>"<?= $mg_sel === $mg_k ? ' selected' : '' ?>><?= mg_e($mg_k) ?></option>
 	<?php } ?>
 	</select>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.LADEEMPF_FAHRZEUG')) ?></label>
-	<input data-role="none" type="number" name="ladeempf_fahrzeug" min="1" max="9" value="<?= (int) $mg_cfg['ladeempf_fahrzeug'] ?>">
+	<input data-role="none" type="number" name="ladeempf_fahrzeug" min="1" max="9" value="<?= mg_e(mg_eingabe('settings', 'ladeempf_fahrzeug', (int) $mg_cfg['ladeempf_fahrzeug'])) ?>"<?= mg_markierung('settings', 'ladeempf_fahrzeug') ?>>
 </div>
 
 <h2><?= mg_e(mg_t('EINST.H_PLAN')) ?></h2>
 <div class="sm-warnung"><?php echo mg_t('EINST.PLAN_WARNUNG'); ?></div>
 <div class="sm-feld">
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
-	<input data-role="none" type="checkbox" name="plan_ein" <?= !empty($mg_cfg['plan_ein']) ? 'checked' : '' ?>>
+	<input data-role="none" type="checkbox" name="plan_ein" <?= mg_eingabe_an('settings', 'plan_ein', !empty($mg_cfg['plan_ein'])) ? 'checked' : '' ?>>
 	<?= mg_e(mg_t('EINST.PLAN_EIN')) ?></label>
 	<div class="sm-hilfe"><?php echo mg_t('EINST.PLAN_HILFE'); ?></div>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.PLAN_VON')) ?></label>
-	<input data-role="none" type="text" name="plan_von" value="<?= mg_e($mg_cfg['plan_von']) ?>" placeholder="22:00">
+	<input data-role="none" type="text" name="plan_von" value="<?= mg_e(mg_eingabe('settings', 'plan_von', $mg_cfg['plan_von'])) ?>" placeholder="22:00"<?= mg_markierung('settings', 'plan_von') ?>>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.PLAN_BIS')) ?></label>
-	<input data-role="none" type="text" name="plan_bis" value="<?= mg_e($mg_cfg['plan_bis']) ?>" placeholder="06:00">
+	<input data-role="none" type="text" name="plan_bis" value="<?= mg_e(mg_eingabe('settings', 'plan_bis', $mg_cfg['plan_bis'])) ?>" placeholder="06:00"<?= mg_markierung('settings', 'plan_bis') ?>>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.PLAN_MODUS')) ?></label>
-	<select data-role="none" name="plan_modus">
+	<?php $mg_sel = mg_eingabe('settings', 'plan_modus', $mg_cfg['plan_modus']); /* X-2 */ ?>
+	<select data-role="none" name="plan_modus"<?= mg_markierung('settings', 'plan_modus') ?>>
 	<?php foreach (mg_planmodi() as $mg_pm) { ?>
-		<option value="<?= mg_e($mg_pm) ?>"<?= $mg_cfg['plan_modus'] === $mg_pm ? ' selected' : '' ?>><?= mg_e(mg_t('PLANMODUS.' . strtoupper($mg_pm))) ?></option>
+		<option value="<?= mg_e($mg_pm) ?>"<?= $mg_sel === $mg_pm ? ' selected' : '' ?>><?= mg_e(mg_t('PLANMODUS.' . strtoupper($mg_pm))) ?></option>
 	<?php } ?>
 	</select>
 	<div class="sm-hilfe"><?php echo mg_t('EINST.PLAN_MODUS_HILFE'); ?></div>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.HEIZPLAN_VON')) ?></label>
-	<input data-role="none" type="text" name="heizplan_von" value="<?= mg_e($mg_cfg['heizplan_von']) ?>" placeholder="05:30">
+	<input data-role="none" type="text" name="heizplan_von" value="<?= mg_e(mg_eingabe('settings', 'heizplan_von', $mg_cfg['heizplan_von'])) ?>" placeholder="05:30"<?= mg_markierung('settings', 'heizplan_von') ?>>
 </div>
 
 <h2><?= mg_e(mg_t('EINST.H_LADUNGEN')) ?></h2>
 <div class="sm-feld">
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
-	<input data-role="none" type="checkbox" name="ladungen_ein" <?= !empty($mg_cfg['ladungen_ein']) ? 'checked' : '' ?>>
+	<input data-role="none" type="checkbox" name="ladungen_ein" <?= mg_eingabe_an('settings', 'ladungen_ein', !empty($mg_cfg['ladungen_ein'])) ? 'checked' : '' ?>>
 	<?= mg_e(mg_t('EINST.LADUNGEN_EIN')) ?></label>
 </div>
 
@@ -1158,6 +1255,10 @@ if (class_exists('LBWeb', false)) {
 <h2><?= mg_t('EINST.H_SICHERUNG') ?></h2>
 <div class="sm-hinweis"><?= mg_t('EINST.SICH_ERKLAERUNG') ?></div>
 <div class="sm-warnung"><?= mg_t('EINST.SICH_WARNUNG') ?></div>
+<?php $mg_rueck = mg_rueckspiel_maengel($mg_cfg); /* X-3 */ ?>
+<?php if ($mg_rueck) { ?>
+<div class="sm-warnung"><?= sprintf(mg_t('EINST.SICH_WARN_RUECK'), mg_e(implode(', ', $mg_rueck))) ?></div>
+<?php } ?>
 <div class="sm-knopfreihe">
   <!-- ZWEI GETRENNTE Formulare. Das Sichern schickt einen Download und ruft
        exit auf; das Zurueckspielen braucht enctype="multipart/form-data".
@@ -1208,27 +1309,27 @@ $mg_eigen = ($mg_zugang['quelle'] === 'eigen');
 } ?></div>
 <div class="sm-feld">
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
-	<input data-role="none" type="checkbox" name="broker_eigen" value="1" <?= $mg_eigen ? 'checked' : '' ?>>
+	<input data-role="none" type="checkbox" name="broker_eigen" value="1" <?= mg_eingabe_an('mqtt', 'broker_eigen', $mg_eigen) ? 'checked' : '' ?>>
 	<?= mg_e(mg_t('MQTTR.EIGEN_HAKEN')) ?></label>
 	<div class="sm-hilfe"><?php echo mg_t('MQTTR.EIGEN_HAKEN_HILFE'); ?></div>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('MQTTR.HOST')) ?></label>
-	<input data-role="none" type="text" name="broker_host" value="<?= mg_e($mg_cfg['broker_host']) ?>" placeholder="127.0.0.1">
+	<input data-role="none" type="text" name="broker_host" value="<?= mg_e(mg_eingabe('mqtt', 'broker_host', $mg_cfg['broker_host'])) ?>" placeholder="127.0.0.1"<?= mg_markierung('mqtt', 'broker_host') ?>>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('MQTTR.PORT')) ?></label>
-	<input data-role="none" type="number" name="broker_port" min="1" max="65535" value="<?= (int) $mg_cfg['broker_port'] ?>">
+	<input data-role="none" type="number" name="broker_port" min="1" max="65535" value="<?= mg_e(mg_eingabe('mqtt', 'broker_port', (int) $mg_cfg['broker_port'])) ?>"<?= mg_markierung('mqtt', 'broker_port') ?>>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('MQTTR.USER')) ?></label>
-	<input data-role="none" type="text" name="broker_user" value="<?= mg_e($mg_cfg['broker_user']) ?>">
+	<input data-role="none" type="text" name="broker_user" value="<?= mg_e(mg_eingabe('mqtt', 'broker_user', $mg_cfg['broker_user'])) ?>"<?= mg_markierung('mqtt', 'broker_user') ?>>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('MQTTR.PASS')) ?></label>
-	<input data-role="none" type="password" name="broker_pass" value="" placeholder="<?= $mg_cfg['broker_pass'] !== '' ? mg_e(mg_t('MQTTR.PASS_GESPEICHERT')) : mg_e(mg_t('MQTTR.PASS_LEER')) ?>">
+	<input data-role="none" type="password" name="broker_pass" value=""<?= mg_markierung('mqtt', 'broker_pass') ?> placeholder="<?= $mg_cfg['broker_pass'] !== '' ? mg_e(mg_t('MQTTR.PASS_GESPEICHERT')) : mg_e(mg_t('MQTTR.PASS_LEER')) ?>">
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;margin-top:6px;">
-	<input data-role="none" type="checkbox" name="broker_pass_loeschen" value="1">
+	<input data-role="none" type="checkbox" name="broker_pass_loeschen" value="1"<?= mg_eingabe_an('mqtt', 'broker_pass_loeschen', false) ? ' checked' : '' ?>>
 	<?= mg_e(mg_t('MQTTR.PASS_LOESCHEN')) ?></label>
 	<div class="sm-hilfe"><?php echo mg_t('MQTTR.BROKER_HILFE'); ?></div>
 </div>
@@ -1236,11 +1337,11 @@ $mg_eigen = ($mg_zugang['quelle'] === 'eigen');
 <h2><?= mg_e(mg_t('MQTTR.H_THEMEN')) ?></h2>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('MQTTR.PREFIX')) ?></label>
-	<input data-role="none" type="text" name="prefix" value="<?= mg_e($mg_cfg['prefix']) ?>" placeholder="saic">
+	<input data-role="none" type="text" name="prefix" value="<?= mg_e(mg_eingabe('mqtt', 'prefix', $mg_cfg['prefix'])) ?>" placeholder="saic"<?= mg_markierung('mqtt', 'prefix') ?>>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('MQTTR.SAIC_USER')) ?></label>
-	<input data-role="none" type="text" name="saic_user" value="<?= mg_e($mg_cfg['saic_user']) ?>" placeholder="name@example.org">
+	<input data-role="none" type="text" name="saic_user" value="<?= mg_e(mg_eingabe('mqtt', 'saic_user', $mg_cfg['saic_user'])) ?>" placeholder="name@example.org"<?= mg_markierung('mqtt', 'saic_user') ?>>
 	<div class="sm-hilfe"><?php echo mg_t('MQTTR.PFAD_HILFE'); ?>
 	<span class="sm-mono"><?= mg_e($mg_cfg['prefix'] ?: 'saic') ?>/&lt;<?= mg_e(mg_t('MQTTR.BENUTZER')) ?>&gt;/vehicles/&lt;VIN&gt;</span></div>
 </div>
@@ -1250,12 +1351,19 @@ $mg_eigen = ($mg_zugang['quelle'] === 'eigen');
 <div class="sm-breit">
 <table class="sm-tbl">
 <tr><th>#</th><th><?= mg_e(mg_t('MQTTR.VIN')) ?></th><th><?= mg_e(mg_t('MQTTR.FZNAME')) ?></th><th><?= mg_e(mg_t('MQTTR.GEFUNDEN')) ?></th></tr>
-<?php for ($mg_i = 0; $mg_i < max(3, $mg_anzahl + 1); $mg_i++) {
+<?php
+/* X-2: nach einer Beanstandung die eingetippten Zeilen (vin, fzname), das
+ * beanstandete Feld je Zeile markiert (vin.<n>, fzname.<n>). */
+$mg_ev = mg_eingabe_liste('mqtt', 'vin');
+$mg_en = mg_eingabe_liste('mqtt', 'fzname');
+for ($mg_i = 0; $mg_i < max(3, $mg_anzahl + 1, $mg_ev !== null ? count($mg_ev) : 0); $mg_i++) {
     $mg_v = isset($mg_cfg['vins'][$mg_i]) ? $mg_cfg['vins'][$mg_i] : '';
-    $mg_n = isset($mg_cfg['namen'][$mg_i]) ? $mg_cfg['namen'][$mg_i] : ''; ?>
+    $mg_n = isset($mg_cfg['namen'][$mg_i]) ? $mg_cfg['namen'][$mg_i] : '';
+    $mg_vz = ($mg_ev !== null) ? (isset($mg_ev[$mg_i]) ? $mg_ev[$mg_i] : '') : $mg_v;
+    $mg_nz = ($mg_en !== null) ? (isset($mg_en[$mg_i]) ? $mg_en[$mg_i] : '') : $mg_n; ?>
 <tr><td><?= $mg_i + 1 ?></td>
-	<td><input data-role="none" type="text" name="vin[]" value="<?= mg_e($mg_v) ?>" placeholder="LSJ..."></td>
-	<td><input data-role="none" type="text" name="fzname[]" value="<?= mg_e($mg_n) ?>" placeholder="MG <?= $mg_i + 1 ?>"></td>
+	<td><input data-role="none" type="text" name="vin[]" value="<?= mg_e($mg_vz) ?>" placeholder="LSJ..."<?= mg_markierung('mqtt', 'vin.' . $mg_i) ?>></td>
+	<td><input data-role="none" type="text" name="fzname[]" value="<?= mg_e($mg_nz) ?>" placeholder="MG <?= $mg_i + 1 ?>"<?= mg_markierung('mqtt', 'fzname.' . $mg_i) ?>></td>
 	<td><?= $mg_v !== '' ? (int) mg_themen_anzahl($mg_i + 1) : '&ndash;' ?></td></tr>
 <?php } ?>
 </table>
@@ -1264,13 +1372,13 @@ $mg_eigen = ($mg_zugang['quelle'] === 'eigen');
 <h2><?= mg_e(mg_t('MQTTR.H_EIGEN')) ?></h2>
 <div class="sm-feld">
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
-	<input data-role="none" type="checkbox" name="mqtt_ein" <?= !empty($mg_cfg['mqtt_ein']) ? 'checked' : '' ?>>
+	<input data-role="none" type="checkbox" name="mqtt_ein" <?= mg_eingabe_an('mqtt', 'mqtt_ein', !empty($mg_cfg['mqtt_ein'])) ? 'checked' : '' ?>>
 	<?= mg_e(mg_t('MQTTR.EIGEN_EIN')) ?></label>
 	<div class="sm-hilfe"><?php echo mg_t('MQTTR.EIGEN_HILFE'); ?></div>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('MQTTR.EIGEN_PRAEFIX')) ?></label>
-	<input data-role="none" type="text" name="mqtt_praefix" value="<?= mg_e($mg_cfg['mqtt_praefix']) ?>" placeholder="mg">
+	<input data-role="none" type="text" name="mqtt_praefix" value="<?= mg_e(mg_eingabe('mqtt', 'mqtt_praefix', $mg_cfg['mqtt_praefix'])) ?>" placeholder="mg"<?= mg_markierung('mqtt', 'mqtt_praefix') ?>>
 </div>
 <div class="sm-hinweis"><b><?= mg_e(mg_t('MQTTR.ABO_TITEL')) ?></b><br>
 <span class="sm-mono"><?= mg_e(trim((string) $mg_cfg['mqtt_praefix'], '/ ')) ?>/#</span><br>
@@ -1362,8 +1470,8 @@ $mg_eigener = ($mg_ampel !== null && !empty($mg_ampel['eigen']));
 
 <h2><?= mg_e(mg_t('GW.H_AMPEL')) ?></h2>
 <?php if ($mg_vlaeuft) { ?>
-<div class="sm-hinweis"><?= mg_e(sprintf(mg_t((isset($mg_vorgang['vorgang']) && $mg_vorgang['vorgang'] === 'aktualisieren')
-    ? 'GW.VORGANG_SEIT_AKT' : 'GW.VORGANG_SEIT'), max(0, time() - (int) $mg_vorgang['start']))) ?></div>
+<div class="sm-hinweis"><?= mg_e(sprintf(mg_gw_vorgang_text('seit', isset($mg_vorgang['vorgang']) ? $mg_vorgang['vorgang'] : ''),
+    max(0, time() - (int) $mg_vorgang['start']))) ?></div>
 <?php } elseif ($mg_vorgang['zustand'] === 'fertig' && time() - (int) (isset($mg_vorgang['ende']) ? $mg_vorgang['ende'] : 0) < 3600) { ?>
 <div class="sm-hinweis"><?= mg_e(mg_t('GW.VORGANG_FERTIG') . ' ' . $mg_vorgang['meldung']) ?></div>
 <?php } elseif ($mg_vorgang['zustand'] === 'fehler' || $mg_vorgang['zustand'] === 'abgebrochen') { ?>
@@ -1403,8 +1511,7 @@ $mg_eigener = ($mg_ampel !== null && !empty($mg_ampel['eigen']));
 
 <h2 id="mg-gw-zugang"><?= mg_e(mg_t('GW.H_ZUGANG')) ?></h2>
 <?php if ($mg_vlaeuft) { ?>
-<div class="sm-hinweis"><?= mg_e(mg_t((isset($mg_vorgang['vorgang']) && $mg_vorgang['vorgang'] === 'aktualisieren')
-    ? 'GW.VORGANG_LAEUFT_AKT' : 'GW.VORGANG_LAEUFT_SCHON')) ?></div>
+<div class="sm-hinweis"><?= mg_e(mg_gw_vorgang_text('laeuft', isset($mg_vorgang['vorgang']) ? $mg_vorgang['vorgang'] : '')) ?></div>
 <?php } elseif (!$mg_docker_weg) { ?>
 <form action="index.php" method="post">
 <input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
@@ -1412,13 +1519,13 @@ $mg_eigener = ($mg_ampel !== null && !empty($mg_ampel['eigen']));
 <input data-role="none" type="hidden" name="formular" value="gateway">
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('GW.MAIL')) ?></label>
-	<input data-role="none" type="email" name="saic_user" value="<?= mg_e($mg_cfg['saic_user']) ?>" placeholder="name@example.org" autocomplete="off">
+	<input data-role="none" type="email" name="saic_user" value="<?= mg_e(mg_eingabe('gateway', 'saic_user', $mg_cfg['saic_user'])) ?>" placeholder="name@example.org" autocomplete="off"<?= mg_markierung('gateway', 'saic_user') ?>>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('GW.PASS')) ?></label>
-	<input data-role="none" type="password" name="saic_pass" value="" autocomplete="new-password" placeholder="<?= (string) $mg_cfg['saic_pass'] !== '' ? mg_e(mg_t('MQTTR.PASS_GESPEICHERT')) : mg_e(mg_t('GW.PASS_LEER')) ?>">
+	<input data-role="none" type="password" name="saic_pass" value=""<?= mg_markierung('gateway', 'saic_pass') ?> autocomplete="new-password" placeholder="<?= (string) $mg_cfg['saic_pass'] !== '' ? mg_e(mg_t('MQTTR.PASS_GESPEICHERT')) : mg_e(mg_t('GW.PASS_LEER')) ?>">
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;margin-top:6px;">
-	<input data-role="none" type="checkbox" name="saic_pass_loeschen" value="1">
+	<input data-role="none" type="checkbox" name="saic_pass_loeschen" value="1"<?= mg_eingabe_an('gateway', 'saic_pass_loeschen', false) ? ' checked' : '' ?>>
 	<?= mg_e(mg_t('GW.PASS_LOESCHEN')) ?></label>
 	<div class="sm-hilfe"><?php echo mg_t('GW.ZUGANG_HILFE'); ?></div>
 </div>
@@ -1441,6 +1548,7 @@ $mg_eigener = ($mg_ampel !== null && !empty($mg_ampel['eigen']));
 <div class="sm-warnung"><?= mg_e($mg_gwlog[1]) ?></div>
 <?php } ?>
 <?php } ?>
+<?php if (!$mg_vlaeuft) { /* a1: waehrend eines Vorgangs kein zweiter */ ?>
 <form action="index.php" method="post">
 <input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
 <input data-role="none" type="hidden" name="activetab" value="tab-gateway">
@@ -1449,6 +1557,7 @@ $mg_eigener = ($mg_ampel !== null && !empty($mg_ampel['eigen']));
 	<button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= mg_e(mg_t('GW.K_NEUSTART')) ?></button>
 </div>
 </form>
+<?php } ?>
 <?php if ($mg_eigener && !$mg_vlaeuft) { ?>
 <form action="index.php" method="post">
 <input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
@@ -1460,6 +1569,7 @@ $mg_eigener = ($mg_ampel !== null && !empty($mg_ampel['eigen']));
 </div>
 </form>
 <?php } ?>
+<?php if (!$mg_vlaeuft) { /* a1 */ ?>
 <form action="index.php" method="post">
 <input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
 <input data-role="none" type="hidden" name="activetab" value="tab-gateway">
@@ -1471,6 +1581,7 @@ $mg_eigener = ($mg_ampel !== null && !empty($mg_ampel['eigen']));
 	<button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= mg_e(mg_t('GW.K_ENTFERNEN')) ?></button>
 </div>
 </form>
+<?php } ?>
 
 <?php $mg_neue_vins = mg_gw_gefundene_vins($mg_cfg);
 if ($mg_neue_vins) { ?>

@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.19
+Version 1.1.20
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -107,6 +107,27 @@ die Fehlerzeile von `mosquitto_sub` als Thema.
 * Eine Neuinstallation spielt die Zweitschrift einer früheren Installation
   nicht mehr ein, sondern legt sie nach `.alt` (`preinstall.sh`).
 * `cron.err` zeigt, wenn der Minutentakt nicht arbeiten kann.
+
+## Was 1.1.20 behebt
+
+Verbesserungen aus dem Durchgang (Verbesserungsliste
+`Pruefung-Durchgang-2026-09-29/VERBESSERUNGEN_OFFEN.md`, Entscheidungen 16, 19 und 20). Gemessen an
+einer Docker-Attrappe unter PHP 7.4, 8.3 und 8.5; nicht am Gerät.
+
+* **Neustart und Entfernen des Gateways laufen im Hintergrund** – die Seite
+  antwortet sofort statt nach mehreren Sekunden; ein zweiter Druck wird abgewiesen.
+* **Neuanlegen und Aktualisieren behalten den alten Container, bis der neue
+  läuft.** Scheitert das Anlegen, läuft der alte wieder; bis 1.1.19 war er dann fort.
+* **Benachrichtigung bei geändertem Broker-Zugang:** Ändert sich der Zugang des
+  LoxBerry-Brokers, nachdem das Gateway angelegt wurde, legt das Plugin eine
+  LoxBerry-Benachrichtigung ab (einmal je Änderung).
+* **Bei einer Beanstandung wird nichts gespeichert** – auch nicht die übrigen
+  Felder oder das Löschen des Kennworts. Was bisher still zurechtgerückt wurde
+  (VIN mit Leerzeichen, Name mit Anführungszeichen, unbekannter Modus, leeres
+  Zeitfeld) wird beanstandet. Die eingetippten Werte kommen markiert zurück,
+  Kennwörter nie.
+* „Einstellungen sichern“ warnt bei Werten, die das Zurückspielen nicht bestünden
+  (`_warnung`, nur Namen).
 
 ## Was 1.1.2 behebt
 

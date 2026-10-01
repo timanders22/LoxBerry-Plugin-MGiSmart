@@ -79,6 +79,14 @@ if (in_array('--gateway-leeren', array_slice(isset($argv) ? $argv : array(), 1),
     exit($mg_rc);
 }
 
+/* a2 (Verbesserungsbau 01.10.2026): hat dieses Plugin einen Gateway-Container
+ * angelegt (Merkdatei) und weicht der Broker-Zugang, den es jetzt nimmt, von
+ * dem ab, mit dem der Container angelegt wurde (etwa ein geaendertes Kennwort
+ * des LoxBerry-Brokers), geht EINE LoxBerry-Benachrichtigung hinaus - bis
+ * 1.1.20 sagte es nur die gelbe Ampel im Reiter. Vor der Frage
+ * "eingerichtet?": der Container kann vor dem ersten Fahrzeug da sein. */
+mg_broker_wechsel_pruefen();
+
 $cfg = mg_config();
 if (trim((string) $cfg['saic_user']) === '' || mg_fahrzeug_anzahl($cfg) === 0) {
     exit;   // noch nicht eingerichtet

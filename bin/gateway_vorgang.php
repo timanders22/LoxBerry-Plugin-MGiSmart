@@ -1,6 +1,8 @@
 <?php
 /**
- * MG iSmart - legt den SAIC-Gateway-Container im Hintergrund an (seit 1.1.18).
+ * MG iSmart - legt den SAIC-Gateway-Container im Hintergrund an (seit 1.1.18),
+ * aktualisiert ihn (1.1.19), startet ihn neu oder entfernt ihn (a1,
+ * Verbesserungsbau 01.10.2026).
  *
  * Gestartet von der Oberflaeche (Reiter "Gateway einrichten", Knopf "Gateway
  * anlegen und starten") ueber mg_gw_vorgang_starten(). Im Hintergrund, weil
@@ -16,7 +18,13 @@
  * Abbild den eigenen Container mit denselben Einstellungen neu anlegen
  * (mg_gw_aktualisieren()). Auch das nur auf Knopfdruck.
  *
- * Aufruf: php gateway_vorgang.php anlegen|aktualisieren
+ * a1 (Verbesserungsbau 01.10.2026): auch "neustart" und "entfernen" laufen
+ * hier - bis 1.1.20 liefen sie im Seitenaufbau, und ein haengendes Docker
+ * hielt die Seite bis etwa 2 min auf. Die Liste der Auftraege steht einmal in
+ * mg_gw_auftraege(). Neu anlegen (auch beim Aktualisieren) haelt den alten
+ * Container zurueck, bis der neue laeuft (mg_gw_anlegen()).
+ *
+ * Aufruf: php gateway_vorgang.php anlegen|aktualisieren|neustart|entfernen
  */
 if (basename(dirname(__DIR__)) === 'plugins') {
     $mg_lib = dirname(dirname(dirname(__DIR__))) . '/webfrontend/html/plugins/'
@@ -42,8 +50,8 @@ ini_set('display_errors', '0');
 ini_set('error_log', dirname($mg_p['log']) . '/gateway_vorgang.err');
 
 $mg_auftrag = isset($argv[1]) ? (string) $argv[1] : '';
-if (!in_array($mg_auftrag, array('anlegen', 'aktualisieren'), true) || count($argv) !== 2) {
-    fwrite(STDERR, "Unbekannter Auftrag - erlaubt sind nur: anlegen, aktualisieren\n");
+if (!in_array($mg_auftrag, mg_gw_auftraege(), true) || count($argv) !== 2) {
+    fwrite(STDERR, "Unbekannter Auftrag - erlaubt sind nur: " . implode(', ', mg_gw_auftraege()) . "\n");
     exit(2);
 }
 
@@ -53,6 +61,14 @@ mg_gw_vorgang_schreiben(array('vorgang' => $mg_auftrag, 'zustand' => 'laeuft', '
     'start' => $mg_start, 'schritt' => $mg_auftrag, 'meldung' => ''));
 if ($mg_auftrag === 'aktualisieren') {
     list($mg_ok, $mg_text, $mg_id) = mg_gw_aktualisieren();
+} elseif ($mg_auftrag === 'neustart') {
+    // a1: nur der eigene Container, Reste eines frueheren Neuanlegens nie.
+    list($mg_ok, $mg_text) = mg_gw_neustart();
+    $mg_id = '';
+} elseif ($mg_auftrag === 'entfernen') {
+    // a1: mg_gw_entfernen() loescht die Merkdatei erst nach bestaetigtem Entfernen.
+    list($mg_ok, $mg_text) = mg_gw_entfernen();
+    $mg_id = '';
 } else {
     list($mg_ok, $mg_text, $mg_id) = mg_gw_anlegen();
 }
@@ -60,7 +76,13 @@ if ($mg_auftrag === 'aktualisieren') {
  * nicht gleich laeuft. Die Merkdatei sagt uninstall, dass es ohne docker
  * warnen muss. Atomar, Rechte vor dem Inhalt (mg_write_atomic). */
 if ($mg_id !== '') {
-    if (!mg_write_atomic(mg_gw_merkdatei(), $mg_id . "\n" . date('c') . "\n", 0600)) {
+    /* a2 (Verbesserungsbau 01.10.2026): dritte Zeile brokerhash= aus dem
+     * Label des Containers, mit dem er WIRKLICH laeuft (nach einem
+     * gescheiterten Neuanlegen ist das der alte) - der Takt vergleicht daran
+     * den Broker-Zugang, ohne docker zu fragen (mg_broker_wechsel_pruefen). */
+    $mg_info = mg_gw_inspect($mg_id);
+    $mg_hash = ($mg_info !== null && mg_gw_ist_eigen($mg_info)) ? mg_gw_kurz($mg_info)['brokerhash'] : '';
+    if (!mg_gw_merk_schreiben($mg_id, $mg_hash)) {
         mg_log('Gateway anlegen: die Merkdatei ' . mg_gw_merkdatei() . ' liess sich nicht schreiben.');
     }
 }

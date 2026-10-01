@@ -4107,9 +4107,15 @@ function mg_mqtt_gateway_info()
  *     Umgebungsdatei (0600, umask 077), die nach docker run in jedem Fall
  *     geloescht wird. docker inspect zeigt sie trotzdem, und wer in der
  *     Gruppe docker ist, sieht sie - das sagt die Hilfe.
- *   - Kein Takt und kein Haken ruft run, stop oder rm (G6). Das Anlegen
- *     laeuft im Hintergrund (bin/gateway_vorgang.php), weil das Holen des
- *     Abbilds Minuten dauern kann; Neustart und Entfernen laufen im Handler.
+ *   - Kein Takt und kein Haken ruft run, stop oder rm (G6). Anlegen,
+ *     Aktualisieren, Neustart und Entfernen laufen im Hintergrund
+ *     (bin/gateway_vorgang.php): das Holen des Abbilds dauert Minuten, und ein
+ *     haengendes Docker soll die Seite nicht aufhalten (a1, Verbesserungsbau
+ *     01.10.2026; bis 1.1.20 liefen Neustart und Entfernen im Handler, bis
+ *     etwa 2 min Wartezeit).
+ *   - Neu anlegen nur sicher (a1): der alte Container wird angehalten und
+ *     umbenannt und erst nach gelungenem docker run entfernt; sonst kommt er
+ *     unveraendert zurueck.
  * ================================================================== */
 
 /** Der Name des eigenen Containers. */
@@ -4436,6 +4442,37 @@ function mg_gw_vorgang_programm()
 }
 
 /**
+ * Die Auftraege des Hintergrundvorgangs (a1, Verbesserungsbau 01.10.2026):
+ * eine Liste fuer Oberflaeche (mg_gw_vorgang_starten) und bin/gateway_vorgang.php.
+ */
+function mg_gw_auftraege()
+{
+    return array('anlegen', 'aktualisieren', 'neustart', 'entfernen');
+}
+
+/**
+ * Der Satz zum Hintergrundvorgang je Auftrag (a1). $art: gestartet | seit |
+ * laeuft. Ein unbekannter Auftrag nimmt die Saetze von "anlegen" (so hiess
+ * der Vorgang bis 1.1.18, und eine alte Zustandsdatei traegt ihn).
+ */
+function mg_gw_vorgang_text($art, $vorgang)
+{
+    $t = array(
+        'gestartet' => array('anlegen' => 'GW.VORGANG_GESTARTET', 'aktualisieren' => 'GW.VORGANG_GESTARTET_AKT',
+                             'neustart' => 'GW.VORGANG_GESTARTET_NEUSTART',
+                             'entfernen' => 'GW.VORGANG_GESTARTET_ENTFERNEN'),
+        'seit' => array('anlegen' => 'GW.VORGANG_SEIT', 'aktualisieren' => 'GW.VORGANG_SEIT_AKT',
+                        'neustart' => 'GW.VORGANG_SEIT_NEUSTART', 'entfernen' => 'GW.VORGANG_SEIT_ENTFERNEN'),
+        'laeuft' => array('anlegen' => 'GW.VORGANG_LAEUFT_SCHON', 'aktualisieren' => 'GW.VORGANG_LAEUFT_AKT',
+                          'neustart' => 'GW.VORGANG_LAEUFT_NEUSTART',
+                          'entfernen' => 'GW.VORGANG_LAEUFT_ENTFERNEN'),
+    );
+    $a = isset($t[$art]) ? $art : 'laeuft';
+    $v = (is_string($vorgang) && isset($t[$a][$vorgang])) ? $vorgang : 'anlegen';
+    return mg_t($t[$a][$v]);
+}
+
+/**
  * Das Anlegen im Hintergrund starten. Kein Warten im Seitenaufbau: die Seite
  * zeigt danach "wird angelegt ... seit N s" und laedt sich neu, solange der
  * Vorgang laeuft. Gemeldet wird erst, wenn der Vorgang nachweislich
@@ -4445,14 +4482,15 @@ function mg_gw_vorgang_programm()
  */
 function mg_gw_vorgang_starten($auftrag = 'anlegen')
 {
-    // A4 (seit 1.1.19): zweiter Auftrag "aktualisieren"; sonst nichts.
-    if (!in_array($auftrag, array('anlegen', 'aktualisieren'), true)) {
+    /* A4 (seit 1.1.19): zweiter Auftrag "aktualisieren"; a1 (Verbesserungsbau
+     * 01.10.2026): dazu "neustart" und "entfernen" - sonst nichts. Ein
+     * laufender Vorgang verhindert jeden zweiten, gleich welcher Art. */
+    if (!in_array($auftrag, mg_gw_auftraege(), true)) {
         return array(false, mg_t('GW.VORGANG_START'));
     }
     $v = mg_gw_vorgang();
     if (in_array($v['zustand'], array('gestartet', 'laeuft'), true)) {
-        return array(false, mg_t((isset($v['vorgang']) && $v['vorgang'] === 'aktualisieren')
-            ? 'GW.VORGANG_LAEUFT_AKT' : 'GW.VORGANG_LAEUFT_SCHON'));
+        return array(false, mg_gw_vorgang_text('laeuft', isset($v['vorgang']) ? $v['vorgang'] : ''));
     }
     $prog = mg_gw_vorgang_programm();
     if (!is_file($prog) || !function_exists('proc_open')) {
@@ -4472,7 +4510,7 @@ function mg_gw_vorgang_starten($auftrag = 'anlegen')
         return array(false, mg_t('GW.VORGANG_START'));
     }
     proc_close($proc);
-    $satz = mg_t($auftrag === 'aktualisieren' ? 'GW.VORGANG_GESTARTET_AKT' : 'GW.VORGANG_GESTARTET');
+    $satz = mg_gw_vorgang_text('gestartet', $auftrag);
     for ($i = 0; $i < 20; $i++) {
         $v = mg_gw_vorgang();
         if ($v['zustand'] !== 'gestartet') {
@@ -4500,17 +4538,38 @@ function mg_gw_anlegen()
         return array(false, $env, '');
     }
     $name = mg_gw_name();
+    /* a1 (Verbesserungsbau 01.10.2026): angehaltene Reste eines frueheren
+     * Neuanlegens ("<name>-alt-<Zeit>", eigene Labels) zuerst abraeumen. */
+    mg_gw_reste_abraeumen();
     $da = mg_gw_inspect($name);
+    $alt = '';
+    $alt_id = '';
+    $alt_lief = false;
     if ($da !== null) {
         if (!mg_gw_ist_eigen($da)) {
             // Namenskollision mit einem Container ohne das eigene Label: nichts anlegen.
             return array(false, sprintf(mg_t('GW.NAME_BELEGT'), $name), '');
         }
-        // "Neu anlegen": nur der eigene Container - anhalten, entfernen, anlegen.
-        mg_docker(array('stop', '-t', '20', (string) $da['Id']), 60);
-        mg_docker(array('rm', (string) $da['Id']), 30);
-        if (mg_gw_inspect((string) $da['Id']) !== null) {
-            return array(false, mg_t('GW.ALT_BLEIBT'), substr((string) $da['Id'], 0, 12));
+        /* "Neu anlegen", nur der eigene Container - und SICHER (a1,
+         * Verbesserungsbau 01.10.2026). Bis 1.1.20 standen hier "stop" und
+         * "rm" VOR "run": scheiterte run (kein Netz, Zeitablauf, Abbild
+         * kaputt), war der laufende Gateway fort - auch beim Knopf "Abbild
+         * aktualisieren". Jetzt: anhalten, umbenennen, neu anlegen; erst nach
+         * gelungenem run den alten entfernen, sonst den neuen entfernen, den
+         * alten zurueckbenennen und, wenn er lief, starten (mg_gw_alt_zurueck).
+         * Vorbild Docker NG, dk_portainer_neu_anlegen() (01.10.2026). */
+        $alt_id = (string) $da['Id'];
+        $alt_lief = !empty($da['State']['Running']);
+        $alt = $name . '-alt-' . date('YmdHis');
+        list($rc_s, , ) = mg_docker(array('stop', '-t', '20', $alt_id), 60);
+        if ($rc_s === 0) {
+            list($rc_s, , ) = mg_docker(array('rename', $alt_id, $alt), 30);
+        }
+        if ($rc_s !== 0) {
+            if ($alt_lief) {
+                mg_docker(array('start', $alt_id), 60);
+            }
+            return array(false, mg_t('GW.ALT_BLEIBT'), substr($alt_id, 0, 12));
         }
     }
     $p = mg_paths();
@@ -4519,17 +4578,20 @@ function mg_gw_anlegen()
     $alt_umask = umask(077);
     $rc = 1;
     $err = '';
+    $fehler = '';
     try {
         if (!mg_write_atomic($envdatei, $env, 0600)) {
-            return array(false, mg_t('GW.ENV_DATEI'), '');
-        }
-        list($rc, , $err) = mg_docker(array('run', '-d', '--name', $name,
+            // a1: kein return mehr - ein umbenannter alter Container kommt zurueck.
+            $fehler = mg_t('GW.ENV_DATEI');
+        } else {
+            list($rc, , $err) = mg_docker(array('run', '-d', '--name', $name,
             '--restart', 'unless-stopped', '--network', 'host',
             '--label', 'de.loxberry.plugin.folder=' . $p['plugin'],
             '--label', 'de.loxberry.plugin.name=mgismart',
             '--label', 'de.loxberry.plugin.def=' . MG_GW_DEF,
             '--label', 'de.loxberry.plugin.brokerhash=' . mg_gw_brokerhash($zugang),
             '--env-file', $envdatei, MG_GW_BILD), 900);
+        }
     } finally {
         // Die Umgebungsdatei traegt beide Kennwoerter - fort, auch im Fehlerfall.
         umask($alt_umask);
@@ -4537,23 +4599,112 @@ function mg_gw_anlegen()
             @unlink($envdatei);
         }
     }
-    if ($rc === 124) {
-        return array(false, mg_t('GW.RUN_ZEITABLAUF'), '');
+    if ($fehler === '' && $rc === 124) {
+        $fehler = mg_t('GW.RUN_ZEITABLAUF');
+    } elseif ($fehler === '' && $rc !== 0) {
+        $fehler = sprintf(mg_t('GW.RUN_FEHLER'), $rc) . ' '
+            . mg_kuerzen(mg_gw_maskiert(trim($err), $cfg), 300);
     }
-    if ($rc !== 0) {
-        return array(false, sprintf(mg_t('GW.RUN_FEHLER'), $rc) . ' '
-            . mg_kuerzen(mg_gw_maskiert(trim($err), $cfg), 300), '');
+    $neu = ($fehler === '') ? mg_gw_inspect($name) : null;
+    if ($fehler === '' && ($neu === null || !mg_gw_ist_eigen($neu))) {
+        $fehler = mg_t('GW.NICHT_DA');
     }
-    $neu = mg_gw_inspect($name);
-    if ($neu === null || !mg_gw_ist_eigen($neu)) {
-        return array(false, mg_t('GW.NICHT_DA'), '');
+    if ($fehler !== '') {
+        if ($alt === '') {
+            return array(false, $fehler, '');
+        }
+        return mg_gw_alt_zurueck($name, $alt, $alt_id, $alt_lief, $fehler);
     }
     $k = mg_gw_kurz($neu);
+    $rest = '';
+    if ($alt !== '') {
+        // a1: erst jetzt, nach gelungenem run, den alten entfernen.
+        list($rc_r, , $err_r) = mg_docker(array('rm', '-f', $alt_id), 60);
+        if ($rc_r !== 0) {
+            mg_log('Gateway neu anlegen: der alte Container ' . $alt . ' liess sich nicht entfernen (rc '
+                . $rc_r . '): ' . mg_kuerzen(trim($err_r), 200) . ' - er bleibt angehalten liegen.');
+            $rest = ' ' . sprintf(mg_t('GW.ALT_REST'), $alt);
+        }
+    }
     if (is_file(mg_gw_frueher_datei())) {
         @unlink(mg_gw_frueher_datei());
     }
     return array($k['laeuft'], sprintf(mg_t($k['laeuft'] ? 'GW.ANGELEGT' : 'GW.ANGELEGT_STEHT'),
-        $k['id'], $k['status']), $k['id']);
+        $k['id'], $k['status']) . $rest, $k['id']);
+}
+
+/**
+ * a1 (Verbesserungsbau 01.10.2026): das Neuanlegen ist gescheitert - den
+ * bisherigen Container zurueckholen. Ein halb angelegter NEUER Container
+ * gleichen Namens geht nur weg, wenn er die eigenen Labels traegt. Dann den
+ * alten zurueckbenennen und, wenn er vorher lief, starten.
+ * Rueckgabe wie mg_gw_anlegen(): array(false, satz, kurzkennung des alten).
+ */
+function mg_gw_alt_zurueck($name, $alt, $alt_id, $lief, $fehler)
+{
+    $halb = mg_gw_inspect($name);
+    if ($halb !== null && mg_gw_ist_eigen($halb) && (string) $halb['Id'] !== $alt_id) {
+        mg_docker(array('rm', '-f', (string) $halb['Id']), 60);
+    }
+    list($rc1, , ) = mg_docker(array('rename', $alt_id, $name), 30);
+    $rc2 = 0;
+    if ($rc1 === 0 && $lief) {
+        list($rc2, , ) = mg_docker(array('start', $alt_id), 60);
+    }
+    $kurz = substr($alt_id, 0, 12);
+    if ($rc1 === 0 && $rc2 === 0) {
+        mg_log('Gateway neu anlegen gescheitert (' . $fehler . ') - der bisherige Container ' . $kurz
+            . ' ist unveraendert zurueck' . ($lief ? ' und laeuft wieder.' : '.'));
+        return array(false, $fehler . ' ' . sprintf(mg_t('GW.ALT_ZURUECK'), $kurz), $kurz);
+    }
+    $wo = ($rc1 === 0) ? $name : $alt;
+    mg_log('Gateway neu anlegen gescheitert (' . $fehler . '), und der bisherige Container liess sich nicht '
+        . 'zurueckholen (umbenennen rc ' . $rc1 . ', starten rc ' . $rc2 . '). Er liegt als ' . $wo . ' bereit.');
+    return array(false, $fehler . ' ' . sprintf(mg_t('GW.ALT_ZURUECK_FEHLER'), $wo), $kurz);
+}
+
+/** a1: Ist dieser eigene Container der Rest eines frueheren Neuanlegens? */
+function mg_gw_ist_rest($info)
+{
+    $n = (is_array($info) && isset($info['Name'])) ? ltrim((string) $info['Name'], '/') : '';
+    return preg_match('/^' . preg_quote(mg_gw_name(), '/') . '-alt-[0-9]{14}\z/', $n) === 1;
+}
+
+/** a1: die eigenen Container ohne die Reste eines frueheren Neuanlegens. */
+function mg_gw_ohne_reste(array $liste)
+{
+    $aus = array();
+    foreach ($liste as $info) {
+        if (!mg_gw_ist_rest($info)) {
+            $aus[] = $info;
+        }
+    }
+    return $aus;
+}
+
+/**
+ * a1: angehaltene Reste eines frueheren Neuanlegens entfernen (nur eigene
+ * Labels, nur angehalten). Laeuft nur im Hintergrundvorgang (mg_gw_anlegen).
+ * Rueckgabe: die Zahl der entfernten.
+ */
+function mg_gw_reste_abraeumen()
+{
+    list($ok, $liste) = mg_gw_eigene();
+    $n = 0;
+    if (!$ok) {
+        return 0;
+    }
+    foreach ($liste as $info) {
+        if (mg_gw_ist_rest($info) && empty($info['State']['Running'])) {
+            list($rc, , ) = mg_docker(array('rm', (string) $info['Id']), 30);
+            if ($rc === 0) {
+                $n++;
+                mg_log('Gateway: den Rest eines frueheren Neuanlegens entfernt: '
+                    . ltrim((string) $info['Name'], '/') . '.');
+            }
+        }
+    }
+    return $n;
 }
 
 /* ==================================================================
@@ -4605,6 +4756,7 @@ function mg_gw_aktualisieren()
     if (!$ok) {
         return array(false, mg_t('GW.A_DOCKER_STUMM'), '', 'fehler');
     }
+    $liste = mg_gw_ohne_reste($liste);   // a1: Reste eines frueheren Neuanlegens zaehlen nicht
     if (!$liste) {
         return array(false, mg_t('GW.AKT_KEIN_EIGENER'), '', 'fehler');
     }
@@ -4654,6 +4806,11 @@ function mg_gw_neustart()
     }
     $saetze = array();
     $alle = true;
+    // a1: ein Rest eines frueheren Neuanlegens wird nie gestartet - sonst liefen zwei Gateways.
+    $liste = mg_gw_ohne_reste($liste);
+    if (!$liste) {
+        return array(false, mg_t('GW.KEIN_EIGENER'));
+    }
     foreach ($liste as $info) {
         $k = mg_gw_kurz($info);
         list($rc, , $err) = mg_docker(array('restart', '-t', '20', $k['id_voll']), 60);
@@ -4706,6 +4863,7 @@ function mg_gw_protokoll()
     if (!$ok) {
         return array(false, mg_docker_lage()[1]);
     }
+    $liste = mg_gw_ohne_reste($liste);   // a1
     if (!$liste) {
         return array(false, mg_t('GW.KEIN_EIGENER'));
     }
@@ -4770,6 +4928,7 @@ function mg_gw_ampel($messen = false, $lesen = false)
     $k = null;
     if ($lage === 'ok') {
         list($ok, $liste) = mg_gw_eigene(10);
+        $liste = mg_gw_ohne_reste($liste);   // a1: ein angehaltener Rest ist nicht "der" Gateway
         if (!$ok) {
             $a['container'] = array('grau', mg_t('GW.A_DOCKER_STUMM'));
         } elseif (!$liste) {
@@ -4868,6 +5027,182 @@ function mg_gw_ampel($messen = false, $lesen = false)
     if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
     mg_write_json($datei, $a);
     return $a;
+}
+
+/* ==================================================================
+ * Geaenderter Broker-Zugang -> LoxBerry-Benachrichtigung (a2,
+ * Verbesserungsbau 01.10.2026)
+ *
+ * Der Gateway-Container traegt den Broker-Zugang, mit dem er angelegt wurde
+ * (Umgebung, und als Fingerabdruck im Label de.loxberry.plugin.brokerhash).
+ * Aendert sich das Kennwort des LoxBerry-Brokers (oder Benutzer, Adresse,
+ * Port, eigene Angaben im Reiter MQTT), meldet sich das Gateway mit dem alten
+ * an und liefert nichts mehr. Bis 1.1.20 sagte das nur die gelbe Ampel im
+ * Reiter Gateway einrichten. Jetzt legt der Takt EINE Benachrichtigung in den
+ * LoxBerry-Benachrichtigungsbereich (roter Punkt am Plugin), ueber
+ * bin/mg_notify.php -> notify_ext() (wie AudiConnect, BatterieBMS).
+ *
+ * Vergleichswert ohne docker: die dritte Zeile der Merkdatei (brokerhash=),
+ * vom Hintergrundvorgang aus dem Label geschrieben. Fehlt sie (Merkdatei aus
+ * 1.1.18-1.1.20), fragt der Takt docker hoechstens einmal je Stunde nach dem
+ * Label und traegt es nach. Kein Takt ruft run, stop oder rm (G6).
+ * ================================================================== */
+
+/** a2: die Merkdatei lesen - array(id, zeit, hash) oder null, wenn es sie nicht gibt. */
+function mg_gw_merk_lesen()
+{
+    $f = mg_gw_merkdatei();
+    if (!is_file($f)) {
+        return null;
+    }
+    $z = preg_split('/\n/', trim((string) @file_get_contents($f)));
+    $hash = '';
+    foreach (array_slice($z, 2) as $zeile) {
+        if (preg_match('/^brokerhash=([0-9a-f]{12})\z/', trim($zeile), $m)) {
+            $hash = $m[1];
+        }
+    }
+    return array('id' => isset($z[0]) ? trim($z[0]) : '', 'zeit' => isset($z[1]) ? trim($z[1]) : '',
+                 'hash' => $hash);
+}
+
+/**
+ * a2: die Merkdatei schreiben (atomar, 0600): Kurzkennung, Zeit und - wenn
+ * bekannt - der Fingerabdruck des Broker-Zugangs aus dem Label des Containers.
+ */
+function mg_gw_merk_schreiben($id, $hash, $zeit = null)
+{
+    $inhalt = trim((string) $id) . "\n" . ($zeit !== null && trim((string) $zeit) !== '' ? trim((string) $zeit) : date('c')) . "\n";
+    if (preg_match('/^[0-9a-f]{12}\z/', (string) $hash)) {
+        $inhalt .= 'brokerhash=' . $hash . "\n";
+    }
+    return mg_write_atomic(mg_gw_merkdatei(), $inhalt, 0600);
+}
+
+/** a2: der Merker der Benachrichtigung (Datenordner - kein Zustand fuer die Sicherung). */
+function mg_broker_wechsel_datei()
+{
+    return mg_paths()['datadir'] . '/broker_wechsel.json';
+}
+
+/** a2: das Zwischenstueck zu notify_ext(). */
+function mg_notify_programm()
+{
+    $p = mg_paths();
+    if ($p['lbhome'] !== '') {
+        return $p['lbhome'] . '/bin/plugins/' . $p['plugin'] . '/mg_notify.php';
+    }
+    return dirname(dirname(__DIR__)) . '/bin/mg_notify.php';
+}
+
+/**
+ * a2: eine Meldung in den LoxBerry-Benachrichtigungsbereich legen, ueber
+ * bin/mg_notify.php (laedt loxberry_log.php selbst; keine phplib laedt sie von
+ * allein - Memory "notify_ext() nie erreicht"). Argumentweise, ohne Schale,
+ * hoechstens 20 s (timeout). Rueckgabe array(abgelegt, Ausgabe gekuerzt).
+ */
+function mg_benachrichtigen($schwere, $text)
+{
+    $skript = mg_notify_programm();
+    if (!is_file($skript) || !function_exists('proc_open')) {
+        return array(false, 'mg_notify.php fehlt');
+    }
+    $php = (defined('PHP_BINARY') && PHP_BINARY !== '') ? PHP_BINARY : 'php';
+    $cmd = array($php, $skript, (string) (int) $schwere, (string) $text, (string) mg_paths()['plugin']);
+    $to = array();
+    @exec('command -v timeout 2>/dev/null', $to);
+    if (isset($to[0]) && trim($to[0]) !== '') {
+        $cmd = array_merge(array(trim($to[0]), '20'), $cmd);
+    }
+    $desk = array(0 => array('file', '/dev/null', 'r'), 1 => array('pipe', 'w'), 2 => array('pipe', 'w'));
+    $pipes = array();
+    $proc = @proc_open($cmd, $desk, $pipes);
+    if (!is_resource($proc)) {
+        return array(false, 'proc_open gescheitert');
+    }
+    $aus = (string) stream_get_contents($pipes[1]) . ' ' . (string) stream_get_contents($pipes[2]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    $rc = proc_close($proc);
+    return array($rc === 0, mg_kuerzen(trim(preg_replace('/\s+/', ' ', $aus)), 200));
+}
+
+/**
+ * a2: Broker-Zugang gegen den Zugang des Containers vergleichen und bei
+ * Abweichung EINMAL benachrichtigen (je Paar alt>neu). Vom Takt gerufen.
+ * Rueckgabe (fuer Protokoll und Pruefstand): kein_container | vorgang |
+ * unbekannt | gleich | gemeldet | schon_gemeldet | spaeter | fehler.
+ */
+function mg_broker_wechsel_pruefen($cfg = null)
+{
+    $datei = mg_broker_wechsel_datei();
+    $merk = mg_gw_merk_lesen();
+    if ($merk === null) {
+        if (is_file($datei)) {
+            @unlink($datei);
+        }
+        return 'kein_container';
+    }
+    $v = mg_gw_vorgang();
+    if (in_array($v['zustand'], array('gestartet', 'laeuft'), true)) {
+        return 'vorgang';   // gleich wird neu angelegt, aktualisiert oder entfernt
+    }
+    if ($cfg === null) {
+        $cfg = mg_config();
+    }
+    $st = mg_json_lesen($datei);
+    $hash = $merk['hash'];
+    if ($hash === '') {
+        // Merkdatei aus 1.1.18-1.1.20: das Label hoechstens einmal je Stunde nachlesen.
+        if (isset($st['gefragt']) && time() - (int) $st['gefragt'] < 3600 && (int) $st['gefragt'] <= time()) {
+            return 'unbekannt';
+        }
+        $st['gefragt'] = time();
+        mg_write_json($datei, $st, 0600);
+        if (mg_docker_bin() === '') {
+            return 'unbekannt';
+        }
+        list($ok, $liste) = mg_gw_eigene(5);
+        $liste = $ok ? mg_gw_ohne_reste($liste) : array();
+        if (count($liste) !== 1) {
+            return 'unbekannt';
+        }
+        $k = mg_gw_kurz($liste[0]);
+        if (!preg_match('/^[0-9a-f]{12}\z/', $k['brokerhash'])) {
+            return 'unbekannt';
+        }
+        $hash = $k['brokerhash'];
+        mg_gw_merk_schreiben($k['id'], $hash, $merk['zeit']);
+    }
+    $jetzt = mg_gw_brokerhash(mg_broker_zugang($cfg));
+    if ($jetzt === $hash) {
+        if (!empty($st['gemeldet'])) {
+            mg_log('Broker-Zugang und Gateway-Container stimmen wieder ueberein - die Benachrichtigung ist erledigt.');
+            unset($st['gemeldet'], $st['versuch'], $st['paar']);
+            mg_write_json($datei, $st, 0600);
+        }
+        return 'gleich';
+    }
+    $paar = $hash . '>' . $jetzt;
+    if (isset($st['gemeldet']) && $st['gemeldet'] === $paar) {
+        return 'schon_gemeldet';
+    }
+    if (isset($st['paar'], $st['versuch']) && $st['paar'] === $paar && time() - (int) $st['versuch'] < 900
+        && (int) $st['versuch'] <= time()) {
+        return 'spaeter';
+    }
+    $text = sprintf(mg_t_in('GW.BROKER_GEAENDERT_MELDUNG', mg_lb_sprache()), mg_gw_name());
+    list($ok, $aus) = mg_benachrichtigen(3, $text);
+    $st['paar'] = $paar;
+    $st['versuch'] = time();
+    if ($ok) {
+        $st['gemeldet'] = $paar;
+    }
+    mg_write_json($datei, $st, 0600);
+    mg_log('Der Broker-Zugang weicht von dem des Gateway-Containers ab (Kennwort, Benutzer, Adresse oder Port '
+        . 'geaendert) - ' . ($ok ? 'LoxBerry-Benachrichtigung abgelegt (einmal je Aenderung).'
+            : 'die LoxBerry-Benachrichtigung liess sich NICHT ablegen (' . $aus . '). Neuer Versuch in 15 min.'));
+    return $ok ? 'gemeldet' : 'fehler';
 }
 
 /* ==================================================================
@@ -5770,6 +6105,59 @@ function mg_sprache()
     return in_array($sprache, array('de', 'en'), true) ? $sprache : 'en';
 }
 
+/**
+ * Der Ordner der Sprachdateien (a2, Verbesserungsbau 01.10.2026: aus mg_t()
+ * herausgezogen, damit mg_t_in() denselben nimmt). Siehe den Kommentar in
+ * mg_t(): nie ein Pfad ab der Laufwerkswurzel. '' = keiner.
+ */
+function mg_sprachordner()
+{
+    $p = mg_paths();
+    if ($p['lbhome'] !== ''
+        && is_dir($p['lbhome'] . '/templates/plugins/' . $p['plugin'] . '/lang')) {
+        return $p['lbhome'] . '/templates/plugins/' . $p['plugin'] . '/lang';
+    }
+    if (basename(dirname(__DIR__)) !== 'plugins') {
+        return dirname(dirname(__DIR__)) . '/templates/lang';
+    }
+    return '';
+}
+
+/**
+ * a2: einen Satz in einer BESTIMMTEN Sprache (de/en), Englisch als
+ * Rueckfall. Fuer die LoxBerry-Benachrichtigung aus dem Takt: dort ist
+ * LBSystem nicht geladen, und mg_t() spraeche die Rueckfallsprache.
+ */
+function mg_t_in($schluessel, $sprache)
+{
+    $pfad = mg_sprachordner();
+    $sprache = in_array($sprache, array('de', 'en'), true) ? $sprache : 'en';
+    $texte = array();
+    foreach (array_unique(array('en', $sprache)) as $s) {
+        $t = ($pfad === '') ? false : @parse_ini_file($pfad . '/language_' . $s . '.ini', true, INI_SCANNER_RAW);
+        if (is_array($t)) {
+            $texte = array_replace_recursive($texte, $t);
+        }
+    }
+    list($a, $k) = array_pad(explode('.', $schluessel, 2), 2, '');
+    return (isset($texte[$a][$k]) && is_scalar($texte[$a][$k])) ? trim((string) $texte[$a][$k], '"') : $schluessel;
+}
+
+/** a2: die Sprache des LoxBerry (LBLANG, sonst general.json Base.Lang), de oder en. */
+function mg_lb_sprache()
+{
+    $s = (string) getenv('LBLANG');
+    $p = mg_paths();
+    if ($s === '' && $p['lbhome'] !== '' && is_file($p['lbhome'] . '/config/system/general.json')) {
+        $g = json_decode((string) @file_get_contents($p['lbhome'] . '/config/system/general.json'), true);
+        if (is_array($g) && isset($g['Base']['Lang']) && is_string($g['Base']['Lang'])) {
+            $s = $g['Base']['Lang'];
+        }
+    }
+    $s = strtolower(substr($s, 0, 2));
+    return in_array($s, array('de', 'en'), true) ? $s : 'en';
+}
+
 function mg_t($schluessel)
 {
     static $texte = null;
@@ -5782,14 +6170,7 @@ function mg_t($schluessel)
          *   1. Anlage: <Wurzel>/templates/plugins/<ordner>/lang
          *   2. ausgepacktes Archiv (diese Datei liegt nicht unter
          *      .../plugins/<ordner>): dessen eigenes templates/lang */
-        $p = mg_paths();
-        $pfad = '';
-        if ($p['lbhome'] !== ''
-            && is_dir($p['lbhome'] . '/templates/plugins/' . $p['plugin'] . '/lang')) {
-            $pfad = $p['lbhome'] . '/templates/plugins/' . $p['plugin'] . '/lang';
-        } elseif (basename(dirname(__DIR__)) !== 'plugins') {
-            $pfad = dirname(dirname(__DIR__)) . '/templates/lang';
-        }
+        $pfad = mg_sprachordner();   // a2: eine Stelle fuer den Ordner
         $texte = $pfad === '' ? false
             : @parse_ini_file($pfad . '/language_' . mg_sprache() . '.ini', true, INI_SCANNER_RAW);
         if (!is_array($texte)) { $texte = array(); }
@@ -6362,8 +6743,12 @@ function mg_sicherung_neue_schluessel()
  *
  * Rueckgabe: array(Konfiguration|null, Beanstandungen[], Werte in der Datei).
  */
-function mg_sicherung_lesen($roh, $jetzt = null)
+function mg_sicherung_lesen($roh, $jetzt = null, &$namen = null)
 {
+    /* $namen (X-3, Verbesserungsbau 01.10.2026): die NAMEN der beanstandeten
+     * Schluessel, nie Werte - fuer die Warnung beim Sichern
+     * (mg_rueckspiel_maengel). */
+    $namen = array();
     $mangel = array();
     $daten = json_decode((string) $roh, true);
     if (!is_array($daten)) {
@@ -6380,11 +6765,13 @@ function mg_sicherung_lesen($roh, $jetzt = null)
         }
         if (!array_key_exists($k, $vorg)) {
             $mangel[] = sprintf(mg_t('EINST.SICH_FREMD'), $k);
+            $namen[] = $k;
             continue;
         }
         list($ok, $wert, $grund) = mg_wert_pruefen($k, $w, false);
         if (!$ok) {
             $mangel[] = sprintf(mg_t('EINST.SICH_WERT'), $k, $grund);
+            $namen[] = $k;
             continue;
         }
         $neu[$k] = $wert;
@@ -6415,6 +6802,7 @@ function mg_sicherung_lesen($roh, $jetzt = null)
     }
     if ($fehlend) {
         $mangel[] = sprintf(mg_t('EINST.SICH_FEHLEND'), count($fehlend), implode(', ', $fehlend));
+        $namen = array_merge($namen, $fehlend);
     }
     if ($mangel) {
         return array(null, $mangel, 0);
@@ -6431,6 +6819,32 @@ function mg_sicherung_lesen($roh, $jetzt = null)
     return array($neu + $vorg, array(), $anzahl);
 }
 
+/**
+ * X-3 (Verbesserungsbau 01.10.2026): Wuerde die EIGENE Sicherung das eigene
+ * Zurueckspielen bestehen? Geprueft wird mit DERSELBEN Funktion wie beim
+ * Zurueckspielen (mg_sicherung_lesen). Rueckgabe: die Namen der
+ * beanstandeten Schluessel, nie Werte; leer = sie besteht.
+ * Anlass: mg_config() prueft beim Lesen keine Grenzen - ein von Hand
+ * eingetragener Wert (capacity 500) stand in der Sicherung, und die eigene
+ * Datei wurde danach abgewiesen.
+ */
+function mg_rueckspiel_maengel($cfg = null)
+{
+    if ($cfg === null) {
+        $cfg = mg_config();
+    }
+    $js = json_encode($cfg, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($js === false) {
+        return array('json');
+    }
+    $namen = array();
+    list($neu) = mg_sicherung_lesen($js, $cfg, $namen);
+    if ($neu !== null) {
+        return array();
+    }
+    return $namen ? array_values(array_unique($namen)) : array('?');
+}
+
 /* ==================================================================
  * Einmalmeldung fuer die Umleitung nach jedem POST (seit 1.1.18, Befund U1)
  *
@@ -6440,6 +6854,170 @@ function mg_sicherung_lesen($roh, $jetzt = null)
  * verworfen. Bis 1.1.17 wiederholte F5 jede Aktion - auch einen Befehl ans
  * Fahrzeug. Bauart abf_flash_*() aus Abfahrts-Assistent 1.6.17.
  * ================================================================== */
+/* ==================================================================
+ * Eingaben nach einer Beanstandung (Verbesserungsbau 01.10.2026, X-2;
+ * Regeln/04 "Nach einer Beanstandung stehen die eingetippten Werte wieder
+ * im Formular")
+ *
+ * Nur nach einer Beanstandung, nur das eine Formular und nur seine Felder.
+ * Kennwoerter reisen nie mit; ihr Feld wird nur markiert. Ein Wert, der kein
+ * gueltiges UTF-8 ist oder laenger als 256 Byte, reist nicht mit - das Feld
+ * zeigt dann den gespeicherten Stand. Die Tabelle der Fahrzeuge reist als
+ * Liste (vin, fzname) mit ihren Zeilen; markiert wird je Zeile (vin.<n>).
+ * ================================================================== */
+
+/** Die Felder je Formular. */
+function mg_eingabe_felder($form)
+{
+    $f = array(
+        'settings' => array(
+            'text' => array('capacity', 'wartezeit', 'befehl_abstand', 'strom_abstand', 'befehle_stunde',
+                            'heim_breite', 'heim_laenge', 'heim_radius', 'push_minutes', 'abfahrt_vorlauf',
+                            'abfahrt_temp', 'abfahrt_fahrzeug', 'ladeempf_thema', 'ladeempf_grenze',
+                            'ladeempf_hoch', 'ladeempf_runter', 'ladeempf_fahrzeug', 'plan_von', 'plan_bis',
+                            'plan_modus', 'heizplan_von'),
+            'haken' => array('commands', 'gefahr_ein', 'wirkung_pruefen', 'ort_ein', 'notify_push', 'n_voll',
+                             'n_stecker', 'n_offen', 'n_fenster', 'n_fehler', 'abfahrt_ein', 'ladeempf_ein',
+                             'ladeempf_unter', 'plan_ein', 'ladungen_ein'),
+            'liste' => array(), 'nie' => array()),
+        'mqtt' => array(
+            'text' => array('broker_host', 'broker_port', 'broker_user', 'prefix', 'saic_user', 'mqtt_praefix'),
+            'haken' => array('broker_eigen', 'broker_pass_loeschen', 'mqtt_ein'),
+            'liste' => array('vin', 'fzname'), 'nie' => array('broker_pass')),
+        'gateway' => array(
+            'text' => array('saic_user'), 'haken' => array('saic_pass_loeschen'),
+            'liste' => array(), 'nie' => array('saic_pass')),
+    );
+    return isset($f[$form]) ? $f[$form] : null;
+}
+
+function mg_eingabe_taugt($w)
+{
+    return is_string($w) && strlen($w) <= 256 && preg_match('//u', $w) === 1;
+}
+
+/** Die eingetippten Werte eines Formulars aus $_POST, fuer die Einmalmeldung (null = keine). */
+function mg_eingaben_sammeln($form, array $beanstandet)
+{
+    $f = mg_eingabe_felder($form);
+    if ($f === null || !$beanstandet) {
+        return null;
+    }
+    $werte = array();
+    foreach ($f['text'] as $k) {
+        if (isset($_POST[$k]) && mg_eingabe_taugt($_POST[$k])) {
+            $werte[$k] = $_POST[$k];
+        }
+    }
+    foreach ($f['haken'] as $k) {
+        $werte[$k] = isset($_POST[$k]) ? '1' : '';
+    }
+    foreach ($f['liste'] as $k) {
+        $l = array();
+        if (isset($_POST[$k]) && is_array($_POST[$k])) {
+            foreach (array_values($_POST[$k]) as $w) {
+                if (count($l) >= 50) {
+                    break;
+                }
+                $l[] = mg_eingabe_taugt($w) ? $w : '';
+            }
+        }
+        $werte[$k] = $l;
+    }
+    foreach ($f['nie'] as $k) {
+        // Nur markieren, nie mitnehmen - und nur, wenn etwas eingetippt war.
+        if (isset($_POST[$k]) && is_string($_POST[$k]) && $_POST[$k] !== '') {
+            $beanstandet[] = $k;
+        }
+    }
+    return array('form' => $form, 'werte' => $werte,
+                 'beanstandet' => array_values(array_unique(array_map('strval', $beanstandet))));
+}
+
+/** Die Eingaben aus der Einmalmeldung annehmen (nur bekannte Felder, nur Text) bzw. lesen. */
+function mg_eingaben_setzen($roh = null)
+{
+    static $ein = array('form' => '', 'werte' => array(), 'beanstandet' => array());
+    if ($roh === null) {
+        return $ein;
+    }
+    if (!is_array($roh) || !isset($roh['form']) || !is_string($roh['form'])) {
+        return $ein;
+    }
+    $f = mg_eingabe_felder($roh['form']);
+    if ($f === null) {
+        return $ein;
+    }
+    $w = (isset($roh['werte']) && is_array($roh['werte'])) ? $roh['werte'] : array();
+    $werte = array();
+    foreach (array_merge($f['text'], $f['haken']) as $k) {
+        if (isset($w[$k]) && is_string($w[$k])) {
+            $werte[$k] = $w[$k];
+        }
+    }
+    foreach ($f['liste'] as $k) {
+        if (isset($w[$k]) && is_array($w[$k])) {
+            $l = array();
+            foreach (array_values($w[$k]) as $x) {
+                $l[] = is_string($x) ? $x : '';
+            }
+            $werte[$k] = array_slice($l, 0, 50);
+        }
+    }
+    $erlaubt = array_merge($f['text'], $f['haken'], $f['liste'], $f['nie']);
+    $roh_b = (isset($roh['beanstandet']) && is_array($roh['beanstandet'])) ? $roh['beanstandet'] : array();
+    $bean = array();
+    foreach ($roh_b as $b) {
+        if (is_string($b) && (in_array($b, $erlaubt, true)
+                || ($f['liste'] && preg_match('/^(vin|fzname)\.[0-9]{1,2}\z/', $b)))) {
+            $bean[] = $b;
+        }
+    }
+    if ($bean) {
+        $ein = array('form' => $roh['form'], 'werte' => $werte, 'beanstandet' => $bean);
+    }
+    return $ein;
+}
+
+/** Wert eines Textfelds: die Eingabe nach einer Beanstandung, sonst der gespeicherte. */
+function mg_eingabe($form, $feld, $gespeichert)
+{
+    $e = mg_eingaben_setzen();
+    if ($e['form'] === $form && isset($e['werte'][$feld]) && is_string($e['werte'][$feld])) {
+        return $e['werte'][$feld];
+    }
+    return $gespeichert;
+}
+
+/** Haken: nach einer Beanstandung der abgeschickte Stand, sonst der gespeicherte. */
+function mg_eingabe_an($form, $feld, $gespeichert)
+{
+    $e = mg_eingaben_setzen();
+    if ($e['form'] === $form && isset($e['werte'][$feld]) && is_string($e['werte'][$feld])) {
+        return $e['werte'][$feld] === '1';
+    }
+    return (bool) $gespeichert;
+}
+
+/** Liste (Fahrzeugtabelle): nach einer Beanstandung die eingetippten Zeilen, sonst null. */
+function mg_eingabe_liste($form, $feld)
+{
+    $e = mg_eingaben_setzen();
+    if ($e['form'] === $form && isset($e['werte'][$feld]) && is_array($e['werte'][$feld])) {
+        return $e['werte'][$feld];
+    }
+    return null;
+}
+
+/** Das beanstandete Feld DIESES Formulars wird rot umrandet (Klasse sm-beanstandet);
+ *  saic_user steht in zwei Formularen (MQTT, Gateway). */
+function mg_markierung($form, $feld)
+{
+    $e = mg_eingaben_setzen();
+    return ($e['form'] === $form && in_array($feld, $e['beanstandet'], true))
+        ? ' class="sm-beanstandet" aria-invalid="true"' : '';
+}
+
 function mg_flash_datei()
 {
     return mg_paths()['datadir'] . '/einmalmeldung.json';
