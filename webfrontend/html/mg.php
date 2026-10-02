@@ -184,10 +184,17 @@ if (mg_gesetzt('cmd')) {
     list($mg_ok, $mg_info, $mg_code) = mg_send($mg_befehl, $mg_wert, $mg_nr);
     $mg_ergebnis = 'CMD;OK=' . (int) $mg_ok . ';CODE=' . $mg_code
                  . ';INFO=' . str_replace(array(';', "\n", "\r"), ' ', $mg_info);
+    /* X-7 (Entscheidung Nr. 19, seit 1.1.21): derselbe Sollwert innerhalb von
+     * 60 s - nichts gesendet, HTTP 200 mit UNVERAENDERT=1 (wie EVCC). */
+    if ($mg_code === 'UNVERAENDERT') {
+        $mg_ergebnis .= ';UNVERAENDERT=1';
+    }
     if (!$mg_ok && !headers_sent()) {
         // 409: der Aufruf war richtig geformt, ging aber nicht durch.
+        // 503: der Merker der Sollwert-Bremse laesst sich nicht oeffnen (X-7).
         http_response_code(in_array($mg_code, array('UNBEKANNT', 'WERT_FEHLT',
-            'WERT_UNZULAESSIG', 'WERT_AUSSER_BEREICH'), true) ? 400 : 409);
+            'WERT_UNZULAESSIG', 'WERT_AUSSER_BEREICH'), true) ? 400
+            : ($mg_code === 'BREMSE_MERKER' ? 503 : 409));
     }
 }
 

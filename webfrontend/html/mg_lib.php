@@ -1847,6 +1847,8 @@ function mg_line($zeile = 'mg', $nr = 1, $st = null)
  * Fahrzeug geschickt werden. 'zusatz' macht aus fuenf festen Zielwerten
  * einen Befehl mit einem Zahlenwert; die alten Namen bleiben als Aliasse.
  * 'gefahr' = 1 verlangt den zweiten Haken.
+ * 'sollwert' = 1 (seit 1.1.21, X-7): derselbe Wert geht innerhalb von 60 s
+ * nicht erneut hinaus - siehe mg_sollwert_sperren().
  * 'pruef' nennt das Thema, an dem sich nachsehen laesst, ob es gewirkt hat.
  * ================================================================== */
 
@@ -1865,7 +1867,7 @@ function mg_befehle()
         'ziel' => array('topic' => 'drivetrain/socTarget/set', 'zusatz' => 'prozent',
             'werte' => array(40, 50, 60, 70, 80, 90, 100),
             'bez' => 'BEFEHL.ZIEL', 'gefahr' => 0, 'gegen' => '',
-            'pruef' => 'drivetrain/socTarget', 'abstand' => 60),
+            'pruef' => 'drivetrain/socTarget', 'abstand' => 60, 'sollwert' => 1),
         /* 'norm' => 'ampere': Ein ANALOGER virtueller Ausgang in Loxone sendet
          * eine Zahl - aus <v> wird also "16", nie "16A". Ohne diese
          * Umschrift haette die eigene Ausgangsvorlage einen Befehl erzeugt,
@@ -1874,7 +1876,7 @@ function mg_befehle()
         'strom' => array('topic' => 'drivetrain/chargeCurrentLimit/set', 'zusatz' => 'ampere',
             'werte' => array('6A', '8A', '16A', 'MAX'), 'norm' => 'ampere',
             'bez' => 'BEFEHL.STROM', 'gefahr' => 0, 'gegen' => '',
-            'pruef' => 'drivetrain/chargeCurrentLimit', 'abstand' => 300),
+            'pruef' => 'drivetrain/chargeCurrentLimit', 'abstand' => 300, 'sollwert' => 1),
         'klima_an' => array('topic' => 'climate/remoteClimateState/set', 'wert' => 'on',
             'bez' => 'BEFEHL.KLIMA_AN', 'gefahr' => 0, 'gegen' => 'klima_aus',
             'pruef' => 'climate/remoteClimateState', 'erwartet' => 'on', 'abstand' => 60),
@@ -1890,15 +1892,15 @@ function mg_befehle()
         'klimatemp' => array('topic' => 'climate/remoteTemperature/set', 'zusatz' => 'temp',
             'bereich' => array(16, 30),
             'bez' => 'BEFEHL.KLIMATEMP', 'gefahr' => 0, 'gegen' => '',
-            'pruef' => 'climate/remoteTemperature', 'abstand' => 60),
+            'pruef' => 'climate/remoteTemperature', 'abstand' => 60, 'sollwert' => 1),
         'sitzheizung_l' => array('topic' => 'climate/heatedSeatsFrontLeftLevel/set', 'zusatz' => 'stufe',
             'bereich' => array(0, 3),
             'bez' => 'BEFEHL.SITZHEIZUNG_L', 'gefahr' => 0, 'gegen' => '',
-            'pruef' => 'climate/heatedSeatsFrontLeftLevel', 'abstand' => 60),
+            'pruef' => 'climate/heatedSeatsFrontLeftLevel', 'abstand' => 60, 'sollwert' => 1),
         'sitzheizung_r' => array('topic' => 'climate/heatedSeatsFrontRightLevel/set', 'zusatz' => 'stufe',
             'bereich' => array(0, 3),
             'bez' => 'BEFEHL.SITZHEIZUNG_R', 'gefahr' => 0, 'gegen' => '',
-            'pruef' => 'climate/heatedSeatsFrontRightLevel', 'abstand' => 60),
+            'pruef' => 'climate/heatedSeatsFrontRightLevel', 'abstand' => 60, 'sollwert' => 1),
         'heckscheibe_an' => array('topic' => 'climate/rearWindowDefrosterHeating/set', 'wert' => 'on',
             'bez' => 'BEFEHL.HECKSCHEIBE_AN', 'gefahr' => 0, 'gegen' => 'heckscheibe_aus',
             'pruef' => 'climate/rearWindowDefrosterHeating', 'erwartet' => 'on', 'abstand' => 60),
@@ -1923,15 +1925,15 @@ function mg_befehle()
         'abfrage_modus' => array('topic' => 'refresh/mode/set', 'zusatz' => 'modus',
             'werte' => array('periodic', 'off', 'charging_detection'), 'textwert' => 1,
             'bez' => 'BEFEHL.ABFRAGE_MODUS', 'gefahr' => 0, 'gegen' => '',
-            'pruef' => 'refresh/mode', 'abstand' => 60),
+            'pruef' => 'refresh/mode', 'abstand' => 60, 'sollwert' => 1),
         'abfrage_ruhe' => array('topic' => 'refresh/period/inActive/set', 'zusatz' => 'sekunden',
             'bereich' => array(300, 604800),
             'bez' => 'BEFEHL.ABFRAGE_RUHE', 'gefahr' => 0, 'gegen' => '',
-            'pruef' => 'refresh/period/inActive', 'abstand' => 300),
+            'pruef' => 'refresh/period/inActive', 'abstand' => 300, 'sollwert' => 1),
         'abfrage_aktiv' => array('topic' => 'refresh/period/active/set', 'zusatz' => 'sekunden',
             'bereich' => array(30, 86400),
             'bez' => 'BEFEHL.ABFRAGE_AKTIV', 'gefahr' => 0, 'gegen' => '',
-            'pruef' => 'refresh/period/active', 'abstand' => 300),
+            'pruef' => 'refresh/period/active', 'abstand' => 300, 'sollwert' => 1),
 
         /* ---- Ladeplan und Batterieheizplan ----
          *
@@ -2270,6 +2272,114 @@ function mg_drossel_merken($befehl, $nr)
     mg_write_json($p['tmp'] . '/gesendet.json', $d);
 }
 
+/* ---------------- X-7: Gleichwert-Bremse fuer Sollwerte (seit 1.1.21) ----------------
+ *
+ * Entscheidung Nr. 19 (X-7): ein Sollwert-Befehl (Kennzeichen 'sollwert' in
+ * mg_befehle(): Ziel-Ladestand, Ladestromgrenze, Klima-Zieltemperatur,
+ * Sitzheizung, Abfragemodus und die beiden Abfragetakte) mit demselben Wert,
+ * der an dasselbe Thema desselben Fahrzeugs vor weniger als 60 s GESENDET
+ * wurde, geht nicht erneut hinaus. Die Antwort ist OK=1 mit UNVERAENDERT=1.
+ * Bis 1.1.20 fing die Drossel einen solchen Befehl zwar auch ab, antwortete
+ * aber mit 409 GEDROSSELT - fuer Loxone ein Fehler, obwohl nichts zu tun war.
+ *
+ * Ereignisse und Taster (Auffrischen, Laden starten/stoppen, Klima an/aus,
+ * Finden, Ver- und Entriegeln, Plaene) bremst X-7 nicht. Die Drossel
+ * (Mindestabstand je Befehl, Obergrenze je Stunde) bleibt, wie sie war; ein
+ * anderer Wert innerhalb des Mindestabstands bekommt weiter 409 GEDROSSELT,
+ * es kommt kein zusaetzliches 429 hinzu.
+ *
+ * Gemerkt wird JEDES erfolgreiche Senden (mosquitto_pub mit Rueckgabe 0),
+ * gleich von welchem Befehl und Aufrufer (Endpunkt, Reiter Test,
+ * Abfahrts-Automatik): verglichen wird immer mit dem zuletzt an dieses Thema
+ * gesendeten Wert. Ein gescheitertes Senden wird nicht gemerkt.
+ *
+ * Der Merker liegt unter flock (LOCK_EX vom Pruefen bis nach dem Senden):
+ * zwei gleichzeitige gleiche Befehle laufen nacheinander, der zweite ist
+ * UNVERAENDERT. Laesst sich der Merker nicht oeffnen, faellt die Bremse fuer
+ * Sollwerte geschlossen aus (BREMSE_MERKER, HTTP 503, eine Protokollzeile);
+ * Ereignisse gehen weiter. Muster: EVCC 0.9.34 (Befehlsbremse C3).
+ */
+function mg_sollwert_merkerdatei()
+{
+    return mg_paths()['tmp'] . '/sollwerte.json';
+}
+
+/** Den Merker oeffnen und sperren. Rueckgabe: Dateizeiger oder false. */
+function mg_sollwert_sperren()
+{
+    $mg_tmp = mg_paths()['tmp'];
+    if (!is_dir($mg_tmp)) {
+        @mkdir($mg_tmp, 0775, true);
+    }
+    $fh = @fopen(mg_sollwert_merkerdatei(), 'c+');
+    if ($fh === false) {
+        return false;
+    }
+    if (!@flock($fh, LOCK_EX)) {
+        fclose($fh);
+        return false;
+    }
+    return $fh;
+}
+
+function mg_sollwert_lesen($fh)
+{
+    if (!is_resource($fh)) {
+        return array();
+    }
+    rewind($fh);
+    $d = json_decode((string) stream_get_contents($fh), true);
+    return is_array($d) ? $d : array();
+}
+
+/** Ging derselbe Wert an dieses Thema vor weniger als 60 s hinaus? */
+function mg_sollwert_gleich($merker, $nr, $topic, $wert, $jetzt = null)
+{
+    $k = (int) $nr . '|' . $topic;
+    if (!isset($merker[$k]) || !is_array($merker[$k])
+        || !isset($merker[$k]['w']) || !isset($merker[$k]['t'])) {
+        return false;
+    }
+    $seit = ($jetzt === null ? time() : (int) $jetzt) - (int) $merker[$k]['t'];
+    // Eine zurueckgestellte Uhr (negativer Abstand) bremst nicht.
+    return (string) $merker[$k]['w'] === (string) $wert && $seit >= 0 && $seit < 60;
+}
+
+/** Den gesendeten Wert merken; Eintraege aelter als eine Stunde fallen weg. */
+function mg_sollwert_merken($fh, $nr, $topic, $wert)
+{
+    if (!is_resource($fh)) {
+        return false;
+    }
+    $jetzt = time();
+    $d = mg_sollwert_lesen($fh);
+    foreach ($d as $k => $e) {
+        if (!is_array($e) || !isset($e['t']) || $jetzt - (int) $e['t'] > 3600) {
+            unset($d[$k]);
+        }
+    }
+    $d[(int) $nr . '|' . $topic] = array('w' => (string) $wert, 't' => $jetzt);
+    // Erfolg ist nur die VOLLE Laenge - eine kurze Schreibung gilt nicht (Regeln/03).
+    $roh = (string) json_encode($d, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    $ok = ftruncate($fh, 0) && rewind($fh)
+        && fwrite($fh, $roh) === strlen($roh)
+        && fflush($fh);
+    if (!$ok) {
+        mg_log_if_changed('sollwertbremse', 'FEHLER: Der Merker der Sollwert-Bremse ('
+            . mg_sollwert_merkerdatei() . ') liess sich nicht schreiben - die Bremse kennt den '
+            . 'zuletzt gesendeten Wert nicht.');
+    }
+    return $ok;
+}
+
+function mg_sollwert_freigeben($fh)
+{
+    if (is_resource($fh)) {
+        flock($fh, LOCK_UN);
+        fclose($fh);
+    }
+}
+
 /**
  * Einen Befehl absetzen.
  *
@@ -2314,17 +2424,38 @@ function mg_send($befehl, $wert = null, $nr = 1)
         return array(0, mg_t('MELDUNG.NICHT_EINGERICHTET'), 'NICHT_EINGERICHTET');
     }
 
+    /* X-7 (Entscheidung Nr. 19, seit 1.1.21): derselbe Sollwert innerhalb von
+     * 60 s geht nicht erneut hinaus - siehe mg_sollwert_sperren(). Die Sperre
+     * bleibt bis nach dem Senden gehalten. */
+    $mg_x7 = mg_sollwert_sperren();
+    if ($mg_x7 === false) {
+        mg_log_if_changed('sollwertbremse', 'FEHLER: Der Merker der Sollwert-Bremse ('
+            . mg_sollwert_merkerdatei() . ') laesst sich nicht oeffnen - Sollwert-Befehle werden '
+            . 'mit 503 abgewiesen, bis das behoben ist. Pruefen: Platz und Eigentuemer (loxberry).');
+        if (!empty($liste[$name]['sollwert'])) {
+            return array(0, mg_t('MELDUNG.BREMSE_MERKER'), 'BREMSE_MERKER');
+        }
+    } elseif (!empty($liste[$name]['sollwert'])
+              && mg_sollwert_gleich(mg_sollwert_lesen($mg_x7), $nr, $topic, $sendewert)) {
+        mg_sollwert_freigeben($mg_x7);
+        mg_log_if_changed('x7', 'Nicht gesendet (Fahrzeug ' . (int) $nr . '): ' . $name . ' = '
+            . $sendewert . ' - UNVERAENDERT=1, derselbe Wert ging vor weniger als 60 s hinaus (X-7).');
+        return array(1, mg_t('MELDUNG.UNVERAENDERT'), 'UNVERAENDERT');
+    }
+
     /* Kein erneutes Senden, wenn der Zielzustand schon anliegt. "Ziel 80 %"
      * an ein Auto, das auf 80 steht, ist eine vermeidbare Weckung. */
     if (!empty($liste[$name]['pruef'])) {
         $ist = mg_txt($liste[$name]['pruef'], '', $nr);
         if ($ist !== '' && mg_wirkung_gleich($ist, $liste[$name], $sendewert)) {
+            mg_sollwert_freigeben($mg_x7);
             return array(1, mg_t('MELDUNG.SCHON_SO'), 'SCHON_SO');
         }
     }
 
     list($darf, $rest) = mg_drossel_pruefen($name, $nr, $cfg);
     if (!$darf) {
+        mg_sollwert_freigeben($mg_x7);
         return array(0, $rest >= 0
             ? mg_t('MELDUNG.GEDROSSELT') . ' (' . $rest . ' s)'
             : mg_t('MELDUNG.STUNDENGRENZE'), 'GEDROSSELT');
@@ -2336,6 +2467,11 @@ function mg_send($befehl, $wert = null, $nr = 1)
     $out = array();
     @exec($cmd, $out, $rc);
     mg_drossel_merken($name, $nr);
+    // X-7: nur ein gelungenes Senden wird gemerkt; danach ist die Sperre frei.
+    if ($rc === 0) {
+        mg_sollwert_merken($mg_x7, $nr, $topic, $sendewert);
+    }
+    mg_sollwert_freigeben($mg_x7);
     if ($rc !== 0) {
         $text = trim(implode(' ', $out));
         mg_log('FEHLER Befehl "' . $name . '": ' . ($text !== '' ? $text : 'Fehlercode ' . $rc));

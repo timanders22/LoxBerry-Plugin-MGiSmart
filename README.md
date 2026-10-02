@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.20
+Version 1.1.21
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -107,6 +107,18 @@ die Fehlerzeile von `mosquitto_sub` als Thema.
 * Eine Neuinstallation spielt die Zweitschrift einer früheren Installation
   nicht mehr ein, sondern legt sie nach `.alt` (`preinstall.sh`).
 * `cron.err` zeigt, wenn der Minutentakt nicht arbeiten kann.
+
+## Was 1.1.21 behebt
+
+Gleicher Sollwert wird nicht wiederholt (Nachzug B: X-7, Entscheidung 19).
+Gemessen an Attrappen: der ganze Endpunkt unter PHP 8.3 (WSL), die Merker-Funktionen unter PHP 7.4 und 8.5; nicht am Gerät, nicht an einem Fahrzeug.
+
+* **Gleicher Sollwert wird nicht wiederholt.** Kommt derselbe Wert für dasselbe Fahrzeug innerhalb von 60 s noch einmal, geht er nicht erneut ans Fahrzeug. Das gilt für Ziel-Ladestand (`ziel`, auch `ziel_80` …), Ladestromgrenze (`strom`), Klima-Zieltemperatur (`klimatemp`), Sitzheizung links und rechts, Abfragemodus und die beiden Abfragetakte (`abfrage_modus`, `abfrage_ruhe`, `abfrage_aktiv`). Die Antwort ist dann HTTP 200 mit `OK=1;CODE=UNVERAENDERT;…;UNVERAENDERT=1`. Bisher kam 409 „Gedrosselt“, und Loxone sah einen Fehler, obwohl nichts zu tun war.
+* **Was als gesendet zählt:** Verglichen wird mit dem zuletzt erfolgreich gesendeten Wert, auch aus dem Reiter Test und der Vorklimatisierung. `16` und `16A` gelten als gleich, `22` und `22.2` °C auch. Ein Senden, das am Broker scheitert, wird nicht gemerkt. Zwei gleichzeitige gleiche Befehle laufen nacheinander, und nur einer geht hinaus.
+* **Drosselung unverändert:** Mindestabstand und Obergrenze je Stunde gelten weiter. Ein anderer Wert innerhalb des Mindestabstands bekommt weiter 409. Laden starten/stoppen, Klima an/aus, Heizungen, Finden, Ver- und Entriegeln, Kofferraum und Pläne verhalten sich wie bisher.
+* Lässt sich die Merkdatei nicht öffnen, werden Sollwert-Befehle mit HTTP 503 (`BREMSE_MERKER`) abgewiesen, und das Protokoll nennt den Grund. Die übrigen Befehle gehen weiter.
+
+**In Loxone:** Wer auf 409 bei Sollwerten reagiert hat, sieht für denselben Wert jetzt `UNVERAENDERT=1`.
 
 ## Was 1.1.20 behebt
 
@@ -306,7 +318,10 @@ Beim nächsten vollständigen Durchgang stieg die Flanke ein zweites Mal.
 * **Zweiter Haken** für eingreifende Befehle (Licht, Hupe, Ver- und
   Entriegeln), ab Werk aus.
 * **Drosselung** — Mindestabstand je Befehl, Obergrenze je Stunde, und kein
-  Senden, wenn der Zielzustand schon anliegt.
+  Senden, wenn der Zielzustand schon anliegt. Ein Sollwert (Ziel-Ladestand,
+  Ladestrom, Klimatemperatur, Sitzheizung, Abfragemodus und -takte) mit
+  demselben Wert wie vor weniger als 60 s geht nicht erneut hinaus; die
+  Antwort ist dann `CMD;OK=1;CODE=UNVERAENDERT;…;UNVERAENDERT=1` (HTTP 200).
 * **Wirkung statt Rückgabewert** — nach dem Senden liest das Plugin das
   Zustandsthema noch einmal und unterscheidet „gewirkt" von „abgesetzt,
   Ergebnis unbekannt".
