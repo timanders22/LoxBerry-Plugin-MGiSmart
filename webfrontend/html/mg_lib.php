@@ -1849,6 +1849,8 @@ function mg_line($zeile = 'mg', $nr = 1, $st = null)
  * 'gefahr' = 1 verlangt den zweiten Haken.
  * 'sollwert' = 1 (seit 1.1.21, X-7): derselbe Wert geht innerhalb von 60 s
  * nicht erneut hinaus - siehe mg_sollwert_sperren().
+ * 'zustand' = 1 (seit 1.1.22, X-7): dasselbe fuer einen festen Zustand
+ * (Laden starten/stoppen, Klima, Scheiben- und Batterieheizung an/aus).
  * 'pruef' nennt das Thema, an dem sich nachsehen laesst, ob es gewirkt hat.
  * ================================================================== */
 
@@ -1860,10 +1862,10 @@ function mg_befehle()
             'pruef' => '', 'abstand' => 60),
         'laden_start' => array('topic' => 'drivetrain/charging/set', 'wert' => 'true',
             'bez' => 'BEFEHL.LADEN_START', 'gefahr' => 0, 'gegen' => 'laden_stopp',
-            'pruef' => 'drivetrain/charging', 'erwartet' => '1', 'abstand' => 60),
+            'pruef' => 'drivetrain/charging', 'erwartet' => '1', 'abstand' => 60, 'zustand' => 1),
         'laden_stopp' => array('topic' => 'drivetrain/charging/set', 'wert' => 'false',
             'bez' => 'BEFEHL.LADEN_STOPP', 'gefahr' => 0, 'gegen' => '',
-            'pruef' => 'drivetrain/charging', 'erwartet' => '0', 'abstand' => 60),
+            'pruef' => 'drivetrain/charging', 'erwartet' => '0', 'abstand' => 60, 'zustand' => 1),
         'ziel' => array('topic' => 'drivetrain/socTarget/set', 'zusatz' => 'prozent',
             'werte' => array(40, 50, 60, 70, 80, 90, 100),
             'bez' => 'BEFEHL.ZIEL', 'gefahr' => 0, 'gegen' => '',
@@ -1879,16 +1881,16 @@ function mg_befehle()
             'pruef' => 'drivetrain/chargeCurrentLimit', 'abstand' => 300, 'sollwert' => 1),
         'klima_an' => array('topic' => 'climate/remoteClimateState/set', 'wert' => 'on',
             'bez' => 'BEFEHL.KLIMA_AN', 'gefahr' => 0, 'gegen' => 'klima_aus',
-            'pruef' => 'climate/remoteClimateState', 'erwartet' => 'on', 'abstand' => 60),
+            'pruef' => 'climate/remoteClimateState', 'erwartet' => 'on', 'abstand' => 60, 'zustand' => 1),
         'klima_aus' => array('topic' => 'climate/remoteClimateState/set', 'wert' => 'off',
             'bez' => 'BEFEHL.KLIMA_AUS', 'gefahr' => 0, 'gegen' => '',
-            'pruef' => 'climate/remoteClimateState', 'erwartet' => 'off', 'abstand' => 60),
+            'pruef' => 'climate/remoteClimateState', 'erwartet' => 'off', 'abstand' => 60, 'zustand' => 1),
         'klima_vorn' => array('topic' => 'climate/remoteClimateState/set', 'wert' => 'front',
             'bez' => 'BEFEHL.KLIMA_VORN', 'gefahr' => 0, 'gegen' => '',
-            'pruef' => 'climate/remoteClimateState', 'erwartet' => 'front', 'abstand' => 60),
+            'pruef' => 'climate/remoteClimateState', 'erwartet' => 'front', 'abstand' => 60, 'zustand' => 1),
         'klima_geblaese' => array('topic' => 'climate/remoteClimateState/set', 'wert' => 'blowingonly',
             'bez' => 'BEFEHL.KLIMA_GEBLAESE', 'gefahr' => 0, 'gegen' => '',
-            'pruef' => 'climate/remoteClimateState', 'erwartet' => 'blowingonly', 'abstand' => 60),
+            'pruef' => 'climate/remoteClimateState', 'erwartet' => 'blowingonly', 'abstand' => 60, 'zustand' => 1),
         'klimatemp' => array('topic' => 'climate/remoteTemperature/set', 'zusatz' => 'temp',
             'bereich' => array(16, 30),
             'bez' => 'BEFEHL.KLIMATEMP', 'gefahr' => 0, 'gegen' => '',
@@ -1903,22 +1905,22 @@ function mg_befehle()
             'pruef' => 'climate/heatedSeatsFrontRightLevel', 'abstand' => 60, 'sollwert' => 1),
         'heckscheibe_an' => array('topic' => 'climate/rearWindowDefrosterHeating/set', 'wert' => 'on',
             'bez' => 'BEFEHL.HECKSCHEIBE_AN', 'gefahr' => 0, 'gegen' => 'heckscheibe_aus',
-            'pruef' => 'climate/rearWindowDefrosterHeating', 'erwartet' => 'on', 'abstand' => 60),
+            'pruef' => 'climate/rearWindowDefrosterHeating', 'erwartet' => 'on', 'abstand' => 60, 'zustand' => 1),
         'heckscheibe_aus' => array('topic' => 'climate/rearWindowDefrosterHeating/set', 'wert' => 'off',
             'bez' => 'BEFEHL.HECKSCHEIBE_AUS', 'gefahr' => 0, 'gegen' => '',
-            'pruef' => 'climate/rearWindowDefrosterHeating', 'erwartet' => 'off', 'abstand' => 60),
+            'pruef' => 'climate/rearWindowDefrosterHeating', 'erwartet' => 'off', 'abstand' => 60, 'zustand' => 1),
         'frontscheibe_an' => array('topic' => 'climate/frontWindowDefrosterHeating/set', 'wert' => 'on',
             'bez' => 'BEFEHL.FRONTSCHEIBE_AN', 'gefahr' => 0, 'gegen' => 'frontscheibe_aus',
-            'pruef' => 'climate/frontWindowDefrosterHeating', 'erwartet' => 'on', 'abstand' => 60),
+            'pruef' => 'climate/frontWindowDefrosterHeating', 'erwartet' => 'on', 'abstand' => 60, 'zustand' => 1),
         'frontscheibe_aus' => array('topic' => 'climate/frontWindowDefrosterHeating/set', 'wert' => 'off',
             'bez' => 'BEFEHL.FRONTSCHEIBE_AUS', 'gefahr' => 0, 'gegen' => '',
-            'pruef' => 'climate/frontWindowDefrosterHeating', 'erwartet' => 'off', 'abstand' => 60),
+            'pruef' => 'climate/frontWindowDefrosterHeating', 'erwartet' => 'off', 'abstand' => 60, 'zustand' => 1),
         'batterieheizung_an' => array('topic' => 'drivetrain/batteryHeating/set', 'wert' => 'true',
             'bez' => 'BEFEHL.BATTHEIZ_AN', 'gefahr' => 0, 'gegen' => 'batterieheizung_aus',
-            'pruef' => 'drivetrain/batteryHeating', 'erwartet' => '1', 'abstand' => 300),
+            'pruef' => 'drivetrain/batteryHeating', 'erwartet' => '1', 'abstand' => 300, 'zustand' => 1),
         'batterieheizung_aus' => array('topic' => 'drivetrain/batteryHeating/set', 'wert' => 'false',
             'bez' => 'BEFEHL.BATTHEIZ_AUS', 'gefahr' => 0, 'gegen' => '',
-            'pruef' => 'drivetrain/batteryHeating', 'erwartet' => '0', 'abstand' => 300),
+            'pruef' => 'drivetrain/batteryHeating', 'erwartet' => '0', 'abstand' => 300, 'zustand' => 1),
         /* 'textwert' => 1: die zulaessigen Werte sind Woerter, keine Zahlen.
          * Ein analoger Ausgang kann sie nicht senden - die Ausgangsvorlage
          * macht daraus je Wert einen eigenen DIGITALEN Befehl. */
@@ -2282,8 +2284,17 @@ function mg_drossel_merken($befehl, $nr)
  * Bis 1.1.20 fing die Drossel einen solchen Befehl zwar auch ab, antwortete
  * aber mit 409 GEDROSSELT - fuer Loxone ein Fehler, obwohl nichts zu tun war.
  *
- * Ereignisse und Taster (Auffrischen, Laden starten/stoppen, Klima an/aus,
- * Finden, Ver- und Entriegeln, Plaene) bremst X-7 nicht. Die Drossel
+ * Seit 1.1.22 auch die Zustaende (Kennzeichen 'zustand': Laden starten/
+ * stoppen, Klima an/aus/vorn/Geblaese, Heck- und Frontscheibenheizung,
+ * Batterieheizung): derselbe Zustand an dasselbe Fahrzeug binnen 60 s ist
+ * UNVERAENDERT statt 409. Verglichen wird mit dem zuletzt an das Thema
+ * gesendeten Wert - nach "Laden stoppen" ist "Laden starten" ein anderer
+ * Zustand. Laesst sich der Merker nicht oeffnen, gehen Zustaende weiter wie
+ * bis 1.1.21 (die Drossel je Befehl haelt jedes zweite Senden im
+ * Mindestabstand ohnehin auf); 503 bekommen nur Sollwerte.
+ *
+ * Ereignisse und Taster (Auffrischen, Finden, Ver- und Entriegeln, Plaene)
+ * bremst X-7 nicht. Die Drossel
  * (Mindestabstand je Befehl, Obergrenze je Stunde) bleibt, wie sie war; ein
  * anderer Wert innerhalb des Mindestabstands bekommt weiter 409 GEDROSSELT,
  * es kommt kein zusaetzliches 429 hinzu.
@@ -2435,7 +2446,7 @@ function mg_send($befehl, $wert = null, $nr = 1)
         if (!empty($liste[$name]['sollwert'])) {
             return array(0, mg_t('MELDUNG.BREMSE_MERKER'), 'BREMSE_MERKER');
         }
-    } elseif (!empty($liste[$name]['sollwert'])
+    } elseif ((!empty($liste[$name]['sollwert']) || !empty($liste[$name]['zustand']))
               && mg_sollwert_gleich(mg_sollwert_lesen($mg_x7), $nr, $topic, $sendewert)) {
         mg_sollwert_freigeben($mg_x7);
         mg_log_if_changed('x7', 'Nicht gesendet (Fahrzeug ' . (int) $nr . '): ' . $name . ' = '

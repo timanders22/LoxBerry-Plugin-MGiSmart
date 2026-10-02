@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.21
+Version 1.1.22
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -107,6 +107,32 @@ die Fehlerzeile von `mosquitto_sub` als Thema.
 * Eine Neuinstallation spielt die Zweitschrift einer früheren Installation
   nicht mehr ein, sondern legt sie nach `.alt` (`preinstall.sh`).
 * `cron.err` zeigt, wenn der Minutentakt nicht arbeiten kann.
+
+## Was 1.1.22 behebt
+
+Gleicher Zustand wird nicht wiederholt (Verbesserungsliste MGiSmart-k1, X-7).
+Gemessen am ganzen
+Endpunkt unter PHP 8.3 (WSL, `mosquitto_pub`-Attrappe); unter PHP 7.4 und 8.5 (Windows) nur die Kennzeichen und der
+Merker-Vergleich. Nicht am Gerät, nicht an einem Fahrzeug.
+
+* **Gleicher Zustand wird nicht wiederholt.** Folgende Befehle gehen mit demselben Zustand innerhalb von 60 s nicht
+  erneut ans Fahrzeug:
+  - Laden starten und Laden stoppen
+  - Klima an, aus, vorn und Gebläse
+  - Heck- und Frontscheibenheizung an und aus
+  - Batterieheizung an und aus
+
+  Die Antwort ist dann `CMD;OK=1;CODE=UNVERAENDERT;…;UNVERAENDERT=1` mit HTTP 200. Bisher kam 409 „Gedrosselt“, und
+  Loxone sah einen Fehler, obwohl nichts zu tun war. So verhalten sich seit 1.1.21 schon die Sollwerte.
+* Verglichen wird mit dem zuletzt gesendeten Zustand für dasselbe Fahrzeug. Nach „Laden stoppen“ ist „Laden starten“
+  ein anderer Zustand; kommt er innerhalb des Mindestabstands, bleibt es bei 409 „Gedrosselt“.
+* Zwei gleichzeitige gleiche Befehle laufen nacheinander, und nur einer geht hinaus.
+* Lässt sich die Merkdatei nicht öffnen, gehen diese Befehle weiter wie bisher (Drosselung je Befehl). HTTP 503
+  (`BREMSE_MERKER`) bekommen wie in 1.1.21 nur Sollwerte.
+* Finden, Ver- und Entriegeln, Kofferraum, Auffrischen und Pläne bleiben wie bisher.
+
+**In Loxone:** Wer bei Laden, Klima oder Heizungen auf 409 reagiert hat, sieht für denselben Zustand jetzt
+`UNVERAENDERT=1` mit `OK=1`.
 
 ## Was 1.1.21 behebt
 
@@ -322,6 +348,8 @@ Beim nächsten vollständigen Durchgang stieg die Flanke ein zweites Mal.
   Ladestrom, Klimatemperatur, Sitzheizung, Abfragemodus und -takte) mit
   demselben Wert wie vor weniger als 60 s geht nicht erneut hinaus; die
   Antwort ist dann `CMD;OK=1;CODE=UNVERAENDERT;…;UNVERAENDERT=1` (HTTP 200).
+  Seit 1.1.22 gilt das auch für denselben Zustand (Laden starten/stoppen,
+  Klima an/aus/vorn/Gebläse, Heck- und Frontscheibenheizung, Batterieheizung).
 * **Wirkung statt Rückgabewert** — nach dem Senden liest das Plugin das
   Zustandsthema noch einmal und unterscheidet „gewirkt" von „abgesetzt,
   Ergebnis unbekannt".

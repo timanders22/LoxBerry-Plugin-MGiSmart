@@ -185,7 +185,8 @@ if (mg_gesetzt('cmd')) {
     $mg_ergebnis = 'CMD;OK=' . (int) $mg_ok . ';CODE=' . $mg_code
                  . ';INFO=' . str_replace(array(';', "\n", "\r"), ' ', $mg_info);
     /* X-7 (Entscheidung Nr. 19, seit 1.1.21): derselbe Sollwert innerhalb von
-     * 60 s - nichts gesendet, HTTP 200 mit UNVERAENDERT=1 (wie EVCC). */
+     * 60 s - nichts gesendet, HTTP 200 mit UNVERAENDERT=1 (wie EVCC). Seit
+     * 1.1.22 ebenso derselbe Zustand (Laden, Klima, Heizungen an/aus). */
     if ($mg_code === 'UNVERAENDERT') {
         $mg_ergebnis .= ';UNVERAENDERT=1';
     }
