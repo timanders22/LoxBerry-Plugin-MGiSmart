@@ -1021,6 +1021,32 @@ if (class_exists('LBWeb', false)) {
 <div class="sm-warnung"><?php echo mg_t('WARN.AUTOSTART'); ?></div>
 <?php } ?>
 
+<?php
+/* Kopf (Entscheidung Nr. 43, seit 1.1.24): Statusuebersicht ueber den
+ * Reitern, immer sichtbar. Die Zeilen stammen aus $mg_befund (oben, A2) -
+ * derselbe Befund wie Reiter Gateway, Reiter Test und bin/healthcheck; hier
+ * wird nichts neu gemessen. */
+$mg_kopf_b = array();
+foreach ($mg_befund as $mg_kopf_e) {
+    if (!isset($mg_kopf_b[$mg_kopf_e['bez']])) {
+        $mg_kopf_b[$mg_kopf_e['bez']] = $mg_kopf_e;
+    }
+}
+?>
+<table class="sm-tbl" style="max-width:620px">
+<tr><th><?= mg_e(mg_t('KOPF.EIGENSCHAFT')) ?></th><th><?= mg_e(mg_t('KOPF.WERT')) ?></th></tr>
+<?php foreach (array('BEFUND.TAKT', 'BEFUND.CONTAINER', 'BEFUND.WERTE') as $mg_kopf_k) {
+    if (!isset($mg_kopf_b[$mg_kopf_k])) {
+        continue;
+    }
+    $mg_kopf_s = (int) $mg_kopf_b[$mg_kopf_k]['status']; ?>
+<tr><td><?= mg_e(mg_t($mg_kopf_k)) ?></td>
+    <td<?= $mg_kopf_s === 5 ? ' class="sm-an"' : ($mg_kopf_s === 3 ? ' class="sm-aus"' : '') ?>><?= mg_e($mg_kopf_b[$mg_kopf_k]['text']) ?></td></tr>
+<?php } ?>
+<tr><td><?= mg_e(mg_t('KOPF.FAHRZEUGE')) ?></td>
+    <td><?= (int) $mg_anzahl ?></td></tr>
+</table>
+
 <div class="sm-tabs">
 	<a data-role="none" class="sm-tab<?= $mg_tab === 'tab-settings' ? ' sm-active' : '' ?>" data-ziel="tab-settings"
 	   href="index.php?form=settings"><?= mg_e(mg_t('REITER.EINSTELLUNGEN')) ?></a>
@@ -1040,6 +1066,8 @@ if (class_exists('LBWeb', false)) {
 
 <!-- ================= Einstellungen ================= -->
 <div class="sm-seite<?= $mg_tab === 'tab-settings' ? ' sm-active' : '' ?>" id="tab-settings">
+<div class="sm-hinweis"><?= mg_t('EINST.WAS_IST_DAS') ?></div>
+
 <div class="sm-legende">
 <span><i class="sm-punkt sm-b-lesen"></i> <?= mg_e(mg_t('LEGENDE.LESEN')) ?></span>
 <span><i class="sm-punkt sm-b-aktion"></i> <?= mg_e(mg_t('LEGENDE.AKTION')) ?></span>
