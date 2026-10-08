@@ -1490,6 +1490,10 @@ $mg_eigener = ($mg_ampel !== null && !empty($mg_ampel['eigen']));
 	<td><?= mg_e($mg_ampel[$mg_ak][1]) ?></td></tr>
 <?php } ?>
 </table>
+<?php /* b1 (seit 1.1.23): return code 4 beim Statusabruf ist kein Anmeldefehler. */
+if (!empty($mg_ampel['fahrzeug_satz'])) { ?>
+<div class="sm-hinweis"><?= mg_e($mg_ampel['fahrzeug_satz']) ?></div>
+<?php } ?>
 <div class="sm-hilfe"><?= mg_e(sprintf(mg_t('GW.A_MESSZEIT'), date('d.m.Y H:i:s', (int) $mg_ampel['zeit']))) ?>
 <?= mg_e(mg_t('GW.A_HILFE')) ?></div>
 <div class="sm-hilfe"><?= mg_e(sprintf(mg_t('GW.A_FASSUNG'),

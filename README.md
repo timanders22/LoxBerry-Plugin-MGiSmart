@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.22
+Version 1.1.23
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -8,6 +8,34 @@ Klima, Standort — und schickt Befehle zurück: Laden stoppen, Ziel-Ladestand,
 Ladestrombegrenzung, Standklima, „Auto finden".
 
 Kompatibel mit LoxBerry 3.x und **LoxBerry 4** (reines PHP, PHP 7.4 und 8.x).
+
+## Neu in 1.1.23
+
+Die Ampel „Anmeldung bei MG“ liest jetzt das Protokoll des Gateways (Verbesserungsliste MGiSmart-b1). Die
+Zeilen einer gelungenen Anmeldung sind am 02.10.2026 an einem LoxBerry gemessen. Der neue Weg ist an einer
+Docker-Attrappe unter PHP 8.3 (WSL) gemessen, die Auswertung der Zeilen unter PHP 7.4 und 8.5; nicht am Gerät.
+
+* **Anmeldung bei MG aus dem Protokoll.** Das Plugin liest das Protokoll des eigenen Gateway-Containers
+  (`docker logs`, die letzten 2000 Zeilen und die ersten 15 Minuten nach dem Start). Entscheidend ist die jüngste
+  der Zeilen `Logging in to SAIC API` und `Logged in as`:
+  - grün mit Datum und Uhrzeit der letzten Anmeldung, wenn auf den Versuch die Erfolgszeile folgt;
+  - gelb „Anmeldung läuft“, wenn nach 2 Minuten noch keine Erfolgszeile folgt, vorher grau;
+  - steht keine der beiden Zeilen im Protokoll, urteilt die Ampel wie bisher über die Themen `account/lastLogin`
+    und `account/lastLoginError`; meldet das Gateway dort nichts, bleibt sie grau.
+* **Ein schlafendes Auto ist kein Anmeldefehler.** Meldet das Gateway beim Statusabruf `return code: 4` („The
+  remote control instruction failed“), steht unter der Ampel ein eigener Hinweis „Fahrzeug nicht erreichbar
+  (schläft?)“ mit Anzahl und Zeitpunkt. Die Zeile „Anmeldung bei MG“ bleibt davon unberührt.
+* **Misslungene Anmeldung: ungemessen.** Wie das Gateway eine misslungene Anmeldung schreibt, ist am Gerät noch
+  nicht belegt. Eine Zeile mit `login` und `fail` oder `error` zeigt die Ampel deshalb nur gelb als „vermutlich
+  gescheitert“, nicht rot. Rot bleibt es wie seit 1.1.19, wenn das Gateway unter `account/lastLoginError` einen
+  jüngeren Fehler meldet.
+* **Keine E-Mail in der Ampel.** Die Zeile „Logged in as“ trägt die iSMART-E-Mail. Das Plugin wertet nur
+  Zeitpunkte aus; es speichert und zeigt keine Protokollzeile. Auch der grüne Satz „Themen … liegen vor“ nennt die
+  E-Mail nicht mehr.
+* Unverändert bleiben das MQTT-Thema `gateway/anmeldung`, der Healthcheck und im Reiter *Test* die Zeile aus den
+  Gateway-Themen; die Ampelzeile im Reiter *Test* folgt der Ampel.
+
+**In Loxone:** nichts zu tun.
 
 ## Neu in 1.1.19
 

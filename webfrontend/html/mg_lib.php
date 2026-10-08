@@ -58,6 +58,21 @@ if (!defined('MG_GW_DEF')) {
 if (!defined('MG_GW_PULL_SEK')) {
     define('MG_GW_PULL_SEK', 900);
 }
+/* b1 (seit 1.1.23): Anmeldung bei MG aus dem Protokoll des Gateways.
+ * MG_ANM_PROT_ZEILEN - so viele letzte Zeilen liest die Ampel (docker logs
+ * --tail); MG_ANM_PROT_STARTFENSTER - so viele Sekunden nach dem Start des
+ * Containers liest sie zusaetzlich (dort steht die Anmeldung, gemessen
+ * 02.10.2026); MG_ANM_LAEUFT_S - ab diesem Alter einer Zeile "Logging in"
+ * ohne folgendes "Logged in" zeigt die Ampel gelb "Anmeldung laeuft". */
+if (!defined('MG_ANM_PROT_ZEILEN')) {
+    define('MG_ANM_PROT_ZEILEN', 2000);
+}
+if (!defined('MG_ANM_PROT_STARTFENSTER')) {
+    define('MG_ANM_PROT_STARTFENSTER', 900);
+}
+if (!defined('MG_ANM_LAEUFT_S')) {
+    define('MG_ANM_LAEUFT_S', 120);
+}
 
 
 /* Den LoxBerry-Wurzelordner ohne festen Systempfad bestimmen.
@@ -4423,6 +4438,8 @@ function mg_gw_kurz($info)
         'status' => isset($s['Status']) ? (string) $s['Status'] : '',
         'neustarts' => isset($info['RestartCount']) ? (int) $info['RestartCount'] : 0,
         'seit' => ($start !== false && $start > 0) ? max(0, time() - $start) : -1,
+        // b1 (seit 1.1.23): Startzeit fuer das Startfenster des Protokolls.
+        'start' => ($start !== false && $start > 0) ? (int) $start : -1,
         'def' => isset($l['de.loxberry.plugin.def']) ? (string) $l['de.loxberry.plugin.def'] : '',
         'brokerhash' => isset($l['de.loxberry.plugin.brokerhash'])
             ? (string) $l['de.loxberry.plugin.brokerhash'] : '',
@@ -5024,6 +5041,216 @@ function mg_gw_protokoll()
     return array(true, mg_gw_maskiert($text));
 }
 
+/* ==================================================================
+ * b1 (seit 1.1.23): Anmeldung bei MG aus dem Protokoll des Gateways
+ *
+ * Am Geraet gemessen (02.10.2026, Container lb-mgismart-saic-gateway,
+ * docker logs, 12 425 Zeilen):
+ *   [INFO]: Connected to MQTT broker - publisher.mqtt_publisher
+ *   [INFO]: Logging in to SAIC API - handlers.relogin     -> Versuch
+ *   [INFO]: Logged in as <E-Mail> - handlers.relogin      -> Erfolg
+ * Beide stehen gleich nach dem Start des Containers (30.09. 05:29 und
+ * 02.10. 18:35 UTC). KEIN Anmeldefehler sind die Fehler beim Statusabruf
+ * ("handle_vehicle loop failed during SAIC API call - handlers.vehicle"):
+ * 17-mal "return code: 4, message: The remote control instruction failed"
+ * (das Fahrzeug schlaeft) und einmal "return code: 500 ... GET
+ * /message/list failed unexpectedly". Eine MISSLUNGENE Anmeldung kam nicht
+ * vor - ihre Zeile ist UNGEMESSEN (siehe mg_anm_zeile_art()).
+ *
+ * Gelesen wird mit --timestamps: die Zeit setzt docker (RFC 3339, UTC),
+ * nicht das Gateway. Zwei Fenster: die letzten MG_ANM_PROT_ZEILEN Zeilen und
+ * die ersten MG_ANM_PROT_STARTFENSTER Sekunden nach dem Start des Containers
+ * (ein langes Protokoll schiebt die Anmeldung aus dem hinteren Fenster; das
+ * Startfenster wird je Container und Start nur einmal gelesen). Ausgewertet
+ * werden nur Zeitpunkte und Anzahlen. Keine Zeile wird gespeichert,
+ * angezeigt oder protokolliert - "Logged in as" traegt die E-Mail.
+ * ================================================================== */
+
+/** b1: leere Auswertung (Zeitpunkte in Sekunden, -1 = keine solche Zeile). */
+function mg_anm_leer()
+{
+    return array('versuch' => -1.0, 'erfolg' => -1.0, 'fehl' => -1.0,
+                 'fz4' => 0, 'fz4_zeit' => -1.0, 'zeilen' => 0);
+}
+
+/**
+ * b1: eine Protokollzeile (ohne Zeitstempel) einordnen.
+ * Rueckgabe versuch | erfolg | fz4 | fehl | '' (sonst).
+ */
+function mg_anm_zeile_art($z)
+{
+    $z = (string) $z;
+    if (preg_match('/\bLogged in as\b/', $z)) {
+        return 'erfolg';
+    }
+    if (preg_match('/\bLogging in to SAIC API\b/', $z)) {
+        return 'versuch';
+    }
+    // Fehler beim Statusabruf, das Fahrzeug schlaeft: nie ein Anmeldefehler.
+    if (preg_match('/return code:\s*4\b/i', $z)) {
+        return 'fz4';
+    }
+    /* UNGEMESSEN (Stand 08.10.2026): wie das Gateway eine misslungene
+     * Anmeldung schreibt, ist am Geraet nicht belegt. Angenommen wird nur:
+     * die Zeile nennt "login" (auch handlers.relogin) und "fail" oder
+     * "error". Die Ampel zeigt das deshalb gelb als "vermutlich gescheitert",
+     * nie rot, und der Satz sagt, dass die Form ungemessen ist. Wird die
+     * Zeile einmal gemessen, gehoert sie hierher als eigenes Muster. */
+    if (stripos($z, 'login') !== false && preg_match('/fail|error/i', $z)) {
+        return 'fehl';
+    }
+    return '';
+}
+
+/**
+ * b1: Zeitstempel von docker logs --timestamps abtrennen.
+ * Rueckgabe array(Sekunden als Zahl mit Bruchteil, Rest der Zeile) oder null.
+ */
+function mg_anm_zeit($zeile)
+{
+    if (!preg_match('/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2}) (.*)\z/s',
+            (string) $zeile, $m)) {
+        return null;
+    }
+    $t = strtotime($m[1] . $m[3]);
+    if ($t === false) {
+        return null;
+    }
+    return array($t + ($m[2] !== '' ? (float) ('0.' . $m[2]) : 0.0), $m[4]);
+}
+
+/** b1: einen Protokolltext (docker logs --timestamps) auswerten - ohne docker. */
+function mg_anm_auswerten($text)
+{
+    $aus = mg_anm_leer();
+    $text = preg_replace('/\x1B\[[0-9;]*[A-Za-z]/', '', (string) $text);
+    foreach (preg_split('/\r?\n/', $text) as $zeile) {
+        $zt = mg_anm_zeit($zeile);
+        if ($zt === null) {
+            continue;
+        }
+        $aus['zeilen']++;
+        $art = mg_anm_zeile_art($zt[1]);
+        if ($art === 'fz4') {
+            $aus['fz4']++;
+            $aus['fz4_zeit'] = max($aus['fz4_zeit'], $zt[0]);
+        } elseif ($art !== '') {
+            $aus[$art] = max($aus[$art], $zt[0]);
+        }
+    }
+    return $aus;
+}
+
+/** b1: zwei Auswertungen vereinen; Anzahlen nur aus dem hinteren Fenster. */
+function mg_anm_vereinen(array $a, array $b, $mit_anzahl)
+{
+    foreach (array('versuch', 'erfolg', 'fehl') as $k) {
+        if (isset($b[$k]) && is_numeric($b[$k])) {
+            $a[$k] = max((float) $a[$k], (float) $b[$k]);
+        }
+    }
+    if ($mit_anzahl) {
+        $a['fz4'] += (int) $b['fz4'];
+        $a['fz4_zeit'] = max((float) $a['fz4_zeit'], (float) $b['fz4_zeit']);
+        $a['zeilen'] += (int) $b['zeilen'];
+    }
+    return $a;
+}
+
+/**
+ * b1: das Protokoll des eigenen Containers lesen ($k aus mg_gw_kurz()).
+ * $alt ist die zuletzt gespeicherte Ampel (Zwischenspeicher des
+ * Startfensters). Rueckgabe die Auswertung plus 'lage' (ok | fehler) und
+ * 'start_merk' (was die Ampel fuer das naechste Mal behaelt, oder null).
+ */
+function mg_anm_protokoll(array $k, $alt = null)
+{
+    $aus = mg_anm_leer();
+    $aus['lage'] = 'fehler';
+    $aus['start_merk'] = null;
+    $id = isset($k['id_voll']) ? (string) $k['id_voll'] : '';
+    if ($id === '') {
+        return $aus;
+    }
+    $gelesen = 0;
+    list($rc, $o, $e) = mg_docker(array('logs', '--timestamps', '--tail', (string) MG_ANM_PROT_ZEILEN, $id), 10);
+    if ($rc === 0) {
+        $aus = mg_anm_vereinen($aus, mg_anm_auswerten($o . "\n" . $e), true);
+        $gelesen++;
+    }
+    $start = isset($k['start']) ? (int) $k['start'] : -1;
+    if ($start > 0) {
+        $schluessel = $id . '@' . $start;
+        if (is_array($alt) && isset($alt['anm_start']['schluessel'])
+                && $alt['anm_start']['schluessel'] === $schluessel) {
+            $aus = mg_anm_vereinen($aus, $alt['anm_start'], false);
+            $aus['start_merk'] = $alt['anm_start'];
+            $gelesen++;
+        } else {
+            /* --until gibt es erst in neueren docker-Fassungen; scheitert der
+             * Aufruf, bleibt es beim hinteren Fenster. */
+            list($rc2, $o2, $e2) = mg_docker(array('logs', '--timestamps',
+                '--since', gmdate('Y-m-d\TH:i:s\Z', $start - 5),
+                '--until', gmdate('Y-m-d\TH:i:s\Z', $start + MG_ANM_PROT_STARTFENSTER), $id), 10);
+            if ($rc2 === 0) {
+                $s = mg_anm_auswerten($o2 . "\n" . $e2);
+                $aus = mg_anm_vereinen($aus, $s, false);
+                $gelesen++;
+                if (time() > $start + MG_ANM_PROT_STARTFENSTER) {
+                    $aus['start_merk'] = array('schluessel' => $schluessel, 'versuch' => $s['versuch'],
+                                               'erfolg' => $s['erfolg'], 'fehl' => $s['fehl']);
+                }
+            }
+        }
+    }
+    $aus['lage'] = $gelesen > 0 ? 'ok' : 'fehler';
+    return $aus;
+}
+
+/**
+ * b1: die Stufe der Ampelzeile aus einer Auswertung. Rueckgabe
+ * array(farbe, satz) oder null - dann steht keine Anmeldezeile im gelesenen
+ * Protokoll, und die Ampel urteilt wie bis 1.1.22 ueber die Gateway-Themen.
+ * Der Satz nennt nur Zeitpunkte, nie E-Mail oder Fahrzeugkennung.
+ */
+function mg_anm_stufe(array $a, $jetzt)
+{
+    if (!isset($a['lage']) || $a['lage'] !== 'ok') {
+        return null;
+    }
+    $v = (float) $a['versuch'];
+    $e = (float) $a['erfolg'];
+    $f = (float) $a['fehl'];
+    if ($v < 0 && $e < 0 && $f < 0) {
+        return null;
+    }
+    $zeit = function ($t) {
+        return date('d.m.Y H:i:s', (int) floor($t));
+    };
+    if ($e >= 0 && $e >= $v && $e >= $f) {
+        return array('gruen', sprintf(mg_t('GW.A_ANM_PROT_OK'), $zeit($e)));
+    }
+    $zuletzt = $e >= 0 ? sprintf(mg_t('GW.A_ANM_PROT_ZULETZT'), $zeit($e)) : mg_t('GW.A_ANM_PROT_NIE');
+    if ($f >= 0 && $f >= $v) {
+        return array('gelb', sprintf(mg_t('GW.A_ANM_PROT_FEHL'), $zeit($f)) . ' ' . $zuletzt);
+    }
+    $alter = max(0, (int) floor($jetzt - $v));
+    if ($alter < MG_ANM_LAEUFT_S) {
+        return array('grau', sprintf(mg_t('GW.A_ANM_PROT_GERADE'), $alter));
+    }
+    return array('gelb', sprintf(mg_t('GW.A_ANM_PROT_LAEUFT'), mg_dauer_text($alter), $zeit($v)) . ' ' . $zuletzt);
+}
+
+/** b1: der Hinweis "Fahrzeug nicht erreichbar" (return code 4), oder ''. */
+function mg_anm_fz_satz(array $a)
+{
+    if (!isset($a['lage']) || $a['lage'] !== 'ok' || (int) $a['fz4'] <= 0) {
+        return '';
+    }
+    return sprintf(mg_t('GW.A_FZ_SCHLAEFT'), (int) $a['fz4'], (int) $a['zeilen'],
+        date('d.m.Y H:i:s', (int) floor((float) $a['fz4_zeit'])));
+}
+
 /** Fahrzeug-Kennungen, die das Gateway meldet, aber noch nicht eingetragen sind. */
 function mg_gw_gefundene_vins($cfg = null)
 {
@@ -5053,8 +5280,11 @@ function mg_gw_gefundene_vins($cfg = null)
  * $messen = true fragt docker (kurze Zeitgrenzen) und liest die
  * Momentaufnahme; $lesen = true liest vorher den Broker neu ("Zustand neu
  * messen"). Farben: gruen, gelb, rot, grau (grau = nicht feststellbar).
- * Protokollzeilen des Gateways zu Erfolg und Misserfolg der Anmeldung sind
- * NICHT belegt - auf sie baut hier nichts.
+ * b1 (seit 1.1.23): die Zeile "Anmeldung bei MG" urteilt zuerst ueber das
+ * Protokoll des Gateways (mg_anm_protokoll(), Erfolgszeilen am Geraet
+ * gemessen 02.10.2026; die Zeile einer misslungenen Anmeldung ist
+ * UNGEMESSEN). Steht dort keine Anmeldezeile, urteilt sie wie bis 1.1.22
+ * ueber die Gateway-Themen.
  */
 function mg_gw_ampel($messen = false, $lesen = false)
 {
@@ -5065,6 +5295,7 @@ function mg_gw_ampel($messen = false, $lesen = false)
         return isset($d['zeit']) ? $d : null;
     }
     $cfg = mg_config();
+    $alt = mg_json_lesen($datei);   // b1: Zwischenspeicher des Startfensters
     if ($lesen) {
         mg_snapshot(3);
     }
@@ -5110,7 +5341,17 @@ function mg_gw_ampel($messen = false, $lesen = false)
             }
         }
     }
-    // Zeile 2: Anmeldung bei MG - am Broker abgelesen, nicht am Protokoll.
+    /* b1 (seit 1.1.23): das Protokoll des eigenen Containers - nur mit
+     * docker und eigenem Container. Gespeichert werden nur Zeitpunkte. */
+    $prot = null;
+    $a['anm_start'] = null;
+    $a['fahrzeug_satz'] = '';
+    if ($k !== null) {
+        $prot = mg_anm_protokoll($k, $alt);
+        $a['anm_start'] = $prot['start_merk'];
+        $a['fahrzeug_satz'] = mg_anm_fz_satz($prot);
+    }
+    // Zeile 2: Anmeldung bei MG - aus dem Protokoll (b1), sonst am Broker abgelesen.
     $roh = mg_raw();
     $prefix = trim((string) $cfg['prefix']) !== '' ? trim((string) $cfg['prefix']) : 'saic';
     $user = trim((string) $cfg['saic_user']);
@@ -5137,8 +5378,17 @@ function mg_gw_ampel($messen = false, $lesen = false)
     $a['fassung'] = mg_zeit_da($gv) ? mg_kuerzen(mg_zeit_text($gv), 40) : '';
     $a['bild'] = ($k !== null) ? $k['bild'] : '';
     $a['digest'] = ($k !== null && $k['abbild'] !== '') ? mg_gw_digest_kurz($k['abbild']) : '';
+    $pstufe = ($prot !== null) ? mg_anm_stufe($prot, time()) : null;
+    $pzeit = ($prot !== null) ? max((float) $prot['versuch'], (float) $prot['erfolg'], (float) $prot['fehl']) : -1.0;
+    $a['anm_quelle'] = 'themen';
     if ($user === '') {
         $a['anmeldung'] = array('grau', mg_t('GW.A_KEIN_USER'));
+    } elseif ($pstufe !== null && !($anm['stufe'] === 0 && $anm['fehler'] > $pzeit)) {
+        /* b1: das Protokoll entscheidet - ausser das Gateway meldet unter
+         * account/lastLoginError einen Fehler, der juenger ist als jede
+         * Anmeldezeile, oder es ist beim Broker offline (Letzter Wille). */
+        $a['anm_quelle'] = 'protokoll';
+        $a['anmeldung'] = ($a['laeuft'] && $lwt === 0) ? array('rot', mg_t('GW.A_LWT_OFFLINE')) : $pstufe;
     } elseif ($anm['stufe'] === 0) {
         $a['anmeldung'] = array('rot', $anm['satz']);
     } elseif ($anm['stufe'] === -1) {
@@ -5150,7 +5400,8 @@ function mg_gw_ampel($messen = false, $lesen = false)
     } elseif ($a['laeuft'] && $lwt === 0) {
         $a['anmeldung'] = array('rot', mg_t('GW.A_LWT_OFFLINE'));
     } elseif ($fz > 0) {
-        $a['anmeldung'] = array('gruen', sprintf(mg_t('GW.A_ANGEMELDET'), $user, $fz));
+        // b1: ohne die E-Mail (sie stand bis 1.1.22 im Satz).
+        $a['anmeldung'] = array('gruen', sprintf(mg_t('GW.A_ANGEMELDET'), $fz));
     } elseif (!$a['laeuft']) {
         $a['anmeldung'] = array('grau', mg_t('GW.A_KEIN_CONTAINER'));
     } elseif ($k !== null && $k['seit'] >= 0 && $k['seit'] < 300) {
