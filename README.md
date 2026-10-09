@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.24
+Version 1.1.25
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -8,6 +8,17 @@ Klima, Standort — und schickt Befehle zurück: Laden stoppen, Ziel-Ladestand,
 Ladestrombegrenzung, Standklima, „Auto finden".
 
 Kompatibel mit LoxBerry 3.x und **LoxBerry 4** (reines PHP, PHP 7.4 und 8.x).
+
+## Neu in 1.1.25
+
+Baustein-Liste in der Schreibweise des Leitungswerkzeugs.
+
+* **Baustein-Liste (Reiter Einbindung in Loxone, Schritt 7):** Die Spalte „Eingänge verbinden mit“
+  nennt die Quellen in fester Form: `Ausgang von #8` statt „Ausgang von 8“, `I1 = #13, I2 = #17`
+  statt „Ausgang von 13 und 17“, am UND #8 `I1 = #3, I2 = #7, I3 = die günstige Stunde bzw. der
+  PV-Überschuss`, am Statusbaustein `I1 = MG_SOC, I2 = MG_REICHWEITE` statt „I1 → …“.
+  Gleiche Bausteine, gleiche Verbindungen.
+* Nur Oberfläche; gerendert unter PHP 7.4, 8.4 und 8.5, nicht am Gerät angesehen.
 
 ## Neu in 1.1.24
 
