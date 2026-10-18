@@ -911,6 +911,14 @@ if (class_exists('LBWeb', false)) {
 .sm-wrap, .sm-wrap *, .sm-tabs, .sm-tabs * { text-shadow: none !important; }
 .sm-wrap h2 { color: #6dac20; margin: 24px 0 10px; font-size: 1.15em; border-bottom: 2px solid #e0e0e0; padding-bottom: 6px; }
 .sm-wrap h3 { color: #4f7d17; font-size: 1.0em; font-weight: 700; margin: 16px 0 2px; }
+/* Welle Bild 19 (1.1.26): Seiten, Schritte, Hinweise und Bild je Baustein-Liste (Bauart Skoda 0.9.33). */
+.sm-wrap h4.sm-h4 { color: #4f7d17; font-size: 0.98em; font-weight: 700; margin: 22px 0 4px;
+    padding-top: 10px; border-top: 1px solid #e0e0e0; }
+.sm-schritte { margin: 6px 0 0 18px; padding: 0; }
+.sm-schritte li { margin: 3px 0; }
+.sm-bild { margin: 12px 0; }
+.sm-bild img { max-width: 100%; height: auto; border: 1px solid #ccc; border-radius: 4px; background: #fff; }
+.sm-bild figcaption { font-size: .9em; color: #555; margin-top: 4px; }
 .sm-tabs { display: flex; gap: 4px; margin: 14px 0 0; border-bottom: 2px solid #6dac20; flex-wrap: wrap; }
 .sm-tab { background: #eee; border: 1px solid #ccc; border-bottom: 0; border-radius: 8px 8px 0 0;
           padding: 9px 18px; font-size: 0.95em; color: #444 !important; text-decoration: none; display: inline-block; }
@@ -1738,16 +1746,20 @@ $mg_gwf = ($mg_gw === null) ? 0 : (int) $mg_gw['fassung'];
 <?php foreach ($mg_cmds as $mg_k => $mg_c) {
     if (!empty($mg_c['gefahr']) && empty($mg_cfg['gefahr_ein'])) { continue; }
     if (!empty($mg_c['plan']) && empty($mg_cfg['plan_ein'])) { continue; }
-    // Der Zusatz je Befehl: eine Zahl als <v>, beim freien Plan zwei Uhrzeiten
-    // und ein Modus - die kann ein virtueller Ausgang nicht liefern, deshalb
-    // stehen sie hier als Beispielwerte statt als Platzhalter.
+    // Der Zusatz je Befehl: eine Zahl als <v.0> (seit 1.1.26, wie die Vorlage),
+    // ein Textwert als Liste der erlaubten Woerter (die Vorlage macht daraus je
+    // Wort einen eigenen Befehl), beim freien Plan zwei Uhrzeiten und ein Modus -
+    // die kann ein virtueller Ausgang nicht liefern, deshalb stehen sie hier als
+    // Beispielwerte statt als Platzhalter.
     $mg_zus = '';
     if (isset($mg_c['nutzlast']) && $mg_c['nutzlast'] === 'ladeplan') {
         $mg_zus = 'von=22:00&bis=06:00&modus=until_configured_soc';
     } elseif (isset($mg_c['nutzlast']) && $mg_c['nutzlast'] === 'heizplan') {
         $mg_zus = 'von=05:30&modus=on';
+    } elseif (!empty($mg_c['zusatz']) && !empty($mg_c['textwert'])) {
+        $mg_zus = $mg_c['zusatz'] . '=' . implode('|', $mg_c['werte']);
     } elseif (!empty($mg_c['zusatz'])) {
-        $mg_zus = $mg_c['zusatz'] . '=<v>';
+        $mg_zus = $mg_c['zusatz'] . '=' . mg_befehl_platzhalter();
     } ?>
 <tr><td><span class="sm-mono"><?= mg_e($mg_k) ?></span></td>
 	<td><span class="sm-mono"><?= str_replace('&amp;lt;v&amp;gt;', '&lt;v&gt;',
@@ -1808,48 +1820,286 @@ $mg_gwf = ($mg_gw === null) ? 0 : (int) $mg_gw['fassung'];
 
 <div class="sm-step"><b><?= mg_e(mg_t('LOX.S7_TITEL')) ?></b><br>
 <?php echo mg_t('LOX.S7'); ?>
+<?php
+/**
+ * Die Baustein-Listen des Reiters - Welle Bild 19 (1.1.26, Hausherr 11.10.2026: Vollausstattung, ein
+ * absoluter Laie soll das Maximum leicht uebernehmen koennen; Entwurf Welle 19 mg, E1-E19, 18.10.2026).
+ * VIER Seiten wie im LoxBerry-Plugins Musterprojekt (Musterprojekt/baustein_listen.txt, Abschnitte
+ * "MGiSmart" 33, "... Laden" 36, "... Klima und Befehle" 35, "... Fahrzeug" 36 Zeilen); bis 1.1.25 stand
+ * hier EINE Liste mit 17 Zeilen (Feld mg_bausteine). Berichtigt gegen sie: Schwellwertschalter an digitalen
+ * Eingaengen (Impuls je Abfrage), "Ladestand niedrig" direkt am SOC (-1 galt als niedrig), die
+ * Ausfallerkennung an FZALTER (meldete ein schlafendes Auto, nie einen stehenden LoxBerry - jetzt
+ * Analogwertvalidierung am Laufzaehler ZAEHLER), ein UND mit drei Eingaengen und Quellen ohne Baustein.
+ *
+ * Jede Zeile ist EIN Sprachschluessel BAUSTEIN.Z<Seite>_<Nr> "Typ | Name | Parameter | Eingaenge" (Zeilen
+ * mit Prozentzeichen dort als %% und ueber sprintf() geholt; deutsch wortgleich mit der Liste fuer
+ * Fahrzeug 1; Bausteinnamen auch englisch deutsch). DIE NAMEN DER EINGAENGE UND AUSGANGSBEFEHLE WERDEN
+ * GEBAUT, NICHT ABGESCHRIEBEN: eine Zeile mit Vorlage traegt den Namen aus mg_eingangsname() bzw.
+ * mg_befehl_titel() wie die Vorlage, und im Typ wird der Behaeltertitel "MG 1 (...)" durch den aus
+ * mg_behaelter_titel() ersetzt (Fahrzeugname aus den Einstellungen). Keine Leitung geht ueber eine
+ * Seitengrenze; Eingaenge auf zwei Seiten sind dort weitere Instanzen.
+ *
+ * Rueckgabe: Liste von array('seite', 'bild', 'zeilen' => array(array(Nr, Typ, Name, Parameter, Eingaenge),
+ * ...), 'schritte', 'hinweise'). Zellen und Schritte sind Klartext (unten maskiert), die Hinweise
+ * freigegebenes HTML aus der Sprachdatei.
+ */
+function mg_bausteinliste($nr = 1)
+{
+    $nr = max(1, min(9, (int) $nr));
+    $titel = array('MG 1 (Gesamt)' => mg_behaelter_titel($nr, 'mg'),
+                   'MG 1 (Steuerbefehle)' => mg_behaelter_titel($nr, 'befehle'));
+    // Seitenname (= Config-Seite im Musterprojekt, deshalb fest), Bild, Zeilen, Kasten, Hinweise
+    $seiten = array(
+        array('MGiSmart', 'einbindung_loxone.png', array(
+            array(mg_t('BAUSTEIN.Z1_01'), mg_eingangsname('OK', $nr)),
+            array(mg_t('BAUSTEIN.Z1_02'), mg_eingangsname('ZAEHLER', $nr)),
+            array(mg_t('BAUSTEIN.Z1_03'), mg_eingangsname('GATEWAY', $nr)),
+            array(mg_t('BAUSTEIN.Z1_04'), mg_eingangsname('ERREICHBAR', $nr)),
+            array(mg_t('BAUSTEIN.Z1_05'), mg_eingangsname('FZALTER', $nr)),
+            array(mg_t('BAUSTEIN.Z1_06'), mg_eingangsname('ALTER', $nr)),
+            array(mg_t('BAUSTEIN.Z1_07'), mg_eingangsname('THEMEN', $nr)),
+            array(sprintf(mg_t('BAUSTEIN.Z1_08')), mg_eingangsname('SOC', $nr)),
+            array(mg_t('BAUSTEIN.Z1_09'), mg_eingangsname('SOCKWH', $nr)),
+            array(mg_t('BAUSTEIN.Z1_10'), mg_eingangsname('REICHWEITE', $nr)),
+            array(mg_t('BAUSTEIN.Z1_11'), mg_eingangsname('LAEDT', $nr)),
+            array(mg_t('BAUSTEIN.Z1_12'), mg_eingangsname('STECKER', $nr)),
+            array(mg_t('BAUSTEIN.Z1_13'), mg_eingangsname('RESTZEIT', $nr)),
+            array(mg_t('BAUSTEIN.Z1_14'), mg_eingangsname('LAEUFT', $nr)),
+            array(mg_t('BAUSTEIN.Z1_15')),
+            array(mg_t('BAUSTEIN.Z1_16')),
+            array(mg_t('BAUSTEIN.Z1_17')),
+            array(mg_t('BAUSTEIN.Z1_18')),
+            array(mg_t('BAUSTEIN.Z1_19')),
+            array(mg_t('BAUSTEIN.Z1_20')),
+            array(mg_t('BAUSTEIN.Z1_21')),
+            array(mg_t('BAUSTEIN.Z1_22')),
+            array(sprintf(mg_t('BAUSTEIN.Z1_23'))),
+            array(mg_t('BAUSTEIN.Z1_24')),
+            array(mg_t('BAUSTEIN.Z1_25')),
+            array(mg_t('BAUSTEIN.Z1_26')),
+            array(mg_t('BAUSTEIN.Z1_27')),
+            array(mg_t('BAUSTEIN.Z1_28')),
+            array(sprintf(mg_t('BAUSTEIN.Z1_29'))),
+            array(sprintf(mg_t('BAUSTEIN.Z1_30'))),
+            array(mg_t('BAUSTEIN.Z1_31')),
+            array(mg_t('BAUSTEIN.Z1_32')),
+            array(mg_t('BAUSTEIN.Z1_33')),
+        ), array(
+            'BAUSTEIN.SEITE1_SCHRITT1',
+            'BAUSTEIN.SEITE1_SCHRITT2',
+            'BAUSTEIN.SEITE1_SCHRITT3',
+            'BAUSTEIN.SEITE1_SCHRITT4',
+            'BAUSTEIN.SEITE1_SCHRITT5',
+            'BAUSTEIN.SEITE1_SCHRITT6',
+        ), array(
+            'BAUSTEIN.SEITE1_H1',
+            'BAUSTEIN.SEITE1_H2',
+            'BAUSTEIN.SEITE1_H3',
+            'BAUSTEIN.SEITE1_H4',
+            'BAUSTEIN.SEITE1_H5',
+            'BAUSTEIN.SEITE1_H6',
+            'BAUSTEIN.SEITE1_H7',
+        )),
+        array('MGiSmart Laden', 'einbindung_loxone_laden.png', array(
+            array(mg_t('BAUSTEIN.Z2_01'), mg_eingangsname('LAEDT', $nr)),
+            array(mg_t('BAUSTEIN.Z2_02'), mg_eingangsname('STECKER', $nr)),
+            array(sprintf(mg_t('BAUSTEIN.Z2_03')), mg_eingangsname('SOC', $nr)),
+            array(sprintf(mg_t('BAUSTEIN.Z2_04')), mg_eingangsname('ZIEL', $nr)),
+            array(mg_t('BAUSTEIN.Z2_05'), mg_eingangsname('VOLL', $nr)),
+            array(mg_t('BAUSTEIN.Z2_06'), mg_eingangsname('LEISTUNG', $nr)),
+            array(mg_t('BAUSTEIN.Z2_07'), mg_eingangsname('RESTZEIT', $nr)),
+            array(mg_t('BAUSTEIN.Z2_08'), mg_eingangsname('STROMGRENZE', $nr)),
+            array(mg_t('BAUSTEIN.Z2_09'), mg_eingangsname('ACLEISTUNG', $nr)),
+            array(mg_t('BAUSTEIN.Z2_10'), mg_eingangsname('ACSTROM', $nr)),
+            array(mg_t('BAUSTEIN.Z2_11'), mg_eingangsname('ACSPANNUNG', $nr)),
+            array(mg_t('BAUSTEIN.Z2_12'), mg_eingangsname('LADEART', $nr)),
+            array(mg_t('BAUSTEIN.Z2_13'), mg_eingangsname('KABELVERR', $nr)),
+            array(mg_t('BAUSTEIN.Z2_14'), mg_eingangsname('STECKERFZ', $nr)),
+            array(mg_t('BAUSTEIN.Z2_15'), mg_eingangsname('STECKERSAEULE', $nr)),
+            array(mg_t('BAUSTEIN.Z2_16'), mg_eingangsname('BATTHEIZ', $nr)),
+            array(sprintf(mg_t('BAUSTEIN.Z2_17'))),
+            array(mg_t('BAUSTEIN.Z2_18')),
+            array(mg_t('BAUSTEIN.Z2_19')),
+            array(mg_t('BAUSTEIN.Z2_20'), mg_befehl_titel('ziel', $nr)),
+            array(mg_t('BAUSTEIN.Z2_21')),
+            array(mg_t('BAUSTEIN.Z2_22'), mg_befehl_titel('strom', $nr)),
+            array(mg_t('BAUSTEIN.Z2_23')),
+            array(mg_t('BAUSTEIN.Z2_24'), mg_befehl_titel('batterieheizung_an', $nr)),
+            array(mg_t('BAUSTEIN.Z2_25')),
+            array(mg_t('BAUSTEIN.Z2_26')),
+            array(mg_t('BAUSTEIN.Z2_27')),
+            array(mg_t('BAUSTEIN.Z2_28')),
+            array(mg_t('BAUSTEIN.Z2_29')),
+            array(mg_t('BAUSTEIN.Z2_30'), mg_eingangsname('ZUHAUSE', $nr)),
+            array(mg_t('BAUSTEIN.Z2_31')),
+            array(mg_t('BAUSTEIN.Z2_32')),
+            array(mg_t('BAUSTEIN.Z2_33')),
+            array(mg_t('BAUSTEIN.Z2_34')),
+            array(mg_t('BAUSTEIN.Z2_35')),
+            array(mg_t('BAUSTEIN.Z2_36'), mg_befehl_titel('laden_start', $nr)),
+        ), array(
+            'BAUSTEIN.SEITE2_SCHRITT1',
+            'BAUSTEIN.SEITE2_SCHRITT2',
+            'BAUSTEIN.SEITE2_SCHRITT3',
+            'BAUSTEIN.SEITE2_SCHRITT4',
+            'BAUSTEIN.SEITE2_SCHRITT5',
+        ), array(
+            'BAUSTEIN.SEITE2_H1',
+            'BAUSTEIN.SEITE2_H2',
+            'BAUSTEIN.SEITE2_H3',
+            'BAUSTEIN.SEITE2_H4',
+            'BAUSTEIN.SEITE2_H5',
+        )),
+        array('MGiSmart Klima und Befehle', 'einbindung_loxone_klima_befehle.png', array(
+            array(mg_t('BAUSTEIN.Z3_01'), mg_eingangsname('KLIMA', $nr)),
+            array(mg_t('BAUSTEIN.Z3_02'), mg_eingangsname('KLIMASOLL', $nr)),
+            array(mg_t('BAUSTEIN.Z3_03'), mg_eingangsname('INNEN', $nr)),
+            array(mg_t('BAUSTEIN.Z3_04'), mg_eingangsname('AUSSEN', $nr)),
+            array(mg_t('BAUSTEIN.Z3_05'), mg_eingangsname('HECKSCHEIBE', $nr)),
+            array(mg_t('BAUSTEIN.Z3_06'), mg_eingangsname('FRONTSCHEIBE', $nr)),
+            array(mg_t('BAUSTEIN.Z3_07'), mg_eingangsname('SITZHL', $nr)),
+            array(mg_t('BAUSTEIN.Z3_08'), mg_eingangsname('SITZHR', $nr)),
+            array(mg_t('BAUSTEIN.Z3_09'), mg_eingangsname('FEHLER', $nr)),
+            array(mg_t('BAUSTEIN.Z3_10')),
+            array(mg_t('BAUSTEIN.Z3_11')),
+            array(mg_t('BAUSTEIN.Z3_12')),
+            array(mg_t('BAUSTEIN.Z3_13'), mg_befehl_titel('klimatemp', $nr)),
+            array(mg_t('BAUSTEIN.Z3_14')),
+            array(mg_t('BAUSTEIN.Z3_15')),
+            array(mg_t('BAUSTEIN.Z3_16')),
+            array(mg_t('BAUSTEIN.Z3_17')),
+            array(mg_t('BAUSTEIN.Z3_18')),
+            array(mg_t('BAUSTEIN.Z3_19'), mg_befehl_titel('klima_an', $nr)),
+            array(mg_t('BAUSTEIN.Z3_20')),
+            array(mg_t('BAUSTEIN.Z3_21'), mg_befehl_titel('klima_aus', $nr)),
+            array(mg_t('BAUSTEIN.Z3_22')),
+            array(mg_t('BAUSTEIN.Z3_23'), mg_befehl_titel('klima_vorn', $nr)),
+            array(mg_t('BAUSTEIN.Z3_24')),
+            array(mg_t('BAUSTEIN.Z3_25'), mg_befehl_titel('klima_geblaese', $nr)),
+            array(mg_t('BAUSTEIN.Z3_26')),
+            array(mg_t('BAUSTEIN.Z3_27'), mg_befehl_titel('heckscheibe_an', $nr)),
+            array(mg_t('BAUSTEIN.Z3_28')),
+            array(mg_t('BAUSTEIN.Z3_29'), mg_befehl_titel('frontscheibe_an', $nr)),
+            array(mg_t('BAUSTEIN.Z3_30')),
+            array(mg_t('BAUSTEIN.Z3_31'), mg_befehl_titel('sitzheizung_l', $nr)),
+            array(mg_t('BAUSTEIN.Z3_32')),
+            array(mg_t('BAUSTEIN.Z3_33'), mg_befehl_titel('sitzheizung_r', $nr)),
+            array(mg_t('BAUSTEIN.Z3_34')),
+            array(mg_t('BAUSTEIN.Z3_35'), mg_befehl_titel('auffrischen', $nr)),
+        ), array(
+            'BAUSTEIN.SEITE3_SCHRITT1',
+            'BAUSTEIN.SEITE3_SCHRITT2',
+            'BAUSTEIN.SEITE3_SCHRITT3',
+            'BAUSTEIN.SEITE3_SCHRITT4',
+            'BAUSTEIN.SEITE3_SCHRITT5',
+        ), array(
+            'BAUSTEIN.SEITE3_H1',
+            'BAUSTEIN.SEITE3_H2',
+            'BAUSTEIN.SEITE3_H3',
+            'BAUSTEIN.SEITE3_H4',
+            'BAUSTEIN.SEITE3_H5',
+        )),
+        array('MGiSmart Fahrzeug', 'einbindung_loxone_fahrzeug.png', array(
+            array(mg_t('BAUSTEIN.Z4_01'), mg_eingangsname('ZU', $nr)),
+            array(mg_t('BAUSTEIN.Z4_02'), mg_eingangsname('TUEROFFEN', $nr)),
+            array(mg_t('BAUSTEIN.Z4_03'), mg_eingangsname('FENSTEROFFEN', $nr)),
+            array(mg_t('BAUSTEIN.Z4_04'), mg_eingangsname('KOFFER', $nr)),
+            array(mg_t('BAUSTEIN.Z4_05'), mg_eingangsname('LAEUFT', $nr)),
+            array(mg_t('BAUSTEIN.Z4_06'), mg_eingangsname('OK', $nr)),
+            array(mg_t('BAUSTEIN.Z4_07'), mg_eingangsname('TEMPO', $nr)),
+            array(mg_t('BAUSTEIN.Z4_08'), mg_eingangsname('ZUHAUSE', $nr)),
+            array(mg_t('BAUSTEIN.Z4_09'), mg_eingangsname('ENTFERNUNG', $nr)),
+            array(mg_t('BAUSTEIN.Z4_10'), mg_eingangsname('KM', $nr)),
+            array(mg_t('BAUSTEIN.Z4_11'), mg_eingangsname('KMTAG', $nr)),
+            array(mg_t('BAUSTEIN.Z4_12'), mg_eingangsname('KMLADUNG', $nr)),
+            array(mg_t('BAUSTEIN.Z4_13'), mg_eingangsname('VERBRTAG', $nr)),
+            array(mg_t('BAUSTEIN.Z4_14'), mg_eingangsname('VERBRLADUNG', $nr)),
+            array(mg_t('BAUSTEIN.Z4_15'), mg_eingangsname('BATT12V', $nr)),
+            array(mg_t('BAUSTEIN.Z4_16'), mg_eingangsname('RDVL', $nr)),
+            array(mg_t('BAUSTEIN.Z4_17'), mg_eingangsname('RDVR', $nr)),
+            array(mg_t('BAUSTEIN.Z4_18'), mg_eingangsname('RDHL', $nr)),
+            array(mg_t('BAUSTEIN.Z4_19'), mg_eingangsname('RDHR', $nr)),
+            array(mg_t('BAUSTEIN.Z4_20')),
+            array(mg_t('BAUSTEIN.Z4_21')),
+            array(mg_t('BAUSTEIN.Z4_22')),
+            array(mg_t('BAUSTEIN.Z4_23')),
+            array(mg_t('BAUSTEIN.Z4_24')),
+            array(mg_t('BAUSTEIN.Z4_25')),
+            array(mg_t('BAUSTEIN.Z4_26')),
+            array(mg_t('BAUSTEIN.Z4_27')),
+            array(mg_t('BAUSTEIN.Z4_28')),
+            array(mg_t('BAUSTEIN.Z4_29')),
+            array(mg_t('BAUSTEIN.Z4_30')),
+            array(mg_t('BAUSTEIN.Z4_31')),
+            array(mg_t('BAUSTEIN.Z4_32')),
+            array(mg_t('BAUSTEIN.Z4_33')),
+            array(mg_t('BAUSTEIN.Z4_34')),
+            array(mg_t('BAUSTEIN.Z4_35')),
+            array(mg_t('BAUSTEIN.Z4_36')),
+        ), array(
+            'BAUSTEIN.SEITE4_SCHRITT1',
+            'BAUSTEIN.SEITE4_SCHRITT2',
+            'BAUSTEIN.SEITE4_SCHRITT3',
+            'BAUSTEIN.SEITE4_SCHRITT4',
+            'BAUSTEIN.SEITE4_SCHRITT5',
+        ), array(
+            'BAUSTEIN.SEITE4_H1',
+            'BAUSTEIN.SEITE4_H2',
+            'BAUSTEIN.SEITE4_H3',
+            'BAUSTEIN.SEITE4_H4',
+            'BAUSTEIN.SEITE4_H5',
+        )),
+    );
+    $aus = array();
+    foreach ($seiten as $mg_s) {
+        $mg_zl = array();
+        foreach ($mg_s[2] as $mg_i => $mg_z) {
+            $mg_c = array_pad(explode(' | ', $mg_z[0], 4), 4, '');
+            if (isset($mg_z[1])) {
+                $mg_c[0] = strtr($mg_c[0], $titel);
+                $mg_c[1] = $mg_z[1];
+            }
+            $mg_zl[] = array_merge(array($mg_i + 1), $mg_c);
+        }
+        $aus[] = array('seite' => $mg_s[0], 'bild' => $mg_s[1], 'zeilen' => $mg_zl,
+                       'schritte' => array_map('mg_t', $mg_s[3]), 'hinweise' => array_map('mg_t', $mg_s[4]));
+    }
+    return $aus;
+}
+/* Vier Seiten, je immer sichtbar mit Ueberschrift (= Seitenname in Config), Kasten "So uebernehmen Sie
+ * diese Seite", Tabelle, Hinweisen, Bild und Link. Die Namen gelten fuer Fahrzeug 1 (E19). */
+foreach (mg_bausteinliste(1) as $mg_bs) { ?>
+<h4 class="sm-h4"><?= mg_e($mg_bs['seite']) ?></h4>
+<div class="sm-hinweis"><b><?= mg_e(mg_t('LOX.SCHRITTE_TITEL')) ?></b>
+<ol class="sm-schritte">
+<?php foreach ($mg_bs['schritte'] as $mg_bx) { ?>
+<li><?= mg_e($mg_bx) ?></li>
+<?php } ?>
+</ol></div>
 <div class="sm-breit">
 <table class="sm-tbl">
 <tr><th>#</th><th><?= mg_e(mg_t('LOX.BAUSTEIN')) ?></th><th><?= mg_e(mg_t('LOX.NAME')) ?></th><th><?= mg_e(mg_t('LOX.PARAMETER')) ?></th><th><?= mg_e(mg_t('LOX.EINGAENGE')) ?></th></tr>
-<?php
-/* Die Nummern werden GERECHNET, nicht getippt. Verweise in den
- * Erlaeuterungen stehen als {B7} im Text und werden unten aufgeloest -
- * eine getippte Zahl verschiebt sich lautlos, sobald eine Zeile dazukommt. */
-$mg_bausteine = array(
-    array('LOX.B_STATUS', 'LOX.BN_KACHEL', 'LOX.BP_KACHEL', 'LOX.BE_KACHEL'),
-    array('LOX.B_SWS', 'LOX.BN_LAEDT', 'LOX.BP_05', 'MG_LAEDT'),
-    array('LOX.B_SWS', 'LOX.BN_STECKER', 'LOX.BP_05', 'MG_STECKER'),
-    array('LOX.B_SWS', 'LOX.BN_SOCNIEDRIG', 'LOX.BP_SOC', 'MG_SOC'),
-    array('LOX.B_SWS', 'LOX.BN_AUSFALL', 'LOX.BP_AUSFALL', 'MG_FZALTER'),
-    array('LOX.B_SWS', 'LOX.BN_UNERREICHBAR', 'LOX.BP_INVERS', 'MG_ERREICHBAR'),
-    array('LOX.B_SWS', 'LOX.BN_ZUHAUSE', 'LOX.BP_05', 'MG_ZUHAUSE'),
-    array('LOX.B_UND', 'LOX.BN_SPARLADEN', 'LOX.BP_LEER', 'LOX.BE_SPARLADEN'),
-    array('LOX.B_VQ', 'LOX.BN_STROM6', 'LOX.BP_STROM6', 'LOX.BE_U1'),
-    array('LOX.B_VQ', 'LOX.BN_STROMMAX', 'LOX.BP_STROMMAX', 'LOX.BE_NICHTU1'),
-    array('LOX.B_VQ', 'LOX.BN_LADENSTOPP', 'LOX.BP_LADENSTOPP', 'LOX.BE_TEUER'),
-    array('LOX.B_VQ', 'LOX.BN_ZIEL80', 'LOX.BP_ZIEL80', 'LOX.BE_TASTER'),
-    array('LOX.B_SWS', 'LOX.BN_EREIGNIS', 'LOX.BP_05', 'MG_PUSHAKTIV'),
-    array('LOX.B_ODER', 'LOX.BN_SAMMLER', 'LOX.BP_SAMMLER', 'LOX.BE_SAMMLER'),
-    array('LOX.B_PUSH', 'LOX.BN_PUSHAUTO', 'LOX.BP_PUSHAUTO', 'LOX.BE_SAMMLEROUT'),
-    array('LOX.B_PUSH', 'LOX.BN_PUSHTEST', 'LOX.BP_PUSHTEST', 'MG_PTEST'),
-    array('LOX.B_SWS', 'LOX.BN_FENSTER', 'LOX.BP_FENSTER', 'MG_FENSTEROFFEN'),
-);
-$mg_nummern = array();
-foreach ($mg_bausteine as $mg_ix => $mg_b) {
-    $mg_nummern['{B' . ($mg_ix + 1) . '}'] = (string) ($mg_ix + 1);
-}
-foreach ($mg_bausteine as $mg_ix => $mg_b) { ?>
-<tr><td><?= $mg_ix + 1 ?></td>
-	<td><?= mg_e(mg_t($mg_b[0])) ?></td>
-	<td><?= mg_e(mg_t($mg_b[1])) ?></td>
-	<td><?= strpos($mg_b[2], 'LOX.') === 0 ? mg_t($mg_b[2]) : mg_e($mg_b[2]) ?></td>
-	<td><?= strpos($mg_b[3], 'LOX.') === 0
-	        ? strtr(mg_t($mg_b[3]), $mg_nummern)
-	        : '<span class="sm-mono">' . mg_e($mg_b[3]) . '</span>' ?></td></tr>
+<?php foreach ($mg_bs['zeilen'] as $mg_bz) { ?>
+<tr><td><?= (int) $mg_bz[0] ?></td><td><?= mg_e($mg_bz[1]) ?></td><td><?= mg_e($mg_bz[2]) ?></td>
+    <td><?= mg_e($mg_bz[3]) ?></td><td><?= mg_e($mg_bz[4]) ?></td></tr>
 <?php } ?>
 </table>
 </div>
-<div class="sm-hilfe"><?= strtr(mg_t('LOX.BAUSTEIN_HILFE'), $mg_nummern) ?></div>
+<div class="sm-warnung"><b><?= mg_e(mg_t('LOX.HINWEISE_TITEL')) ?></b>
+<ul class="sm-schritte">
+<?php foreach ($mg_bs['hinweise'] as $mg_bx) { ?>
+<li><?= $mg_bx ?></li>
+<?php } ?>
+</ul></div>
+<figure class="sm-bild">
+<img src="<?= mg_e($mg_bs['bild']) ?>" alt="<?= mg_e(sprintf(mg_t('LOX.BILD_ALT'), $mg_bs['seite'])) ?>" loading="lazy">
+<figcaption><?= mg_e(sprintf(mg_t('LOX.BILD_UNTERSCHRIFT'), $mg_bs['seite'])) ?></figcaption>
+</figure>
+<p class="sm-hilfe"><?= mg_t('LOX.MUSTERPROJEKT') ?></p>
+<?php } ?>
+<?php if (count($mg_fahrzeuge) > 1) { ?>
+<div class="sm-hinweis"><?= sprintf(mg_t('LOX.S7_MEHRERE'), count($mg_fahrzeuge)) ?></div>
+<?php } ?>
 </div>
 
 <div class="sm-step"><b><?= mg_e(mg_t('LOX.S8_TITEL')) ?></b><br><?php echo mg_t('LOX.S8'); ?>

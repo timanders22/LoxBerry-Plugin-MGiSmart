@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.25
+Version 1.1.26
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -8,6 +8,46 @@ Klima, Standort — und schickt Befehle zurück: Laden stoppen, Ziel-Ladestand,
 Ladestrombegrenzung, Standklima, „Auto finden".
 
 Kompatibel mit LoxBerry 3.x und **LoxBerry 4** (reines PHP, PHP 7.4 und 8.x).
+
+## Neu in 1.1.26
+
+Einbindung in Loxone in Vollausstattung: vier Seiten aus dem LoxBerry-Plugins Musterprojekt mit vier Bildern
+und je einer Schritt-für-Schritt-Anleitung („So übernehmen Sie diese Seite“). Sie ersetzen die eine
+Baustein-Liste mit 17 Zeilen.
+
+* **Seite „MGiSmart“** (33 Zeilen): Störung aus „keine frischen Daten“ (MG_OK) ODER „Lebenszeichen fehlt“
+  (Analogwertvalidierung am neuen Laufzähler ZAEHLER, Tmc 900 s) mit 600 s Bestätigung und „Meldung Auto gestört
+  (MG)“; Ladestand niedrig oder Reichweite gering, nur ohne Ladekabel; Ladung beendet; zwei Status.
+* **Seite „MGiSmart Laden“** (36 Zeilen): Ziel-Ladestand, Ladestrom, Batterieheizung, Laden nach Empfehlung aus
+  dem Spotpreis-Plugin (Rang ≤ 4, nur zu Hause, ab Werk aus) oder von Hand, zwei Status.
+* **Seite „MGiSmart Klima und Befehle“** (35 Zeilen): Zieltemperatur-Regler, Klima jetzt, Vorklimatisieren Mo–Fr
+  06:40–07:00 per Schaltuhr nur bei Anwesenheit, Klima aus, nur vorn, nur lüften, Scheiben- und Sitzheizung,
+  Jetzt abrufen; zwei Status.
+* **Seite „MGiSmart Fahrzeug“** (36 Zeilen): Fahrzeug offen (nur abgestellt mit gültigen Daten), Reifendruck
+  niedrig, drei Status.
+* **Berichtigt – wer nach der bisherigen Liste gebaut hat, bitte ansehen:** Schwellwertschalter an MG_LAEDT und
+  MG_STECKER waren überflüssig (Impuls je Abfrage); „Ladestand niedrig“ direkt am SOC zählte -1 als niedrig;
+  „Fahrzeugdaten veraltet“ an FZALTER meldete ein schlafendes Auto und nie einen stehenden LoxBerry; das UND
+  „Sparladen möglich“ hatte drei Eingänge, „Laden stoppen“ eine Quelle ohne Baustein.
+* **Neues Feld ZAEHLER** (hinten in allen vier Zeilen, Suchtext `\i;ZAEHLER=\i\v`): Laufzähler 0 bis 999, eins
+  weiter je Minutenlauf des Plugins, -1 = seit dem Start noch kein Lauf – das Lebenszeichen der HTTP-Zeile
+  (bei 300 s Abfrage je Abruf +5). Kein bestehender Suchtext ändert sich. Wer ZAEHLER nutzen will, legt den
+  Befehl von Hand an (ein Neuimport legt alle Eingänge doppelt an). Derselbe Zähler speist jetzt `status/zaehler`,
+  das damit auch ohne eigene Veröffentlichung weiterzählt (hinaus geht es weiter nur mit ihr); kein neues Thema.
+* **Behoben – Eingangsvorlage:** der Behälter hieß „1 = Stecker an Ladesäule (Gesamt)“ statt „MG 1 (Gesamt)“
+  (der Fahrzeugname wurde in der Feldschleife überschrieben). Ein schon importierter Behälter lässt sich in
+  Loxone Config einfach umbenennen.
+* **Befehlsvorlage (nur bei neuem Import):** „Standklima einschalten“ hat keinen Aus-Befehl mehr –
+  „Standklima ausschalten“ ist ein eigener Ausgang (sonst schaltete das Loslassen einer Taste oder das Ende einer
+  Schaltuhr das Klima sofort wieder ab). Analoge Befehle senden `<v.0>` statt `<v>`. Wer die alte Vorlage
+  importiert hat, ändert die Befehle von Hand oder importiert neu; der Endpunkt ist unverändert.
+* **Titel fest deutsch:** Behälter („<Name> (Gesamt)“, „<Name> (Steuerbefehle)“) und Befehle („MG …“) heißen
+  auch in der englischen Oberfläche deutsch wie im Musterprojekt; die Kommentare sind übersetzt (Befehle:
+  Befehlstext statt MQTT-Thema). Nur Neuimporte sind betroffen.
+* Reiter Einbindung: Schritt 1 nennt den Weg des Musterprojekts (HTTP-Zeile „Gesamt“), Schritt 5 `<v.0>` und
+  den eigenen Klima-Aus-Befehl, Schritt 6 die Ausfallerkennung am Laufzähler, Spaltenkopf „Name“.
+* Dienst und Endpunkt sonst unverändert. Gerendert unter PHP 7.4, 8.4 und 8.5, nicht am Gerät und nicht an
+  einem Fahrzeug angesehen.
 
 ## Neu in 1.1.25
 
@@ -464,6 +504,14 @@ Mit Merkwort — sie tun etwas, oder sie geben mehr preis als eine Statuszeile:
 
 Das Merkwort steht im Reiter *Einbindung in Loxone*; die dort angezeigten
 Adressen enthalten es bereits.
+
+**Fertig verbunden im Musterprojekt.** Die Bausteine der vier Baustein-Listen im Reiter
+*Einbindung in Loxone* stehen fertig verbunden auf den Seiten „MGiSmart“, „MGiSmart Laden“,
+„MGiSmart Klima und Befehle“ und „MGiSmart Fahrzeug“ im
+[LoxBerry-Plugins Musterprojekt](https://github.com/timanders22/LoxBerry-Plugins-Musterprojekt),
+einer gemeinsamen Projektdatei mit allen Plugin-Seiten und Vorlagen. Das Musterprojekt nutzt die
+HTTP-Zeile „Gesamt“ (Behälter „MG 1 (Gesamt)“, Abfrage 300 s) und die Befehlsvorlage
+„MG 1 (Steuerbefehle)“; analoge Befehle tragen `<v.0>`.
 
 ## Ladeplan und Batterieheizplan — belegt, aber nicht erprobt
 

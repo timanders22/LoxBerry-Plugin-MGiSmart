@@ -1556,6 +1556,10 @@ function mg_felder()
         // verschiebt jede beim Anwender eingetragene Befehlserkennung.
         'STECKERFZ'    => array(0, -1, 1,      '',     'mg,laden', 'stecker_fahrzeug'),
         'STECKERSAEULE' => array(0, -1, 1,     '',     'mg,laden', 'stecker_saeule'),
+        /* Welle Bild 19 (1.1.26, E4): das Lebenszeichen der HTTP-Zeile, in
+         * allen vier Zeilen hinten. MQTT-Name leer: kein eigenes Thema je
+         * Fahrzeug (das Lebenszeichen des Dienstes ist status/zaehler). */
+        'ZAEHLER'      => array(1, -1, 999,    '',     'mg,laden,ort,technik', ''),
     );
     $f = array();
     foreach ($roh as $name => $r) {
@@ -1769,6 +1773,7 @@ function mg_state($nr = 1)
     $st['PUSH'] = empty($cfg['notify']['push']) ? 0 : 1;
     $st['PUSHAKTIV'] = mg_push_active($nr);
     $st['PTEST'] = mg_ptest_active();
+    $st['ZAEHLER'] = mg_laufzaehler();   // Welle Bild 19 (1.1.26, E4): nur gelesen
 
     // Nicht-Feld-Angaben tragen einen Unterstrich und landen nie in der Zeile.
     $st['_nr'] = (int) $nr;
@@ -1894,8 +1899,12 @@ function mg_befehle()
             'werte' => array('6A', '8A', '16A', 'MAX'), 'norm' => 'ampere',
             'bez' => 'BEFEHL.STROM', 'gefahr' => 0, 'gegen' => '',
             'pruef' => 'drivetrain/chargeCurrentLimit', 'abstand' => 300, 'sollwert' => 1),
+        /* 'gegen' leer seit 1.1.26 (Welle Bild 19, E9): mit klima_aus als
+         * Ausbefehl schaltete das Loslassen einer Taste bzw. das Ende einer
+         * Schaltuhr das Standklima sofort wieder ab. klima_aus ist jetzt ein
+         * eigener Ausgang der Vorlage; der Endpunkt bleibt gleich. */
         'klima_an' => array('topic' => 'climate/remoteClimateState/set', 'wert' => 'on',
-            'bez' => 'BEFEHL.KLIMA_AN', 'gefahr' => 0, 'gegen' => 'klima_aus',
+            'bez' => 'BEFEHL.KLIMA_AN', 'gefahr' => 0, 'gegen' => '',
             'pruef' => 'climate/remoteClimateState', 'erwartet' => 'on', 'abstand' => 60, 'zustand' => 1),
         'klima_aus' => array('topic' => 'climate/remoteClimateState/set', 'wert' => 'off',
             'bez' => 'BEFEHL.KLIMA_AUS', 'gefahr' => 0, 'gegen' => '',
@@ -3011,6 +3020,7 @@ function mg_mqtt_themen()
 {
     $t = array();
     foreach (mg_felder() as $name => $info) {
+        if ($info['mqtt'] === '') { continue; }   // ZAEHLER: kein Thema je Fahrzeug (1.1.26)
         $t['<n>/' . $info['mqtt']] = $info['bez'];
     }
     foreach (array(
@@ -3033,6 +3043,7 @@ function mg_mqtt_werte($nr, $st)
     $fz = mg_fahrzeuge($cfg);
     $paare = array();
     foreach (mg_felder() as $name => $info) {
+        if ($info['mqtt'] === '') { continue; }   // ZAEHLER: kein Thema je Fahrzeug (1.1.26)
         $v = isset($st[$name]) ? $st[$name] : -1;
         $paare[$info['mqtt']] = $info['analog']
             ? rtrim(rtrim(number_format((float) $v, 2, '.', ''), '0'), '.')
@@ -3753,7 +3764,115 @@ function mg_mqtt_einzeln(array $paare)
     return true;
 }
 
-/** Das Lebenszeichen eines Laufs; der Zaehler liegt im Zwischenspeicher. */
+/* ==================================================================
+ * Welle Bild 19 (1.1.26): Namen fuer Vorlagen und Reiter - an EINER Stelle.
+ *
+ * Bis 1.1.25 setzten mg_vorlage(), mg_vorlage_vo() und der Reiter die Titel
+ * je fuer sich zusammen, uebersetzt; die Baustein-Listen des Musterprojekts
+ * brauchen dieselben Namen wie die Vorlage. Sprachregel (Regeln/07,
+ * 13.10.2026): Titel von Behaeltern und Befehlen fest deutsch, nur die
+ * Kommentare uebersetzt - ein Import in eine englische Oberflaeche ergibt
+ * dieselben Bausteinnamen wie im Musterprojekt.
+ * ================================================================== */
+
+/** Ein Satz fest auf Deutsch (Englisch als Rueckfall), je Schluessel einmal gelesen. */
+function mg_t_fest($schluessel)
+{
+    static $fest = array();
+    if (!isset($fest[$schluessel])) {
+        $fest[$schluessel] = mg_t_in($schluessel, 'de');
+    }
+    return $fest[$schluessel];
+}
+
+/** Der Name eines Fahrzeugs aus den Einstellungen, sonst "MG <n>". */
+function mg_fahrzeugname($nr = 1, $cfg = null)
+{
+    $fz = mg_fahrzeuge($cfg);
+    return isset($fz[(int) $nr]) ? $fz[(int) $nr]['name'] : ('MG ' . (int) $nr);
+}
+
+/** Behaeltertitel: '<Name> (Gesamt)' usw. bzw. '<Name> (Steuerbefehle)' fuer $art = 'befehle'. */
+function mg_behaelter_titel($nr = 1, $art = 'mg', $cfg = null)
+{
+    $zn = mg_zeilen();
+    $bez = ($art === 'befehle') ? 'VORLAGE.BEFEHLE' : (isset($zn[$art]) ? $zn[$art]['bez'] : $zn['mg']['bez']);
+    return mg_fahrzeugname($nr, $cfg) . ' (' . mg_t_fest($bez) . ')';
+}
+
+/** Titel eines Eingangsbefehls: MG_<FELD>, ab Fahrzeug 2 MG<n>_<FELD> (Fahrzeug 1 behaelt die Titel aus 1.0.8). */
+function mg_eingangsname($feld, $nr = 1)
+{
+    return (((int) $nr > 1) ? ('MG' . (int) $nr . '_') : 'MG_') . $feld;
+}
+
+/** Titel eines Ausgangsbefehls: "MG <deutscher Befehlstext>", ab Fahrzeug 2 "MG<n> ...". */
+function mg_befehl_titel($befehl, $nr = 1)
+{
+    $liste = mg_befehle();
+    $bez = isset($liste[$befehl]) ? $liste[$befehl]['bez'] : $befehl;
+    return (((int) $nr > 1) ? ('MG' . (int) $nr . ' ') : 'MG ') . mg_t_fest($bez);
+}
+
+/**
+ * Der Formatplatzhalter des Werts in einem analogen Ausgangsbefehl (E16).
+ * Bis 1.1.25 stand dort das blanke <v>; wie Loxone es formatiert, ist nicht
+ * gemessen - mit "80.0" haette der Endpunkt jeden Ziel-Ladestand abgewiesen
+ * (er nimmt nur 40, 50 ... 100), ebenso Stufe, Ampere und Sekunden. <v.0>
+ * traegt keine Nachkommastelle - so schreiben es die Hausvorlagen und das
+ * LoxBerry-Plugins Musterprojekt. Die Klima-Zieltemperatur rundet das Plugin
+ * ohnehin auf ganze Grad.
+ */
+function mg_befehl_platzhalter()
+{
+    return '<v.0>';
+}
+
+/* ==================================================================
+ * Welle Bild 19 (1.1.26, Entwurf Welle 19 mg E4): der Laufzaehler.
+ *
+ * Die HTTP-Zeile hatte kein taugliches Lebenszeichen: ALTER steht im
+ * Normalbetrieb auf 0 oder 1 (Minutentakt, Minuten gerundet), FZALTER beim
+ * Laden und Fahren, THEMEN ist fest. Steht der LoxBerry, behalten alle
+ * Eingaenge im Miniserver ihren letzten Wert - eine Analogwertvalidierung
+ * erkennt das nur an einem Wert, der sich sonst sicher aendert. Der Zaehler
+ * geht bei JEDEM Minutenlauf von bin/cron.php eins weiter (0 bis 999, dann
+ * wieder 0), gleich nach der Wurzelpruefung - auch ohne Einrichtung und wenn
+ * vom Broker nichts kommt. Der Endpunkt liest ihn nur. Er liegt in tmp (auf
+ * der Anlage /tmp, im Arbeitsspeicher): nach einem Neustart steht -1 bis zum
+ * ersten Lauf. Bis 1.1.25 gab es denselben Zaehler nur fuer status/zaehler und
+ * nur bei eingeschalteter eigener MQTT-Veroeffentlichung; jetzt speist dieser
+ * Zaehler auch dieses Thema (das weiter nur mit mqtt_ein hinausgeht).
+ * ================================================================== */
+
+/** Die Datei des Laufzaehlers (derselbe Name wie bis 1.1.25 fuer status/zaehler). */
+function mg_laufzaehler_datei()
+{
+    $p = mg_paths();
+    return $p['tmp'] . '/lebenszeichen_zaehler';
+}
+
+/** Der Stand des Laufzaehlers, -1 = seit dem Start noch kein Lauf. */
+function mg_laufzaehler()
+{
+    $f = mg_laufzaehler_datei();
+    $alt = is_file($f) ? trim((string) @file_get_contents($f)) : '';
+    return preg_match('/^[0-9]{1,3}$/', $alt) ? (int) $alt : -1;
+}
+
+/** Den Laufzaehler eins weiter setzen (nur bin/cron.php); Rueckgabe der neue Stand. */
+function mg_laufzaehler_weiter()
+{
+    $p = mg_paths();
+    $alt = mg_laufzaehler();
+    $n = ($alt >= 0) ? (($alt + 1) % 1000) : 0;
+    if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
+    mg_write_atomic(mg_laufzaehler_datei(), (string) $n);
+    return $n;
+}
+
+/** Das Lebenszeichen eines Laufs; der Zaehler liegt im Zwischenspeicher. Seit 1.1.26
+ *  zaehlt ihn bin/cron.php bei jedem Lauf (mg_laufzaehler_weiter()); hier wird er nur gelesen. */
 function mg_mqtt_lebenszeichen($cfg = null)
 {
     if ($cfg === null) {
@@ -3763,12 +3882,10 @@ function mg_mqtt_lebenszeichen($cfg = null)
     if (empty($cfg['mqtt_ein']) || $praefix === '' || !mg_has_mosquitto()) {
         return false;
     }
-    $p = mg_paths();
-    $f = $p['tmp'] . '/lebenszeichen_zaehler';
-    $alt = is_file($f) ? trim((string) @file_get_contents($f)) : '';
-    $n = preg_match('/^[0-9]{1,3}$/', $alt) ? ((int) $alt + 1) % 1000 : 0;
-    if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
-    mg_write_atomic($f, (string) $n);
+    $n = mg_laufzaehler();
+    if ($n < 0) {
+        $n = mg_laufzaehler_weiter();   // Aufruf ausserhalb des Minutenlaufs
+    }
     return mg_mqtt_einzeln(array(
         $praefix . '/status/ts' => (string) time(),
         $praefix . '/status/zaehler' => (string) $n,
@@ -6724,11 +6841,9 @@ function mg_vorlage($nr = 1, $zeile = 'mg')
         $zeile = 'mg';
     }
     $cfg = mg_config();
-    $fz = mg_fahrzeuge($cfg);
-    $name = isset($fz[$nr]) ? $fz[$nr]['name'] : ('MG ' . (int) $nr);
     /* Fahrzeug 1 behaelt die Titel aus 1.0.8 (MG_SOC), damit eine bestehende
-     * Anlage nach dem erneuten Import nicht zwei Namensfamilien fuehrt. */
-    $praefix = ((int) $nr > 1) ? ('MG' . (int) $nr . '_') : 'MG_';
+     * Anlage nach dem erneuten Import nicht zwei Namensfamilien fuehrt
+     * (mg_eingangsname()). */
     $q = 'zeile=' . $zeile;
     if ((int) $nr > 1) {
         $q .= '&fahrzeug=' . (int) $nr;
@@ -6743,11 +6858,16 @@ function mg_vorlage($nr = 1, $zeile = 'mg')
          * Befehlen ueber 40 Zeichen) steht der kurze in [KACHEL]; fehlt einer,
          * gilt der lange. Der TITEL bleibt, sonst legte ein erneuter Import
          * neue Bausteine an. */
+        /* Bis 1.1.25 hiess die Variable hier $name - und ueberschrieb den
+         * Fahrzeugnamen: der Behaelter trug den Kachelnamen des LETZTEN Felds
+         * ("1 = Stecker an Ladesaeule (Gesamt)" statt "MG 1 (Gesamt)").
+         * Behoben in 1.1.26 (Welle Bild 19); der Titel kommt jetzt aus
+         * mg_behaelter_titel(). */
         $kachel = mg_t('KACHEL.' . $feld);
-        $name = ($kachel !== 'KACHEL.' . $feld) ? $kachel : mg_t($info['bez']);
+        $kname = ($kachel !== 'KACHEL.' . $feld) ? $kachel : mg_t($info['bez']);
         $cmds[] = array(
-            'title' => $praefix . $feld,
-            'comment' => $name . ($einheit !== '' ? ' [' . $einheit . ']' : ''),
+            'title' => mg_eingangsname($feld, $nr),
+            'comment' => $kname . ($einheit !== '' ? ' [' . $einheit . ']' : ''),
             'check' => mg_check($feld),
             'unit' => ($einheit !== '' ? '<v.1> ' . $einheit : '<v.1>'),
             'analog' => $info['analog'], 'min' => $info['min'], 'max' => $info['max'],
@@ -6755,7 +6875,7 @@ function mg_vorlage($nr = 1, $zeile = 'mg')
     }
     $dateiname = 'VI_mgismart_' . $zeile . ((int) $nr > 1 ? '_' . (int) $nr : '') . '.xml';
     return array($dateiname, mg_xml_virtual_in_http(array(
-        'title' => $name . ' (' . mg_t($zn[$zeile]['bez']) . ')',
+        'title' => mg_behaelter_titel($nr, $zeile, $cfg),   // fest deutsch (1.1.26)
         'address' => mg_endpunkt(true, $q),
         'polling' => (string) $zn[$zeile]['takt'],
         'comment' => mg_t('VORLAGE.KOPF') . ' ' . date('d.m.Y') . '. ' . mg_t('VORLAGE.HINWEIS'),
@@ -6766,14 +6886,15 @@ function mg_vorlage($nr = 1, $zeile = 'mg')
  * Vorlage der Steuerbefehle (VirtualOut).
  *
  * Ein Zustand gehoert an EINEN Ausgang mit Ein- und Ausbefehl, nicht an zwei
- * Ausgaenge - "Klima ein/aus" ist genau so ein Fall. Befehle mit Zusatzwert
- * werden analog und tragen <v> als Platzhalter.
+ * Ausgaenge - Laden, Scheiben- und Batterieheizung sind so ein Fall. Das
+ * Standklima seit 1.1.26 nicht mehr (E9): "Standklima einschalten" ohne
+ * Ausbefehl, "Standklima ausschalten" als eigener Ausgang. Befehle mit
+ * Zusatzwert werden analog und tragen <v.0> als Platzhalter
+ * (mg_befehl_platzhalter()). Titel fest deutsch, Comment uebersetzt (E16).
  */
 function mg_vorlage_vo($nr = 1)
 {
     $cfg = mg_config();
-    $fz = mg_fahrzeuge($cfg);
-    $name = isset($fz[$nr]) ? $fz[$nr]['name'] : ('MG ' . (int) $nr);
     $liste = mg_befehle();
     /* Wer als Gegenstueck eines anderen gefuehrt wird, bekommt keinen eigenen
      * Ausgang - er steht dort als Ausbefehl. */
@@ -6802,12 +6923,12 @@ function mg_vorlage_vo($nr = 1)
             && in_array($b['nutzlast'], array('ladeplan', 'heizplan'), true)) {
             continue;
         }
-        $titel = (((int) $nr > 1) ? ('MG' . (int) $nr . ' ') : 'MG ') . mg_t($b['bez']);
+        $titel = mg_befehl_titel($k, $nr);   // fest deutsch (1.1.26)
         if (!empty($b['textwert'])) {
             foreach ($b['werte'] as $wert) {
                 $cmds[] = array(
                     'title' => $titel . ' - ' . $wert,
-                    'comment' => $b['topic'] . ' = ' . $wert,
+                    'comment' => mg_t($b['bez']) . ' - ' . $wert,
                     'on' => mg_aktionsadresse($k, $nr, $b['zusatz'] . '=' . $wert, false),
                     'off' => '', 'analog' => false,
                 );
@@ -6815,7 +6936,7 @@ function mg_vorlage_vo($nr = 1)
             continue;
         }
         $analog = !empty($b['zusatz']);
-        $zusatz = $analog ? ($b['zusatz'] . '=<v>') : '';
+        $zusatz = $analog ? ($b['zusatz'] . '=' . mg_befehl_platzhalter()) : '';
         $ein = mg_aktionsadresse($k, $nr, $zusatz, false);
         $aus = '';
         if (!empty($b['gegen']) && isset($liste[$b['gegen']])) {
@@ -6823,13 +6944,13 @@ function mg_vorlage_vo($nr = 1)
         }
         $cmds[] = array(
             'title' => $titel,
-            'comment' => $b['topic'],
+            'comment' => mg_t($b['bez']),   // uebersetzt; bis 1.1.25 das MQTT-Thema
             'on' => $ein, 'off' => $aus, 'analog' => $analog,
         );
     }
     $dateiname = 'VQ_mgismart' . ((int) $nr > 1 ? '_' . (int) $nr : '') . '.xml';
     return array($dateiname, mg_xml_virtual_out(array(
-        'title' => $name . ' (' . mg_t('VORLAGE.BEFEHLE') . ')',
+        'title' => mg_behaelter_titel($nr, 'befehle', $cfg),   // fest deutsch (1.1.26)
         'address' => 'http://' . mg_host(),
         'comment' => mg_t('VORLAGE.KOPF') . ' ' . date('d.m.Y') . '. ' . mg_t('VORLAGE.HINWEIS'),
     ), $cmds));

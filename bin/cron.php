@@ -79,6 +79,13 @@ if (in_array('--gateway-leeren', array_slice(isset($argv) ? $argv : array(), 1),
     exit($mg_rc);
 }
 
+/* Welle Bild 19 (1.1.26, Entwurf Welle 19 mg E4): der Laufzaehler geht bei
+ * JEDEM Minutenlauf eins weiter - gleich nach der Wurzelpruefung und nach den
+ * beiden Aufrufen aus uninstall (die nur lesen sollen), vor jeder Frage nach
+ * Einrichtung oder Broker. Er ist das Lebenszeichen der HTTP-Zeile (Feld
+ * ZAEHLER) und speist status/zaehler; steht der Takt, bleibt er stehen. */
+mg_laufzaehler_weiter();
+
 /* a2 (Verbesserungsbau 01.10.2026): hat dieses Plugin einen Gateway-Container
  * angelegt (Merkdatei) und weicht der Broker-Zugang, den es jetzt nimmt, von
  * dem ab, mit dem der Container angelegt wurde (etwa ein geaendertes Kennwort
