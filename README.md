@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.26
+Version 1.1.27
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -8,6 +8,13 @@ Klima, Standort — und schickt Befehle zurück: Laden stoppen, Ziel-Ladestand,
 Ladestrombegrenzung, Standklima, „Auto finden".
 
 Kompatibel mit LoxBerry 3.x und **LoxBerry 4** (reines PHP, PHP 7.4 und 8.x).
+
+## Neu in 1.1.27
+
+Textnachzug zum Musterprojekt, Reiter **Einbindung in Loxone**, Seite „MGiSmart Laden“: Spotpreis aWATTar liefert die
+Werte jetzt über MQTT. Nr. 26 ist deshalb ein Virtueller Eingang `spot_awattar_rank` (bisher Virtueller HTTP-Eingang-Befehl
+`SPOT_RANK` aus der Vorlage „Spotpreis aWATTar“): Virtuellen Eingang mit dem Namen aus der Namenstabelle im Reiter ‚Einbindung in Loxone‘ des Plugins Spotpreis aWATTar (ab 1.2.38) anlegen.
+Kasten, Hinweise und Bild der Seite sind nachgezogen. Das Plugin selbst und seine Vorlagen sind unverändert.
 
 ## Neu in 1.1.26
 
