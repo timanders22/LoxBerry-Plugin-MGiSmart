@@ -1,0 +1,18 @@
+# Was eingecheckt ist, wird auch ausgeliefert. Keine Umschreibung.
+#
+# ANLASS: packen.py weist beim Anfassen dieser Linie darauf hin, und die
+# Umgebung erzwingt es: core.autocrlf steht auf diesem Rechner systemweit
+# auf true, ein frischer Klon kaeme also mit CRLF zurueck.
+#
+# "-text" heisst: git rechnet an keiner Datei herum - weder beim
+# Einchecken noch beim Auschecken noch beim Erzeugen des Tag-Archivs.
+# Ohne diese Datei meldet jeder Vergleich Geraet gegen Archiv ueber eine
+# Pruefsumme einen Unterschied, den es inhaltlich nicht gibt, und ein
+# rotes Kreuz, das nichts bedeutet, ist schlimmer als keine Pruefung.
+#
+# LAGE DIESER LINIE, gemessen am 16.09.2026:
+# Alle 21 Textdateien fuehren LF. Die drei .cfg trugen bis 1.1.9 CRLF
+# und sind mit dieser Fassung umgestellt - Hausbrauch seit 13.09.2026,
+# je Linie bei der naechsten Veroeffentlichung (Regeln/03). Geaendert
+# wurden dabei nur die Zeilenenden, kein Zeichen des Inhalts.
+*	-text
