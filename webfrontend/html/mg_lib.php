@@ -73,6 +73,32 @@ if (!defined('MG_ANM_PROT_STARTFENSTER')) {
 if (!defined('MG_ANM_LAEUFT_S')) {
     define('MG_ANM_LAEUFT_S', 120);
 }
+/* Gruppe 39 (1.1.28): die Grenzen der neuen Teile - jede genau einmal (Regeln/04 :146).
+ *   MG_SCHON_SO_FRISCH       V1: "Zielzustand liegt schon an" gilt nur bei einem Fahrzeugstand bis 10 min.
+ *   MG_VORKLIMA_VERSUCHE     V2: hoechstens drei Versuche je Abfahrt (Senden, Auffrischen vor dem zweiten
+ *                            Senden, Senden), Abstand MG_VORKLIMA_ABSTAND Sekunden.
+ *   MG_VORKLIMA_FRISCH       3.2: der Aussenwert des Fahrzeugs gilt nur bis 60 min Fahrzeugstand.
+ *   MG_AUSSEN_LOXONE_FRISCH  E-E4: die Aussentemperatur aus Loxone (mg/befehl/aussentemp) gilt 30 min.
+ *   MG_HAUS_FRIST            2.4: ein Haus-Thema gilt, solange sein Zaehler sich binnen 120 s live aendert.
+ *   MG_HAUS_LESEFENSTER      2.4: so lange wartet der abgekoppelte Leser hoechstens am Broker (Phasenfalle).
+ *   MG_ANKUNFT_ABSTAND       2.4: hoechstens eine Ankunftsabfrage je Fahrzeug in 30 min,
+ *   MG_ANKUNFT_FZALTER       nur wenn der Fahrzeugstand aelter als 5 min ist.
+ *   MG_LADUNG_TAKT/_LUECKE   3.1: eine Probe steht fuer 60 s; ein Loch ueber 120 s ist eine Luecke.
+ *   MG_LADUNG_ABDECKUNG      3.1: unter 90 % Energie mit Preis keine Kosten (-1), nie geschaetzt. */
+if (!defined('MG_SCHON_SO_FRISCH')) {
+    define('MG_SCHON_SO_FRISCH', 10);
+    define('MG_VORKLIMA_VERSUCHE', 3);
+    define('MG_VORKLIMA_ABSTAND', 120);
+    define('MG_VORKLIMA_FRISCH', 60);
+    define('MG_AUSSEN_LOXONE_FRISCH', 1800);
+    define('MG_HAUS_FRIST', 120);
+    define('MG_HAUS_LESEFENSTER', 65);
+    define('MG_ANKUNFT_ABSTAND', 1800);
+    define('MG_ANKUNFT_FZALTER', 5);
+    define('MG_LADUNG_TAKT', 60);
+    define('MG_LADUNG_LUECKE', 120);
+    define('MG_LADUNG_ABDECKUNG', 0.9);
+}
 
 
 /* Den LoxBerry-Wurzelordner ohne festen Systempfad bestimmen.
@@ -102,13 +128,17 @@ if (!function_exists('lb_wurzel_ermitteln')) {
     }
 }
 
-/* Die LoxBerry-Wurzel: $LBHOMEDIR, wenn dort config/plugins und data/plugins
- * liegen, sonst die Aufwaertssuche lb_wurzel_ermitteln() (mit general.json).
- * '' heisst: keine Wurzel. */
+/* Die LoxBerry-Wurzel: $LBHOMEDIR, wenn dort config/plugins, data/plugins und
+ * config/system/general.json liegen, sonst die Aufwaertssuche
+ * lb_wurzel_ermitteln() (mit general.json). '' heisst: keine Wurzel.
+ * Gruppe 39 (1.1.28, V7-g/T3-4): bis 1.1.27 genuegten unter $LBHOMEDIR die
+ * beiden Ordner - ein fremder Baum ohne general.json galt als Wurzel, waehrend
+ * die Aufwaertssuche sie seit 1.1.15 verlangt (Regeln/06). */
 function mg_lbhome()
 {
     $h = rtrim((string) getenv('LBHOMEDIR'), '/');
-    if ($h !== '' && is_dir($h . '/config/plugins') && is_dir($h . '/data/plugins')) {
+    if ($h !== '' && is_dir($h . '/config/plugins') && is_dir($h . '/data/plugins')
+        && is_file($h . '/config/system/general.json')) {
         return $h;
     }
     return lb_wurzel_ermitteln();
@@ -363,6 +393,27 @@ function mg_vorgaben()
 
         // --- Endpunkt ---
         'aktionstoken' => '',
+
+        /* --- Gruppe 39 (1.1.28): alle neuen Schalter ab Werk AUS ---
+         * Befehle ueber MQTT (Befehlsbruecke 1.0.2, Abschnitt 2.2). Der zweite
+         * Haken gilt fuer die eingreifenden Befehle (Finden, Ver- und
+         * Entriegeln, Kofferraum - E-E2); er wirkt nur zusammen mit gefahr_ein. */
+        'befehle_mqtt_ein' => 0,
+        'befehle_mqtt_steuern' => 0,
+        /* Der HTTP-Endpunkt mg.php (E-E1): 0 sperrt alles ausser ?selftest.
+         * postupgrade.sh setzt 1 fuer den Bestand, wenn der Schluessel fehlt. */
+        'endpunkt_ein' => 0,
+        // Haus-Themen (Abschnitt 2.4, Nr. 15), je eigener Haken, lesen nur.
+        'haus_abfahrt_ein' => 0,
+        'vorklima_anwesend_ein' => 0,
+        'ankunft_ein' => 0,
+        // je Fahrzeug (Index 0 = Fahrzeug 1): '', 'tag:<name>' oder 'person:<name>'
+        'ankunft_quellen' => array(),
+        'haus_strompreis_ein' => 0,
+        // Vorklimatisierung nur bei Kaelte oder Hitze (Abschnitt 3.2)
+        'vorklima_wetter_ein' => 0,
+        'vorklima_kalt_unter' => 5,
+        'vorklima_heiss_ueber' => 25,
     );
 }
 
@@ -595,6 +646,9 @@ function mg_config()
     }
     if (!is_array($cfg['notify'])) {
         $cfg['notify'] = array();
+    }
+    if (!is_array($cfg['ankunft_quellen'])) {   // Gruppe 39 (1.1.28)
+        $cfg['ankunft_quellen'] = array();
     }
     $cfg['notify'] += array(
         'push' => 1,
@@ -1196,15 +1250,139 @@ function mg_sub($themen, $sekunden)
         }
         @unlink($errdatei);
     }
-    $werte = array();
-    foreach ($out as $zeile) {
-        $pos = strpos($zeile, ' ');
-        if ($pos === false) {
-            continue;   // ein Thema ohne Nutzlast traegt nichts
-        }
-        $werte[substr($zeile, 0, $pos)] = trim(substr($zeile, $pos + 1));
-    }
+    /* Gruppe 39 (1.1.28, V3/T2-3): mosquitto_sub -v gibt eine mehrzeilige
+     * Nutzlast (das Gateway schreibt chargingSchedule und command/error mit
+     * indent=2) als mehrere Zeilen aus. Bis 1.1.27 galt jede Zeile mit einem
+     * Leerzeichen als "Thema Wert": aus dem Ladeplan wurde "{", und die
+     * Folgezeilen landeten unter dem Thema '' oder "startTime":. Die Zerlegung
+     * steht jetzt in der reinen Funktion mg_sub_zerlegen(). */
+    list($werte) = mg_sub_zerlegen($out, (array) $themen);
     return array($werte, (int) $rc, implode(' ', array_slice($fehler, 0, 3)));
+}
+
+/**
+ * Passt ein Thema auf einen MQTT-Filter? '+' steht fuer genau eine Ebene, '#'
+ * am Ende fuer den ganzen Rest (auch fuer keine weitere Ebene). Rein.
+ */
+function mg_thema_passt($filter, $thema)
+{
+    $f = explode('/', (string) $filter);
+    $t = explode('/', (string) $thema);
+    foreach ($f as $i => $x) {
+        if ($x === '#') {
+            return $i === count($f) - 1;
+        }
+        if (!isset($t[$i]) || ($x !== '+' && $x !== $t[$i])) {
+            return false;
+        }
+    }
+    return count($f) === count($t);
+}
+
+/**
+ * Die Ausgabe von "mosquitto_sub -v" in Thema => Nutzlast zerlegen (Gruppe 39,
+ * 1.1.28, V3). Eine Zeile beginnt eine neue Nachricht genau dann, wenn ihr
+ * Anfang bis zum ersten Leerzeichen ein Thema ist, das auf einen der
+ * abonnierten Filter passt; jede andere Zeile ist Fortsetzung der vorigen
+ * Nutzlast und wird mit "\n" angehaengt. Fortsetzungen vor der ersten
+ * Nachricht werden verworfen und gezaehlt. Werte werden nicht beschnitten - nur
+ * das Zeilenende (\r) faellt weg. Eine Zeile ohne Leerzeichen, die ein Thema
+ * ist, traegt eine leere Nutzlast und wird uebergangen (wie bis 1.1.27).
+ * Rein: kein Dateizugriff, keine Schale. Rueckgabe array(werte, verworfen).
+ */
+function mg_sub_zerlegen(array $zeilen, array $themen)
+{
+    $werte = array();
+    $verworfen = 0;
+    $aktuell = null;
+    foreach ($zeilen as $zeile) {
+        $zeile = rtrim((string) $zeile, "\r");
+        $pos = strpos($zeile, ' ');
+        $kopf = ($pos === false) ? $zeile : substr($zeile, 0, $pos);
+        $neu = false;
+        if ($kopf !== '' && strpbrk($kopf, "\t\"{}[]") === false) {
+            foreach ($themen as $filter) {
+                if (mg_thema_passt($filter, $kopf)) {
+                    $neu = true;
+                    break;
+                }
+            }
+        }
+        if ($neu) {
+            if ($pos === false) {
+                $aktuell = null;   // ein Thema ohne Nutzlast traegt nichts
+                continue;
+            }
+            $aktuell = $kopf;
+            $werte[$aktuell] = (string) substr($zeile, $pos + 1);
+            continue;
+        }
+        if ($aktuell === null) {
+            $verworfen++;
+            continue;
+        }
+        $werte[$aktuell] .= "\n" . $zeile;
+    }
+    return array($werte, $verworfen);
+}
+
+/**
+ * Lade- oder Heizplan lesbar machen (Gruppe 39, 1.1.28, V3). Das Gateway
+ * veroeffentlicht drivetrain/chargingSchedule als JSON {startTime, endTime,
+ * mode} (chrg_mgmt_data.py:201-207) und drivetrain/batteryHeatingSchedule als
+ * {mode, startTime} (vehicle.py:747-750), mit indent=2 ueber mehrere Zeilen.
+ *   chargingSchedule        -> "22:00–06:00, UNTIL_CONFIGURED_TIME"
+ *   batteryHeatingSchedule  -> "05:30, on"
+ *   kein JSON (kein "{" vorn) -> der Text wie bisher; kaputtes JSON -> "-".
+ * Rein.
+ */
+function mg_json_plan_text($roh)
+{
+    $roh = trim((string) $roh);
+    if ($roh === '' || $roh[0] !== '{') {
+        return $roh;
+    }
+    $d = json_decode($roh, true);
+    if (!is_array($d)) {
+        return '-';
+    }
+    $hol = function ($k) use ($d) {
+        return (isset($d[$k]) && is_scalar($d[$k])) ? trim((string) $d[$k]) : '';
+    };
+    $von = $hol('startTime');
+    $bis = $hol('endTime');
+    $modus = $hol('mode');
+    $teile = array();
+    if ($von !== '' && $bis !== '') {
+        $teile[] = substr($von, 0, 5) . "\u{2013}" . substr($bis, 0, 5);
+    } elseif ($von !== '') {
+        $teile[] = substr($von, 0, 5);
+    }
+    if ($modus !== '') {
+        $teile[] = $modus;
+    }
+    return $teile ? implode(', ', $teile) : '-';
+}
+
+/**
+ * Den Fehlertext des Gateways lesbar machen (Gruppe 39, 1.1.28, V3):
+ * command/error traegt JSON {event_type, command, detail}
+ * (vehicle_command.py:85-92) - daraus wird detail. Sonst der Rohtext, auf eine
+ * Zeile gebracht und auf 200 Zeichen gekuerzt; leer bleibt leer. Rein.
+ */
+function mg_json_fehler_text($roh)
+{
+    $roh = trim((string) $roh);
+    if ($roh === '') {
+        return '';
+    }
+    if ($roh[0] === '{') {
+        $d = json_decode($roh, true);
+        if (is_array($d) && isset($d['detail']) && is_scalar($d['detail']) && trim((string) $d['detail']) !== '') {
+            return mg_kuerzen(trim(preg_replace('/\s+/', ' ', (string) $d['detail'])), 200);
+        }
+    }
+    return mg_kuerzen(trim(preg_replace('/\s+/', ' ', $roh)), 200);
 }
 
 /**
@@ -1560,6 +1738,17 @@ function mg_felder()
          * allen vier Zeilen hinten. MQTT-Name leer: kein eigenes Thema je
          * Fahrzeug (das Lebenszeichen des Dienstes ist status/zaehler). */
         'ZAEHLER'      => array(1, -1, 999,    '',     'mg,laden,ort,technik', ''),
+        /* Gruppe 39 (1.1.28): hinten angehaengt (Regeln/07 :476 - keiner der
+         * Namen steckt in einem anderen: ";LKWH=", ";LKOSTEN=", ";LPREIS=",
+         * ";VORKLIMA=" - ";KLIMA=" trifft ";VORKLIMA=" wegen des Semikolons
+         * nicht). Die letzte Ladung zu Hause (3.1, Endpreis ohne Grundpreis)
+         * und der Stand der Vorklimatisierung (3.2: 0 nichts faellig, 1
+         * gesendet, 2 uebersprungen (mild), 3 wartet auf Wiederholung, 4 wartet
+         * auf Anwesenheit, -1 gescheitert). */
+        'LKOSTEN'      => array(1, -1, 1000,   'EUR',  'laden', 'ladung_kosten'),
+        'LKWH'         => array(1, -1, 200,    'kWh',  'laden', 'ladung_kwh'),
+        'LPREIS'       => array(1, -1, 500,    'ct/kWh', 'laden', 'ladung_preis'),
+        'VORKLIMA'     => array(1, -1, 4,      '',     'mg', 'vorklima'),
     );
     $f = array();
     foreach ($roh as $name => $r) {
@@ -1667,10 +1856,10 @@ function mg_state($nr = 1)
     $st['ERREICHBAR'] = mg_bool('available', -1, $nr);
     $prefix = trim((string) $cfg['prefix']) !== '' ? trim((string) $cfg['prefix']) : 'saic';
     $st['GATEWAY'] = mg_bool_wert(mg_pick_abs($prefix . '/_internal/lwt'), -1);
-    $letzte = mg_txt(array('refresh/lastVehicleState', 'refresh/lastActivity'), '', $nr);
-    $ts = $letzte !== '' ? strtotime($letzte) : false;
-    $st['FZALTER'] = $ts ? max(0, (float) round((time() - $ts) / 60)) : -1;
-    $fehlertext = mg_txt('command/error', '', $nr);
+    // Gruppe 39 (1.1.28, V1): dieselbe Rechnung wie mg_send() - eine Stelle (mg_fzalter()).
+    $st['FZALTER'] = mg_fzalter($nr);
+    // V3: command/error traegt JSON {event_type, command, detail} - lesbar gemacht.
+    $fehlertext = mg_json_fehler_text(mg_txt('command/error', '', $nr));
     $st['FEHLER'] = $fehlertext !== '' ? 1 : (($st['ERREICHBAR'] === -1) ? -1 : 0);
 
     // --- Fahrt und Ort ---
@@ -1791,8 +1980,18 @@ function mg_state($nr = 1)
      * Nutzlast ({startTime,endTime,mode}) ist in der Anleitung des Gateways
      * nicht festgelegt und hier NICHT nachgemessen - ein geratener
      * JSON-Aufbau waere eine Behauptung, keine Funktion. */
-    $st['_ladeplan'] = mg_txt('drivetrain/chargingSchedule', '', $nr);
-    $st['_heizplan'] = mg_txt('drivetrain/batteryHeatingSchedule', '', $nr);
+    /* Gruppe 39 (1.1.28, V3): der Plan kommt als JSON ueber mehrere Zeilen;
+     * hier steht der lesbare Satz ("22:00–06:00, UNTIL_CONFIGURED_TIME"),
+     * nie mehr "{". */
+    $st['_ladeplan'] = mg_json_plan_text(mg_txt('drivetrain/chargingSchedule', '', $nr));
+    $st['_heizplan'] = mg_json_plan_text(mg_txt('drivetrain/batteryHeatingSchedule', '', $nr));
+    /* Gruppe 39 (1.1.28): die letzte Ladung (3.1) und die Vorklimatisierung
+     * (3.2) - hinten angehaengte Felder, je -1 ohne Aussage. */
+    $lz = mg_ladung_letzte($nr);
+    $st['LKOSTEN'] = $lz['kosten_eur'];
+    $st['LKWH'] = $lz['kwh_netz'];
+    $st['LPREIS'] = $lz['preis_ct'];
+    $st['VORKLIMA'] = mg_vorklima_feld($nr);
     $st['_abbruchgrund'] = mg_txt('drivetrain/chargingStopReason', '', $nr);
     $st['_fahrzeugmeldung'] = mg_txt(array('info/lastMessage/title',
         'events/vehicleMessage'), '', $nr);
@@ -2428,8 +2627,22 @@ function mg_sollwert_freigeben($fh)
  * angenommen und ob das Auto sie ausgefuehrt hat, sagt er nicht - und die
  * eigene Anleitung schreibt ausdruecklich, dass "Laden starten" unzuverlaessig
  * ist. Geprueft wird deshalb die Wirkung am Zustandsthema.
+ *
+ * Gruppe 39 (1.1.28):
+ *  - $warten (2.2): false fuer die Befehlsbruecke (Quelle mqtt). Dann kommt nach
+ *    gelungenem mosquitto_pub sofort array(2, ..., 'ABGESETZT') zurueck - ohne
+ *    Wartezeit und ohne zweite Momentaufnahme; die Bruecke ist ereignisgetrieben,
+ *    und 6-20 s je Befehl stauten jeden folgenden. Die Wirkung zeigt der naechste
+ *    Minutenlauf.
+ *  - E-E5/F7: mit $warten und "Wirkung pruefen" horcht vor dem Senden ein
+ *    mosquitto_sub -C 1 auf <thema ohne /set>/result. Das Gateway antwortet dort
+ *    fluechtig "Success" oder "Failed: <detail>" (vehicle_command.py:78, :146,
+ *    :173). Das Ergebnis bestimmt OK bzw. GATEWAY_FEHLER; kommt keines, gilt der
+ *    bisherige Weg (Momentaufnahme, command/error, Wirkung am Zustandsthema).
+ *  - V1/F1: "Zielzustand liegt schon an" (SCHON_SO) nur bei einem Fahrzeugstand
+ *    bis MG_SCHON_SO_FRISCH Minuten; ist er aelter oder unbekannt, wird gesendet.
  */
-function mg_send($befehl, $wert = null, $nr = 1)
+function mg_send($befehl, $wert = null, $nr = 1, $warten = true)
 {
     $cfg = mg_config();
     if (empty($cfg['commands'])) {
@@ -2483,8 +2696,17 @@ function mg_send($befehl, $wert = null, $nr = 1)
     if (!empty($liste[$name]['pruef'])) {
         $ist = mg_txt($liste[$name]['pruef'], '', $nr);
         if ($ist !== '' && mg_wirkung_gleich($ist, $liste[$name], $sendewert)) {
-            mg_sollwert_freigeben($mg_x7);
-            return array(1, mg_t('MELDUNG.SCHON_SO'), 'SCHON_SO');
+            /* Gruppe 39 (1.1.28, V1/F1): nur bei frischem Stand. Bis 1.1.27
+             * genuegte der Cache in jedem Alter - ein Stand von gestern ("Klima
+             * an") hielt "Klima an" und die Vorklimatisierung auf, obwohl das
+             * Auto laengst aus war. */
+            $mg_fza = mg_fzalter($nr);
+            if (mg_schon_so_erlaubt($mg_fza)) {
+                mg_sollwert_freigeben($mg_x7);
+                return array(1, mg_t('MELDUNG.SCHON_SO'), 'SCHON_SO');
+            }
+            mg_log_if_changed('schon_so_alt' . (int) $nr, 'Zielzustand liegt laut Cache an, der Stand ist aber '
+                . ($mg_fza < 0 ? 'unbekannt alt' : ((int) $mg_fza . ' min alt')) . ' - gesendet (' . $name . ').');
         }
     }
 
@@ -2496,6 +2718,11 @@ function mg_send($befehl, $wert = null, $nr = 1)
             : mg_t('MELDUNG.STUNDENGRENZE'), 'GEDROSSELT');
     }
 
+    /* E-E5 (Gruppe 39): VOR dem Senden auf das Ergebnisthema horchen - es ist
+     * fluechtig, ein spaeteres Abo saehe es nie. Nur auf den Wegen mit Warten. */
+    $mg_wz = max(2, min(20, (int) $cfg['wartezeit']));
+    $mg_hor = ($warten && !empty($cfg['wirkung_pruefen']))
+        ? mg_ergebnis_horchen($base . '/' . mg_ergebnis_thema($topic), $mg_wz) : null;
     $cmd = mg_broker_umgebung() . 'mosquitto_pub' . mg_broker_args()
          . ' -t ' . escapeshellarg($base . '/' . $topic)
          . ' -m ' . escapeshellarg($sendewert) . ' 2>&1';
@@ -2508,6 +2735,7 @@ function mg_send($befehl, $wert = null, $nr = 1)
     }
     mg_sollwert_freigeben($mg_x7);
     if ($rc !== 0) {
+        mg_ergebnis_ende($mg_hor);
         $text = trim(implode(' ', $out));
         mg_log('FEHLER Befehl "' . $name . '": ' . ($text !== '' ? $text : 'Fehlercode ' . $rc));
         return array(0, $text !== '' ? $text : ('Fehlercode ' . $rc), 'BROKER');
@@ -2515,18 +2743,45 @@ function mg_send($befehl, $wert = null, $nr = 1)
     mg_log('Befehl gesendet (Fahrzeug ' . (int) $nr . '): ' . $name
         . ' -> ' . $topic . ' = ' . $sendewert);
 
-    if (empty($cfg['wirkung_pruefen']) || empty($liste[$name]['pruef'])) {
+    // 2.2: die Bruecke wartet nie - die Wirkung zeigt der naechste Minutenlauf.
+    if (!$warten || empty($cfg['wirkung_pruefen'])) {
+        return array(2, mg_t('MELDUNG.ABGESETZT'), 'ABGESETZT');
+    }
+
+    /* E-E5: das Ergebnis des Gateways. "Success" -> OK, "Failed: <detail>" ->
+     * GATEWAY_FEHLER. Kommt nichts, bleibt der bisherige Weg. */
+    $mg_t0 = microtime(true);
+    list($mg_eok, $mg_edetail) = mg_ergebnis_deuten(mg_ergebnis_warten($mg_hor, $mg_wz + 1));
+    if ($mg_eok === 0) {
+        mg_log('Gateway meldet Fehler zu "' . $name . '" (result): ' . $mg_edetail);
+        return array(0, mg_t('MELDUNG.GATEWAY_FEHLER') . ': ' . mg_kuerzen($mg_edetail, 120),
+            'GATEWAY_FEHLER');
+    }
+    if ($mg_eok === 1) {
+        mg_log('Gateway bestaetigt "' . $name . '" (result: Success).');
+        if (empty($liste[$name]['pruef'])) {
+            return array(1, mg_t('MELDUNG.GATEWAY_OK'), 'OK');
+        }
+    } elseif (empty($liste[$name]['pruef'])) {
         return array(2, mg_t('MELDUNG.ABGESETZT'), 'ABGESETZT');
     }
 
     // Die Wirkung nachsehen. Das Gateway braucht dafuer einige Sekunden.
-    sleep(max(2, min(20, (int) $cfg['wartezeit'])));
+    $mg_rest = ($mg_hor === null) ? $mg_wz : (int) ceil($mg_wz - (microtime(true) - $mg_t0));
+    if ($mg_eok !== 1 && $mg_rest > 0) {
+        sleep($mg_rest);
+    }
     mg_snapshot(3);
-    $fehler = mg_txt('command/error', '', $nr);
-    if ($fehler !== '') {
+    $fehler = mg_json_fehler_text(mg_txt('command/error', '', $nr));
+    if ($fehler !== '' && $mg_eok !== 1) {
         mg_log('Gateway meldet Fehler zu "' . $name . '": ' . $fehler);
         return array(0, mg_t('MELDUNG.GATEWAY_FEHLER') . ': ' . mg_kuerzen($fehler, 120),
             'GATEWAY_FEHLER');
+    }
+    if ($mg_eok === 1) {
+        $ist = mg_txt($liste[$name]['pruef'], '', $nr);
+        return array(1, mg_t(($ist !== '' && mg_wirkung_gleich($ist, $liste[$name], $sendewert))
+            ? 'MELDUNG.GEWIRKT' : 'MELDUNG.GATEWAY_OK'), 'OK');
     }
     $ist = mg_txt($liste[$name]['pruef'], '', $nr);
     if ($ist !== '' && mg_wirkung_gleich($ist, $liste[$name], $sendewert)) {
@@ -2688,6 +2943,10 @@ function mg_ladung_pruefen($st, $vorher, $nr = 1)
     if ($war !== 1 || (int) $st['LAEDT'] === 1) {
         return false;
     }
+    /* Gruppe 39 (1.1.28, 3.1): die Mitschrift abschliessen - Netzenergie,
+     * Kosten und Durchschnittspreis der Ladung zu Hause (nie geschaetzt), dazu
+     * kwh_akku = SOCKWH Ende - Beginn. Die Mitschrift wird umbenannt. */
+    $mg_kost = mg_ladung_abschluss($st, $nr, $cfg);
     $beginn = mg_num('drivetrain/charging/lastStart', -1, $nr);
     $ende = mg_num('drivetrain/charging/lastEnd', -1, $nr);
     $d = mg_json_lesen(mg_ladungen_datei());
@@ -2706,11 +2965,15 @@ function mg_ladung_pruefen($st, $vorher, $nr = 1)
         'dauer_min' => ($beginn > 0 && $ende > $beginn) ? (int) round(($ende - $beginn) / 60) : -1,
         'soc_start' => isset($vorher['SOC']) ? (float) $vorher['SOC'] : -1,
         'soc_ende' => isset($st['SOC']) ? (float) $st['SOC'] : -1,
+        /* F6 (Gruppe 39): lastChargeEndingPower ist der AKKUINHALT am Ende der
+         * Ladung (rvs_charge_status.py:113-120, Home Assistant "Last Charge SoC
+         * kWh"), nicht die geladene Menge. Der Schluessel kwh bleibt (Bestand);
+         * die Spalte heisst "Akku am Ende (kWh)". */
         'kwh' => mg_num('drivetrain/lastChargeEndingPower', -1, $nr),
         'km' => isset($st['KM']) ? (float) $st['KM'] : -1,
         'verbrauch' => isset($vorher['VERBRLADUNG']) ? (float) $vorher['VERBRLADUNG'] : -1,
         'strecke' => isset($vorher['KMLADUNG']) ? (float) $vorher['KMLADUNG'] : -1,
-    );
+    ) + $mg_kost;
     $liste[] = $eintrag;
     $liste = array_slice($liste, -max(10, (int) $cfg['ladungen_max']));
     mg_write_json(mg_ladungen_datei(), array('liste' => $liste));
@@ -2945,37 +3208,99 @@ function mg_automatik()
 {
     $cfg = mg_config();
     $meldungen = array();
-    if (empty($cfg['abfahrt_ein']) && empty($cfg['ladeempf_ein'])) {
+    if (empty($cfg['abfahrt_ein']) && empty($cfg['ladeempf_ein']) && empty($cfg['ankunft_ein'])) {
         return $meldungen;
     }
     $werte = mg_horcher_lesen(2);
     $p = mg_paths();
     $merk = mg_json_lesen($p['tmp'] . '/automatik.json');
     $jetzt = time();
+    $c = mg_haus_quellen();   // Gruppe 39: Ablage des abgekoppelten Lesers, nie der Broker
 
-    // --- Vorklimatisierung ---
+    // --- Vorklimatisierung (Gruppe 39, 1.1.28: V2, 2.4, 3.2) ---
     if (!empty($cfg['abfahrt_ein'])) {
-        /* Nur ein frischer Stand des Abfahrts-Assistenten zaehlt
-         * (mg_abfahrt_lesen()); fehlt er, ist er veraltet oder nicht zu
-         * lesen, bleibt die Vorklimatisierung aus, und das Protokoll sagt
-         * es einmal. */
-        $ab = mg_abfahrt_lesen();
-        mg_log_if_changed('abfahrt', $ab['lage'] === 'ok'
-            ? 'Abfahrts-Assistent gelesen'
-            : 'Vorklimatisierung ausgesetzt: ' . $ab['grund']);
-        $in = $ab['lage'] === 'ok' ? (float) $ab['in'] : -1;
-        $ok = $ab['lage'] === 'ok' ? (int) $ab['ok'] : 0;
-        $vorlauf = max(1, (int) $cfg['abfahrt_vorlauf']);
         $nr = max(1, (int) $cfg['abfahrt_fahrzeug']);
-        $zuletzt = isset($merk['abfahrt']) ? (int) $merk['abfahrt'] : 0;
-        if ($ok === 1 && $in >= 0 && $in <= $vorlauf
-            && $jetzt - $zuletzt > max(600, $vorlauf * 60)) {
-            mg_send('klimatemp', (string) (int) $cfg['abfahrt_temp'], $nr);
-            list($o2, $m2) = mg_send('klima_an', null, $nr);
-            $merk['abfahrt'] = $jetzt;
-            $meldungen[] = 'Vorklimatisierung (' . (int) $in . ' min bis Abfahrt): ' . $m2;
-            mg_log('Automatik Vorklimatisierung: Fahrzeug ' . $nr . ', ' . (int) $in
-                . ' min bis Abfahrt, Zieltemperatur ' . (int) $cfg['abfahrt_temp'] . ' Grad -> ' . $m2);
+        $vorlauf = max(1, (int) $cfg['abfahrt_vorlauf']);
+        if (!isset($merk['vorklima']) || !is_array($merk['vorklima'])) { $merk['vorklima'] = array(); }
+        $m = isset($merk['vorklima'][(string) $nr]) && is_array($merk['vorklima'][(string) $nr])
+            ? $merk['vorklima'][(string) $nr] : array();
+        /* Die Abfahrt: haus/abfahrt zuerst (frisch), sonst wie bisher
+         * termin.php des Abfahrts-Assistenten (E-E3: nur Rueckfall). */
+        list($lage, $in, $grund, $quelle) = mg_abfahrt_quelle($cfg, $c, $jetzt);
+        mg_log_if_changed('abfahrt', $lage === 'ok'
+            ? 'Abfahrt gelesen (' . $quelle . ')' . ($quelle === 'termin' && !empty($cfg['haus_abfahrt_ein']) ? ': ' . $grund : '')
+            : 'Vorklimatisierung ausgesetzt: ' . $grund);
+        $in = ($lage === 'ok') ? (int) $in : -1;
+        $im_fenster = ($in >= 1 && $in <= $vorlauf);
+        /* Anwesenheit: meldet haus/anwesenheit/jemand frisch 0, wartet die
+         * Vorklimatisierung (kein Versuch verbraucht). Schweigt die Quelle,
+         * gilt das bisherige Verhalten. */
+        $m['warten_anwesend'] = 0;
+        if ($im_fenster && !empty($cfg['vorklima_anwesend_ein']) && mg_haus_frisch($c, 'anwesenheit', $jetzt)
+            && trim(mg_haus_wert($c, 'anwesenheit', 'haus/anwesenheit/jemand')) === '0') {
+            $m['warten_anwesend'] = 1;
+            if (!isset($m['kennung']) || abs(mg_vorklima_kennung($jetzt, $in) - (int) $m['kennung']) > 300) {
+                $m['kennung'] = mg_vorklima_kennung($jetzt, $in);
+            }
+            mg_log_if_changed('vorklima_anwesend', 'Vorklimatisierung wartet: niemand zu Hause (haus/anwesenheit/jemand = 0).');
+            $merk['vorklima'][(string) $nr] = $m;
+            $aktion = 'nichts';
+        } else {
+            list($aktion, $m) = mg_vorklima_schritt($m, $in, $jetzt, $vorlauf, null);
+        }
+        if ($aktion === 'senden' && (int) $m['versuche'] === 1) {
+            /* 3.2: einmal je Abfahrt - mild heisst erledigt, ohne Befehl und
+             * ohne verbrauchten Versuch. */
+            list($aw, $aa, $aq) = mg_vorklima_aussen($nr, $jetzt);
+            $wetter = mg_vorklima_wetter($cfg, $aw, $aa);
+            if ($wetter === 'mild') {
+                $m['versuche'] = 0;
+                $m['mild'] = 1;
+                $aktion = 'mild';
+                mg_log('Automatik Vorklimatisierung: Fahrzeug ' . $nr . ' uebersprungen - aussen ' . $aw
+                    . ' Grad (' . $aq . ($aq === 'fahrzeug' ? ', Stand ' . (int) $aa . ' min' : '') . ') liegt zwischen '
+                    . $cfg['vorklima_kalt_unter'] . ' und ' . $cfg['vorklima_heiss_ueber'] . ' Grad.');
+            }
+        }
+        if ($aktion === 'senden') {
+            /* Das Ergebnis von klimatemp geht ins Protokoll; ein Fehlschlag
+             * haelt klima_an nicht auf. */
+            list($o1, $m1, $c1) = mg_befehl_annehmen('klimatemp', array('temp' => (string) (int) $cfg['abfahrt_temp']), $nr, 'automatik');
+            list($o2, $m2, $c2) = mg_befehl_annehmen('klima_an', null, $nr, 'automatik');
+            if ((int) $o2 > 0) { $m['erfolg'] = 1; }
+            $meldungen[] = 'Vorklimatisierung (' . $in . ' min bis Abfahrt, Versuch ' . (int) $m['versuche'] . '): ' . $m2;
+            mg_log('Automatik Vorklimatisierung: Fahrzeug ' . $nr . ', ' . $in . ' min bis Abfahrt (' . $quelle
+                . '), Versuch ' . (int) $m['versuche'] . ' von ' . MG_VORKLIMA_VERSUCHE . ', Zieltemperatur '
+                . (int) $cfg['abfahrt_temp'] . ' Grad -> klimatemp ' . $c1 . ', klima_an ' . $c2 . ' (' . $m2 . ')');
+        } elseif ($aktion === 'auffrischen_und_senden') {
+            list($o3, $m3, $c3) = mg_befehl_annehmen('auffrischen', null, $nr, 'automatik');
+            mg_log('Automatik Vorklimatisierung: Fahrzeug ' . $nr . ', Versuch ' . (int) $m['versuche']
+                . ': erst Auffrischen (' . $c3 . '), Klima im naechsten Lauf.');
+        } elseif ($aktion === 'aufgeben') {
+            $t = sprintf(mg_t_in('MELDUNG.VORKLIMA_GESCHEITERT', mg_lb_sprache()), mg_fahrzeugname($nr, $cfg),
+                MG_VORKLIMA_VERSUCHE);
+            mg_log('Automatik Vorklimatisierung: ' . $t);
+            mg_benachrichtigen(3, $t);
+        }
+        $merk['vorklima'][(string) $nr] = $m;
+    }
+
+    // --- Ankunft (Gruppe 39, 2.4): eine Flanke des Lesers genau einmal ausfuehren ---
+    if (!empty($cfg['ankunft_ein']) && isset($c['ankunft']) && is_array($c['ankunft'])) {
+        if (!isset($merk['ankunft']) || !is_array($merk['ankunft'])) { $merk['ankunft'] = array(); }
+        foreach ($c['ankunft'] as $anr => $a) {
+            $ak = isset($merk['ankunft'][$anr]) && is_array($merk['ankunft'][$anr]) ? $merk['ankunft'][$anr]
+                : array('ausgefuehrt' => isset($a['nr']) ? (int) $a['nr'] : 0, 'letzte' => 0);
+            list($was, $ak['ausgefuehrt']) = mg_ankunft_entscheiden(isset($a['nr']) ? (int) $a['nr'] : 0,
+                (int) $ak['ausgefuehrt'], (int) $ak['letzte'], $jetzt, mg_fzalter((int) $anr));
+            if ($was === 'abfragen') {
+                list($o4, $m4, $c4) = mg_befehl_annehmen('auffrischen', null, (int) $anr, 'automatik');
+                $ak['letzte'] = $jetzt;
+                mg_log('Automatik Ankunft: Fahrzeug ' . (int) $anr . ' (' . (isset($a['thema']) ? $a['thema'] : '') . ' 0->1) - abgefragt: ' . $c4);
+            } elseif ($was !== 'nichts') {
+                mg_log('Automatik Ankunft: Fahrzeug ' . (int) $anr . ' - keine Abfrage (' . $was . ').');
+            }
+            $merk['ankunft'][$anr] = $ak;
         }
     }
 
@@ -2991,7 +3316,7 @@ function mg_automatik()
             $soll = $hoch ? (string) $cfg['ladeempf_hoch'] : (string) $cfg['ladeempf_runter'];
             $zuletzt = isset($merk['ladeempf']) ? (string) $merk['ladeempf'] : '';
             if ($soll !== '' && $soll !== $zuletzt) {
-                list($o, $m) = mg_send($soll, null, $nr);
+                list($o, $m) = mg_befehl_annehmen($soll, null, $nr, 'automatik');
                 if ($o) {
                     $merk['ladeempf'] = $soll;
                     $meldungen[] = 'Ladeempfehlung: ' . $soll . ' (' . $wert . ') -> ' . $m;
@@ -3169,6 +3494,8 @@ function mg_mqtt_retain_liste()
             'fertig_um', 'batterieheizung', 'klima', 'klima_soll', 'heckscheibe',
             'frontscheibe', 'sitzheizung_l', 'sitzheizung_r', 'stecker_fahrzeug',
             'stecker_saeule', 'name', 'vin', 'klima_text', 'stromgrenze_text',
+            // Gruppe 39 (1.1.28, 3.1): "letzte Ladung" - Zustand mit festem Bezug
+            'ladung_kosten', 'ladung_kwh', 'ladung_preis',
         ), 1);
     }
     return $l;
@@ -3728,7 +4055,8 @@ function mg_mqtt_probe($nr = 1)
 /** Die Lebenszeichen-Themen fuer die Tabelle im Reiter MQTT. */
 function mg_mqtt_status_themen()
 {
-    return array('status/ts' => 'MQTT.STATUS_TS', 'status/zaehler' => 'MQTT.STATUS_ZAEHLER');
+    return array('status/ts' => 'MQTT.STATUS_TS', 'status/zaehler' => 'MQTT.STATUS_ZAEHLER',
+                 'status/ok' => 'MQTT.STATUS_OK', 'status/befehle' => 'MQTT.STATUS_BEFEHLE');
 }
 
 /**
@@ -3873,7 +4201,7 @@ function mg_laufzaehler_weiter()
 
 /** Das Lebenszeichen eines Laufs; der Zaehler liegt im Zwischenspeicher. Seit 1.1.26
  *  zaehlt ihn bin/cron.php bei jedem Lauf (mg_laufzaehler_weiter()); hier wird er nur gelesen. */
-function mg_mqtt_lebenszeichen($cfg = null)
+function mg_mqtt_lebenszeichen($cfg = null, $ok = null)
 {
     if ($cfg === null) {
         $cfg = mg_config();
@@ -3886,10 +4214,16 @@ function mg_mqtt_lebenszeichen($cfg = null)
     if ($n < 0) {
         $n = mg_laufzaehler_weiter();   // Aufruf ausserhalb des Minutenlaufs
     }
-    return mg_mqtt_einzeln(array(
+    $paare = array(
         $praefix . '/status/ts' => (string) time(),
         $praefix . '/status/zaehler' => (string) $n,
-    ));
+    );
+    /* Gruppe 39 (1.1.28, 2.1): status/ok - 1 = dieser Lauf hat eingelesen,
+     * 0 = nicht; fluechtig, unter Gateway V2 Noncached. */
+    if ($ok !== null) {
+        $paare[$praefix . '/status/ok'] = $ok ? '1' : '0';
+    }
+    return mg_mqtt_einzeln($paare);
 }
 
 /**
@@ -6073,6 +6407,13 @@ function mg_befund($live = false)
             . sprintf(mg_t('GW.A_MESSZEIT'), date('d.m.Y H:i', (int) $amp['zeit'])));
     }
 
+    /* Gruppe 39 (1.1.28, 2.1): Gateway V2 - sind die Datenpunkte angehakt?
+     * Unter Gateway V1 oder ohne eigene Veroeffentlichung "entfaellt". */
+    if (!empty($cfg['mqtt_ein'])) {
+        list($v2_ok, $v2_txt) = mg_v2_haken_lage($cfg);
+        $add('BEFUND.V2', $v2_ok === 1 ? 5 : ($v2_ok === 0 ? 4 : -1), $v2_txt);
+    }
+
     // 4. Hat sich das Gateway bei MG angemeldet? (A1)
     $anm = mg_gw_anmeldung($cfg, $roh);
     $add('BEFUND.ANMELDUNG', $anm['stufe'] === 1 ? 5 : ($anm['stufe'] === 0 ? 3 : 6), $anm['satz']);
@@ -6343,7 +6684,8 @@ function mg_selbsttest($live = false)
                     'innentemperatur', 'aussentemperatur', 'ac_leistung', 'ac_strom',
                     'ac_spannung', 'km_tag', 'verbrauch_tag', 'push_aktiv', 'push_test',
                     'batterie12v', 'reifen_vl', 'reifen_vr', 'reifen_hl', 'reifen_hr',
-                    'anmeldung');   // seit 1.1.19: gateway/anmeldung, Dienstaussage
+                    'anmeldung',    // seit 1.1.19: gateway/anmeldung, Dienstaussage
+                    'vorklima');    // Gruppe 39 (1.1.28): Dienstaussage, fluechtig
     $re_fehler = array();
     if (mg_mqtt_behalten('x/1/mg_unbekannt', '1')) { $re_fehler[] = 'mg_unbekannt'; }
     foreach ($re_nie as $re_n) {
@@ -6373,6 +6715,44 @@ function mg_selbsttest($live = false)
             ($h['themen'] && $gefunden === count($h['themen'])) ? 1 : ($gefunden ? 2 : 0),
             $gefunden . '/' . count($h['themen']));
     }
+
+    /* Gruppe 39 (1.1.28): Gateway V2, Befehlsbruecke, Haus-Quellen,
+     * Vorklimatisierung, Ladekosten, Vorlagen, Endpunkt. Gelesen wird nur. */
+    if (!empty($cfg['mqtt_ein'])) {
+        list($v2_ok, $v2_txt) = mg_v2_haken_lage($cfg);
+        $add('PRUEF.V2_HAKEN', $v2_ok, $v2_txt);
+    }
+    list($bb_ok, $bb_txt) = mg_bruecke_lage();
+    $add('PRUEF.BRUECKE', $bb_ok === true ? 1 : ($bb_ok === null ? 2 : 0), $bb_txt);
+    foreach (mg_haus_pruefzeilen($cfg) as $hz) {
+        $add($hz[0], $hz[1], $hz[2]);
+    }
+    if (!empty($cfg['abfahrt_ein'])) {
+        $vk_merk = mg_json_lesen(mg_paths()['tmp'] . '/automatik.json');
+        $vk_nr = (string) max(1, (int) $cfg['abfahrt_fahrzeug']);
+        $vk = isset($vk_merk['vorklima'][$vk_nr]) ? $vk_merk['vorklima'][$vk_nr] : array();
+        $vk_w = mg_vorklima_wert($vk, time());
+        $add('PRUEF.VORKLIMA', $vk_w === -1 ? 0 : 1, sprintf(mg_t('PRUEFTEXT.VORKLIMA'),
+            isset($vk['kennung']) ? date('d.m. H:i', (int) $vk['kennung']) : '-',
+            isset($vk['versuche']) ? (int) $vk['versuche'] : 0, $vk_w));
+        if (empty($cfg['haus_abfahrt_ein'])) {
+            $add('PRUEF.TERMIN_ALT', 2, mg_t('PRUEFTEXT.TERMIN_ALT'));
+        }
+    }
+    if (!empty($cfg['haus_strompreis_ein'])) {
+        foreach (mg_fahrzeuge($cfg) as $lk_nr => $lk_fz) {
+            $lk = mg_json_lesen(mg_ladung_laufend_datei($lk_nr));
+            if (!isset($lk['beginn_t'])) { continue; }
+            $lk_p = isset($lk['proben']) && is_array($lk['proben']) ? $lk['proben'] : array();
+            list($lk_k, , , $lk_ab, $lk_g) = mg_ladung_kosten($lk_p);
+            $add('PRUEF.LADEKOSTEN', ($lk_g === 'ok' || !$lk_p) ? 2 : 0, sprintf(mg_t('PRUEFTEXT.LADEKOSTEN'),
+                $lk_fz['name'], count($lk_p), (int) round($lk_ab * 100), $lk_g));
+        }
+    }
+    list($vl_ok, $vl_txt) = mg_vorlagen_pruefen();
+    $add('PRUEF.VORLAGEN', $vl_ok, $vl_txt);
+    $add('PRUEF.ENDPUNKT_EIN', empty($cfg['endpunkt_ein']) ? 2 : 1,
+        mg_t(empty($cfg['endpunkt_ein']) ? 'PRUEFTEXT.ENDPUNKT_AUS' : 'PRUEFTEXT.ENDPUNKT_AN'));
 
     /* Die Pflichtzeilen aus Regeln/04 (seit 1.1.18, Befund U13): der eigene
      * Endpunkt wird wirklich aufgerufen (nur im offenen Reiter Test), und der
@@ -7053,6 +7433,18 @@ function mg_wert_regeln()
         'ladungen_ein' => array('flag'),
         'ladungen_max' => array('ganz', 10, 10000),
         'aktionstoken' => array('token'),
+        // Gruppe 39 (1.1.28)
+        'befehle_mqtt_ein' => array('flag'),
+        'befehle_mqtt_steuern' => array('flag'),
+        'endpunkt_ein' => array('flag'),
+        'haus_abfahrt_ein' => array('flag'),
+        'vorklima_anwesend_ein' => array('flag'),
+        'ankunft_ein' => array('flag'),
+        'ankunft_quellen' => array('quellen'),
+        'haus_strompreis_ein' => array('flag'),
+        'vorklima_wetter_ein' => array('flag'),
+        'vorklima_kalt_unter' => array('ganz', -30, 45),
+        'vorklima_heiss_ueber' => array('ganz', -30, 45),
     );
 }
 
@@ -7177,6 +7569,17 @@ function mg_wert_pruefen($k, $w, $formular = false)
         }
         return array(true, $w, '');
     }
+    if ($art === 'quellen') {   // Gruppe 39: je Fahrzeug '', tag:<name> oder person:<name>
+        if (!is_array($w) || count($w) > 20 || ($w && array_keys($w) !== range(0, count($w) - 1))) {
+            return array(false, null, mg_t('WERT.QUELLEN'));
+        }
+        foreach ($w as $v) {
+            if (!is_string($v) || ($v !== '' && mg_ankunft_thema($v) === '')) {
+                return array(false, null, mg_t('WERT.QUELLEN'));
+            }
+        }
+        return array(true, array_values($w), '');
+    }
     if ($art === 'vins') {
         if (!is_array($w) || count($w) > 20 || ($w && array_keys($w) !== range(0, count($w) - 1))) {
             return array(false, null, mg_t('WERT.VINS'));
@@ -7231,7 +7634,12 @@ function mg_wert_pruefen($k, $w, $formular = false)
  */
 function mg_sicherung_neue_schluessel()
 {
-    return array('saic_pass');
+    /* Gruppe 39 (1.1.28): die Schalter der neuen Fassung. Eine Sicherung aus
+     * 1.1.27 kennt sie nicht - sie behalten ihren jetzigen Wert; so setzt das
+     * Zurueckspielen endpunkt_ein nicht auf 0 (BMS N12). */
+    return array('saic_pass', 'befehle_mqtt_ein', 'befehle_mqtt_steuern', 'endpunkt_ein', 'haus_abfahrt_ein',
+                 'vorklima_anwesend_ein', 'ankunft_ein', 'ankunft_quellen', 'haus_strompreis_ein',
+                 'vorklima_wetter_ein', 'vorklima_kalt_unter', 'vorklima_heiss_ueber');
 }
 
 /**
@@ -7394,10 +7802,14 @@ function mg_eingabe_felder($form)
                             'heim_breite', 'heim_laenge', 'heim_radius', 'push_minutes', 'abfahrt_vorlauf',
                             'abfahrt_temp', 'abfahrt_fahrzeug', 'ladeempf_thema', 'ladeempf_grenze',
                             'ladeempf_hoch', 'ladeempf_runter', 'ladeempf_fahrzeug', 'plan_von', 'plan_bis',
-                            'plan_modus', 'heizplan_von'),
+                            'plan_modus', 'heizplan_von', 'vorklima_kalt_unter', 'vorklima_heiss_ueber'),
             'haken' => array('commands', 'gefahr_ein', 'wirkung_pruefen', 'ort_ein', 'notify_push', 'n_voll',
                              'n_stecker', 'n_offen', 'n_fenster', 'n_fehler', 'abfahrt_ein', 'ladeempf_ein',
-                             'ladeempf_unter', 'plan_ein', 'ladungen_ein'),
+                             'ladeempf_unter', 'plan_ein', 'ladungen_ein', 'haus_abfahrt_ein',
+                             'vorklima_anwesend_ein', 'vorklima_wetter_ein', 'ankunft_ein', 'haus_strompreis_ein'),
+            'liste' => array('ankunft_quelle'), 'nie' => array()),
+        'befehle' => array(
+            'text' => array(), 'haken' => array('befehle_mqtt_ein', 'befehle_mqtt_steuern', 'endpunkt_ein'),
             'liste' => array(), 'nie' => array()),
         'mqtt' => array(
             'text' => array('broker_host', 'broker_port', 'broker_user', 'prefix', 'saic_user', 'mqtt_praefix'),
@@ -7569,3 +7981,1159 @@ function mg_flash_lesen()
  * index.php: sonst steht er dem Endpunkt und jedem weiteren
  * Aufrufer nicht zur Verfuegung (Hausform, REGELN_2). */
 function mg_e($s) { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); }
+
+/* ==================================================================
+ * Gruppe 39 (1.1.28) - Bauvorschrift GRUPPE39_BAUVORSCHRIFT.md und
+ * Musterprojekt/ENTSCHEIDUNGEN_GRUPPE39_MGISMART.md (E-E1 bis E-E6).
+ *
+ * Grundsatz: jede neue Entscheidung steht in einer REINEN Funktion (ohne
+ * Schale, ohne Dateizugriff) - sie laesst sich unter PHP 7.4, 8.4 und 8.5
+ * pruefen. Die Huellen darum lesen, schreiben und rufen Programme.
+ * ================================================================== */
+
+/* ---------------- V1: Alter des Fahrzeugstands ---------------- */
+
+/** Minuten seit refresh/lastVehicleState (sonst lastActivity), -1 unbekannt. Eine Stelle fuer mg_state() und mg_send(). */
+function mg_fzalter($nr = 1)
+{
+    $letzte = mg_txt(array('refresh/lastVehicleState', 'refresh/lastActivity'), '', $nr);
+    $ts = $letzte !== '' ? strtotime($letzte) : false;
+    return $ts ? max(0, (float) round((time() - $ts) / 60)) : -1;
+}
+
+/** Darf "Zielzustand liegt schon an" gelten? Genau bei 0 <= FZALTER <= MG_SCHON_SO_FRISCH. Rein. */
+function mg_schon_so_erlaubt($fzalter)
+{
+    if (!is_int($fzalter) && !is_float($fzalter) && !(is_string($fzalter) && is_numeric($fzalter))) {
+        return false;
+    }
+    $f = (float) $fzalter;
+    return $f >= 0 && $f <= MG_SCHON_SO_FRISCH;
+}
+
+/* ---------------- E-E5/F7: Ergebnis eines Befehls ---------------- */
+
+/** Das Ergebnisthema zu einem Befehlsthema: ohne "/set", dazu "/result" (vehicle_command.py:207-211). Rein. */
+function mg_ergebnis_thema($topic)
+{
+    $t = (string) $topic;
+    if (substr($t, -4) === '/set') {
+        $t = substr($t, 0, -4);
+    }
+    return rtrim($t, '/') . '/result';
+}
+
+/** "Success" -> array(1, ''), "Failed: <detail>" -> array(0, detail), nichts -> array(-1, ''). Rein. */
+function mg_ergebnis_deuten($text)
+{
+    $t = trim((string) $text);
+    if ($t === '') {
+        return array(-1, '');
+    }
+    if (strcasecmp($t, 'Success') === 0) {
+        return array(1, '');
+    }
+    if (stripos($t, 'Failed') === 0) {
+        $d = trim(substr($t, 6), " :\t");
+        return array(0, $d !== '' ? $d : $t);
+    }
+    return array(0, mg_kuerzen($t, 120));
+}
+
+/** Die Umgebung fuer Kindprozesse mit Broker-Zugang: Optionsdatei (XDG), nie ein Kennwort als Argument. */
+function mg_proc_umgebung()
+{
+    $u = array('XDG_CONFIG_HOME' => mg_broker_optionsdatei(), 'LANG' => 'C',
+               'PATH' => ((string) getenv('PATH') !== '') ? (string) getenv('PATH') : '/usr/local/bin:/usr/bin:/bin');
+    if ((string) getenv('HOME') !== '') {
+        $u['HOME'] = (string) getenv('HOME');
+    }
+    return $u;
+}
+
+/** Vor dem Senden auf das Ergebnisthema horchen (mosquitto_sub -C 1 -W n). Rueckgabe Griff oder null. */
+function mg_ergebnis_horchen($thema, $sekunden)
+{
+    if (!function_exists('proc_open') || !mg_has_mosquitto()) {
+        return null;
+    }
+    $z = mg_broker_zugang();
+    $kmd = array('mosquitto_sub', '-h', (string) $z['host'], '-p', (string) (int) $z['port'],
+                 '-C', '1', '-W', (string) max(1, (int) $sekunden), '-t', (string) $thema);
+    $rohr = array();
+    $pr = @proc_open($kmd, array(0 => array('file', '/dev/null', 'r'), 1 => array('pipe', 'w'),
+                                 2 => array('file', '/dev/null', 'w')), $rohr, null, mg_proc_umgebung());
+    if (!is_resource($pr)) {
+        return null;
+    }
+    stream_set_blocking($rohr[1], false);
+    /* Das Abo muss stehen, bevor gesendet wird; mosquitto_sub meldet das nicht
+     * nach aussen. 0,3 s reichen am lokalen Broker (am Geraet nachzumessen). */
+    usleep(300000);
+    return array('p' => $pr, 'aus' => $rohr[1]);
+}
+
+/** Auf das Ergebnis warten (hoechstens $sekunden); Rueckgabe der Text oder ''. Beendet den Horcher. */
+function mg_ergebnis_warten($h, $sekunden)
+{
+    if (!is_array($h)) {
+        return '';
+    }
+    $text = '';
+    $bis = microtime(true) + max(1, (float) $sekunden);
+    while (microtime(true) < $bis) {
+        $r = array($h['aus']);
+        $w = null;
+        $x = null;
+        if (@stream_select($r, $w, $x, 0, 200000) > 0) {
+            $teil = fread($h['aus'], 4096);
+            if ($teil === false || ($teil === '' && feof($h['aus']))) {
+                break;
+            }
+            $text .= $teil;
+            if (strpos($text, "\n") !== false) {
+                break;
+            }
+        }
+        $s = proc_get_status($h['p']);
+        if (!$s['running']) {
+            $text .= (string) stream_get_contents($h['aus']);
+            break;
+        }
+    }
+    mg_ergebnis_ende($h);
+    $z = preg_split('/\r?\n/', $text);
+    return trim((string) $z[0]);
+}
+
+function mg_ergebnis_ende($h)
+{
+    if (!is_array($h)) {
+        return;
+    }
+    $s = @proc_get_status($h['p']);
+    if (is_array($s) && $s['running']) {
+        @proc_terminate($h['p'], 15);
+    }
+    @fclose($h['aus']);
+    @proc_close($h['p']);
+}
+
+/* ---------------- 2.2: eine Funktion fuer alle Befehlswege ---------------- */
+
+/**
+ * Einen Befehl annehmen - DIESELBE Funktion fuer HTTP (mg.php ?cmd=), MQTT
+ * (Befehlsbruecke), Oberflaeche (Reiter Test) und Automatik. Nur die Quelle
+ * mqtt wartet nicht (mg_send($warten = false)). Rueckgabe wie mg_send().
+ */
+function mg_befehl_annehmen($name, $wert, $nr, $quelle)
+{
+    $quelle = in_array($quelle, array('http', 'mqtt', 'oberflaeche', 'automatik'), true) ? $quelle : 'http';
+    $erg = mg_send((string) $name, $wert, max(1, (int) $nr), $quelle !== 'mqtt');
+    if ($quelle === 'mqtt') {
+        mg_log_if_changed('bruecke_letzter', 'Befehl ueber MQTT: ' . $name . ' (Fahrzeug ' . (int) $nr . ') -> '
+            . $erg[2]);
+    }
+    return $erg;
+}
+
+/** Quittung fuer die Bruecke: ok > 0 (OK, ABGESETZT, UNVERAENDERT, SCHON_SO) = angenommen, sonst der Code. Rein. */
+function mg_befehl_quittung($erg)
+{
+    if (!is_array($erg) || !isset($erg[0])) {
+        return array(false, 'UNBEKANNT');
+    }
+    if ((int) $erg[0] > 0) {
+        return array(true, '');
+    }
+    return array(false, isset($erg[2]) ? (string) $erg[2] : 'FEHLER');
+}
+
+/* ---------------- E-E4: Aussentemperatur aus Loxone ---------------- */
+
+function mg_aussentemp_datei()
+{
+    return mg_paths()['tmp'] . '/aussentemp.json';
+}
+
+/** Den Wert aus mg/befehl/aussentemp merken (nur die Bruecke). */
+function mg_aussentemp_merken($wert)
+{
+    if (!is_numeric($wert) || (float) $wert < -40 || (float) $wert > 60) {
+        return array(0, mg_t('MELDUNG.WERT_AUSSER_BEREICH'), 'WERT_AUSSER_BEREICH');
+    }
+    $p = mg_paths();
+    if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
+    $ok = mg_write_json(mg_aussentemp_datei(), array('wert' => round((float) $wert, 1), 't' => time()));
+    return $ok ? array(1, 'gemerkt', 'OK') : array(0, mg_t('FEHLER.SPEICHERN'), 'SPEICHERN');
+}
+
+/** Die Aussentemperatur aus Loxone: array(wert, alter_s) oder array(null, -1). */
+function mg_aussentemp_lesen($jetzt = null)
+{
+    $d = mg_json_lesen(mg_aussentemp_datei());
+    if (!isset($d['wert'], $d['t']) || !is_numeric($d['wert'])) {
+        return array(null, -1);
+    }
+    $a = ($jetzt === null ? time() : (int) $jetzt) - (int) $d['t'];
+    return $a < 0 ? array(null, -1) : array((float) $d['wert'], $a);
+}
+
+/* ---------------- 3.2: Vorklimatisierung nur bei Kaelte oder Hitze ---------------- */
+
+/**
+ * klimatisieren | mild | ohne_aussage (Rein). Haken aus -> klimatisieren. Der
+ * Aussenwert gilt nur bei 0 <= Alter <= MG_VORKLIMA_FRISCH Minuten; -99 oder
+ * ein alter Stand -> ohne_aussage, dann wird klimatisiert wie bisher (nie "nicht
+ * klimatisiert" ohne Aussage). kalt_unter <= aussen <= heiss_ueber -> mild.
+ */
+function mg_vorklima_wetter($cfg, $aussen, $fzalter)
+{
+    if (!is_array($cfg) || empty($cfg['vorklima_wetter_ein'])) {
+        return 'klimatisieren';
+    }
+    if (!is_numeric($aussen) || (float) $aussen <= -99 || !is_numeric($fzalter)
+        || (float) $fzalter < 0 || (float) $fzalter > MG_VORKLIMA_FRISCH) {
+        return 'ohne_aussage';
+    }
+    $kalt = isset($cfg['vorklima_kalt_unter']) ? (float) $cfg['vorklima_kalt_unter'] : 5.0;
+    $heiss = isset($cfg['vorklima_heiss_ueber']) ? (float) $cfg['vorklima_heiss_ueber'] : 25.0;
+    $a = (float) $aussen;
+    return ($a >= $kalt && $a <= $heiss) ? 'mild' : 'klimatisieren';
+}
+
+/** Welche Aussentemperatur gilt? E-E4: Loxone (<= 30 min), sonst Fahrzeugwert mit FZALTER. array(wert, alter_min, quelle). */
+function mg_vorklima_aussen($nr, $jetzt = null)
+{
+    list($w, $a) = mg_aussentemp_lesen($jetzt);
+    if ($w !== null && $a <= MG_AUSSEN_LOXONE_FRISCH) {
+        return array($w, 0, 'loxone');
+    }
+    $st = mg_state($nr);
+    return array($st['AUSSEN'], $st['FZALTER'], 'fahrzeug');
+}
+
+/* ---------------- V2: Vorklimatisierung mit Wiederholung ---------------- */
+
+/** Kennung einer Abfahrt: Abfahrtszeit auf 5 min gerundet. Rein. */
+function mg_vorklima_kennung($jetzt, $in_min)
+{
+    return (int) (round(((int) $jetzt + (int) $in_min * 60) / 300) * 300);
+}
+
+/**
+ * Ein Schritt der Vorklimatisierung (Rein; Uhr als Argument). $m ist der
+ * Merker des Fahrzeugs {kennung, versuche, letzter, erfolg, aufgefrischt,
+ * aufgegeben, mild}. Rueckgabe array(aktion, neuer_merker) mit aktion
+ *   nichts | senden | auffrischen_und_senden | aufgeben | erledigt.
+ * - Ausloesen nur bei 1 <= in_min <= vorlauf (0 = ueberfaellig und -1 nie).
+ * - Eine Kennung, die hoechstens 5 min von der gemerkten abweicht, ist dieselbe
+ *   Abfahrt; sonst beginnt ein neuer Merker.
+ * - Hoechstens MG_VORKLIMA_VERSUCHE Versuche je Kennung, Abstand mindestens
+ *   MG_VORKLIMA_ABSTAND s: 1. Senden, 2. Auffrischen (das Gateway fragt das Auto
+ *   ab; gesendet wird in diesem Lauf nicht), 3. Senden; danach aufgeben.
+ * - $letztes_ok === true (das letzte Senden hatte ok > 0) -> erledigt.
+ */
+function mg_vorklima_schritt(array $m, $in_min, $jetzt, $vorlauf, $letztes_ok)
+{
+    $jetzt = (int) $jetzt;
+    if ($letztes_ok === true && isset($m['kennung'])) {
+        $m['erfolg'] = 1;
+    }
+    if (!is_numeric($in_min)) {
+        return array('nichts', $m);
+    }
+    $in = (int) $in_min;
+    if ($in < 1 || $in > max(1, (int) $vorlauf)) {
+        return array('nichts', $m);
+    }
+    $k = mg_vorklima_kennung($jetzt, $in);
+    if (!isset($m['kennung']) || abs($k - (int) $m['kennung']) > 300) {
+        $m = array('kennung' => $k, 'versuche' => 0, 'letzter' => 0, 'erfolg' => 0,
+                   'aufgefrischt' => 0, 'aufgegeben' => 0, 'mild' => 0);
+    }
+    $m += array('versuche' => 0, 'letzter' => 0, 'erfolg' => 0, 'aufgefrischt' => 0, 'aufgegeben' => 0, 'mild' => 0);
+    if (!empty($m['erfolg']) || !empty($m['mild'])) {
+        return array('erledigt', $m);
+    }
+    if (!empty($m['aufgegeben'])) {
+        return array('nichts', $m);
+    }
+    if ((int) $m['versuche'] >= MG_VORKLIMA_VERSUCHE) {
+        $m['aufgegeben'] = 1;
+        return array('aufgeben', $m);
+    }
+    if ((int) $m['versuche'] >= 1) {
+        if ($jetzt < (int) $m['letzter']) {   // Uhr zurueck: neu zaehlen, nicht senden
+            $m['letzter'] = $jetzt;
+            return array('nichts', $m);
+        }
+        if ($jetzt - (int) $m['letzter'] < MG_VORKLIMA_ABSTAND) {
+            return array('nichts', $m);
+        }
+    }
+    $m['versuche'] = (int) $m['versuche'] + 1;
+    $m['letzter'] = $jetzt;
+    if ((int) $m['versuche'] === 2 && empty($m['aufgefrischt'])) {
+        $m['aufgefrischt'] = 1;
+        return array('auffrischen_und_senden', $m);
+    }
+    return array('senden', $m);
+}
+
+/** VORKLIMA aus einem Merker (Rein): 0 nichts/aus, 1 gesendet, 2 mild, 3 Wiederholung, 4 Anwesenheit, -1 gescheitert. */
+function mg_vorklima_wert($m, $jetzt)
+{
+    if (!is_array($m) || !isset($m['kennung'])) {
+        return 0;
+    }
+    if ((int) $m['kennung'] + 1800 < (int) $jetzt) {
+        return 0;   // die Abfahrt liegt eine halbe Stunde zurueck
+    }
+    if (!empty($m['aufgegeben'])) { return -1; }
+    if (!empty($m['erfolg'])) { return 1; }
+    if (!empty($m['mild'])) { return 2; }
+    if (!empty($m['warten_anwesend'])) { return 4; }
+    if (!empty($m['versuche'])) { return 3; }
+    return 0;
+}
+
+/** Das Feld VORKLIMA eines Fahrzeugs (aus dem Merker der Automatik). */
+function mg_vorklima_feld($nr)
+{
+    $cfg = mg_config();
+    if (empty($cfg['abfahrt_ein']) || (int) $cfg['abfahrt_fahrzeug'] !== (int) $nr) {
+        return 0;
+    }
+    $merk = mg_json_lesen(mg_paths()['tmp'] . '/automatik.json');
+    $m = isset($merk['vorklima'][(string) (int) $nr]) ? $merk['vorklima'][(string) (int) $nr] : null;
+    return mg_vorklima_wert($m, time());
+}
+
+/* ---------------- 2.4: Haus-Themen (Nr. 15), abgekoppelter Leser ---------------- */
+
+function mg_haus_quellen_datei()
+{
+    return mg_paths()['tmp'] . '/haus_quellen.json';
+}
+
+/** Der zuletzt gelesene Stand - bei jedem Aufruf frisch aus der Datei. */
+function mg_haus_quellen()
+{
+    $d = mg_json_lesen(mg_haus_quellen_datei());
+    return is_array($d) ? $d : array();
+}
+
+/** 'tag:<name>' -> haus/tag/<name>/da, 'person:<name>' -> haus/anwesenheit/<name>, sonst ''. Rein. */
+function mg_ankunft_thema($quelle)
+{
+    if (!is_string($quelle) || !preg_match('/^(tag|person):([A-Za-z0-9_\-]{1,40})\z/', $quelle, $t)) {
+        return '';
+    }
+    if ($t[1] === 'person' && in_array($t[2], array('jemand', 'zaehler'), true)) {
+        return '';
+    }
+    return $t[1] === 'tag' ? 'haus/tag/' . $t[2] . '/da' : 'haus/anwesenheit/' . $t[2];
+}
+
+/** Welche Themen liest der Leser je Quelle? Nur die eingeschalteten. Rein (bis auf die Konfiguration als Argument). */
+function mg_haus_lesethemen(array $cfg)
+{
+    $aus = array();
+    if (!empty($cfg['haus_abfahrt_ein'])) {
+        $aus['abfahrt'] = array('haus/abfahrt/in_min', 'haus/abfahrt/zaehler');
+    }
+    if (!empty($cfg['vorklima_anwesend_ein']) || !empty($cfg['ankunft_ein'])) {
+        $l = array('haus/anwesenheit/jemand', 'haus/anwesenheit/zaehler');
+        if (!empty($cfg['ankunft_ein']) && isset($cfg['ankunft_quellen']) && is_array($cfg['ankunft_quellen'])) {
+            foreach ($cfg['ankunft_quellen'] as $q) {
+                $t = mg_ankunft_thema($q);
+                if ($t !== '' && !in_array($t, $l, true)) { $l[] = $t; }
+            }
+        }
+        $aus['anwesenheit'] = $l;
+    }
+    if (!empty($cfg['haus_strompreis_ein'])) {
+        $aus['strompreis'] = array('haus/strompreis/aktuell', 'haus/strompreis/vorschau', 'haus/strompreis/ab',
+                                   'haus/strompreis/raster', 'haus/strompreis/anbieter', 'haus/strompreis/zaehler');
+    }
+    return $aus;
+}
+
+/**
+ * Das Ergebnis einer Lesesitzung einarbeiten (Rein; Abschrift marstek_haus_merken(), Schluessel = volles Thema).
+ * Je Quelle: werte, der zuletzt LIVE gesehene Zaehler und 'seit' = Zeitpunkt seiner letzten Aenderung. Ein live
+ * gesehener, aber unveraenderter Zaehler verlaengert nichts; ein nur retained gelesener zaehlt nicht.
+ */
+function mg_haus_merken(array $alt, array $erg, array $lesethemen, $jetzt)
+{
+    $neu = $alt;
+    $erg += array('lage' => '', 'werte' => array(), 'live' => array());
+    foreach ($lesethemen as $q => $themen) {
+        $e = (isset($alt[$q]) && is_array($alt[$q])) ? $alt[$q] : array();
+        $e += array('werte' => array(), 'zaehler' => null, 'seit' => 0, 'beginn' => (int) $jetzt);
+        foreach ($themen as $t) {
+            $da = array_key_exists($t, $erg['werte']);
+            if (substr($t, -8) === '/zaehler') {
+                if ($da && !empty($erg['live'][$t]) && (string) $erg['werte'][$t] !== (string) $e['zaehler']) {
+                    $e['zaehler'] = (string) $erg['werte'][$t];
+                    $e['seit'] = (int) $jetzt;
+                }
+            } elseif ($da) {
+                $e['werte'][$t] = (string) $erg['werte'][$t];
+            } elseif ($erg['lage'] === 'ok') {
+                $e['werte'][$t] = '';
+            }
+        }
+        $neu[$q] = $e;
+    }
+    return $neu;
+}
+
+/** Frisch: 0 < jetzt - seit <= MG_HAUS_FRIST und seit nicht in der Zukunft. Rein. */
+function mg_haus_frisch(array $c, $q, $jetzt)
+{
+    $seit = isset($c[$q]['seit']) ? (int) $c[$q]['seit'] : 0;
+    return $seit > 0 && $seit <= (int) $jetzt && (int) $jetzt - $seit <= MG_HAUS_FRIST;
+}
+
+/** Schweigt die Quelle laenger als 10 min? (Bremse wie Marstek E-E3). Rein. */
+function mg_haus_lange_still(array $c, $q, $jetzt)
+{
+    $seit = isset($c[$q]['seit']) ? (int) $c[$q]['seit'] : 0;
+    $beginn = isset($c[$q]['beginn']) ? (int) $c[$q]['beginn'] : (int) $jetzt;
+    $ab = ($seit > 0 && $seit <= (int) $jetzt) ? $seit : $beginn;
+    return (int) $jetzt - $ab > 600;
+}
+
+/** Auf welche Zaehler wartet der Leser? Jeden, ausser eine seit 10 min schweigende Quelle (nur in Minute % 10 = 0). Rein. */
+function mg_haus_wartethemen(array $themen, array $c, $jetzt)
+{
+    $warten = array();
+    $zehnter = ((int) floor((int) $jetzt / 60)) % 10 === 0;
+    foreach (array_keys($themen) as $q) {
+        if (isset($c[$q]) && mg_haus_lange_still($c, $q, $jetzt) && !$zehnter) {
+            continue;
+        }
+        $warten[] = 'haus/' . $q . '/zaehler';
+    }
+    return $warten;
+}
+
+/** Zeilen von "mosquitto_sub -F '%r %t %x'" deuten (Rein): array(werte, live) fuer die gesuchten Themen. */
+function mg_haus_zeilen_deuten(array $zeilen, array $soll)
+{
+    $werte = array();
+    $live = array();
+    foreach ($zeilen as $z) {
+        if (!preg_match('/^([01]) (\S+) ([0-9a-fA-F]*)\z/', rtrim((string) $z, "\r\n"), $m)) {
+            continue;
+        }
+        if (!in_array($m[2], $soll, true) || strlen($m[3]) % 2 !== 0) {
+            continue;
+        }
+        $werte[$m[2]] = (string) hex2bin($m[3]);
+        if ($m[1] === '0') {
+            $live[$m[2]] = true;
+        }
+    }
+    return array($werte, $live);
+}
+
+/**
+ * Eine Lesesitzung am Broker: mosquitto_sub mit der Optionsdatei des Plugins
+ * (XDG_CONFIG_HOME, kein Kennwort als Argument), Ausgabe '%r %t %x' (Retain-Bit,
+ * Thema, Nutzlast hex). Gelesen wird, bis jedes Thema aus $warten einmal LIVE
+ * (Retain-Bit 0) kam oder $fenster Sekunden um sind; ohne $warten 1,5 s (nur die
+ * retained Werte). Rueckgabe array('lage' => ok|kein_broker|abgelehnt, 'werte',
+ * 'live'). Der Leser liest nur - er sendet nichts.
+ */
+function mg_haus_sitzung(array $lesen, array $warten, $fenster)
+{
+    $aus = array('lage' => 'kein_broker', 'werte' => array(), 'live' => array());
+    if (!$lesen || !function_exists('proc_open') || !mg_has_mosquitto()) {
+        return $aus;
+    }
+    $z = mg_broker_zugang();
+    $kmd = array('mosquitto_sub', '-h', (string) $z['host'], '-p', (string) (int) $z['port'], '-F', '%r %t %x');
+    foreach ($lesen as $t) {
+        $kmd[] = '-t';
+        $kmd[] = (string) $t;
+    }
+    $rohr = array();
+    $pr = @proc_open($kmd, array(0 => array('file', '/dev/null', 'r'), 1 => array('pipe', 'w'),
+                                 2 => array('pipe', 'w')), $rohr, null, mg_proc_umgebung());
+    if (!is_resource($pr)) {
+        return $aus;
+    }
+    stream_set_blocking($rohr[1], false);
+    stream_set_blocking($rohr[2], false);
+    $puffer = '';
+    $zeilen = array();
+    $bis = microtime(true) + ($warten ? max(1.0, min(66.0, (float) $fenster)) : 1.5);
+    $rc = null;
+    while (microtime(true) < $bis) {
+        $r = array($rohr[1]);
+        $w = null;
+        $x = null;
+        if (@stream_select($r, $w, $x, 0, 200000) > 0) {
+            $teil = fread($rohr[1], 65536);
+            if ($teil !== false && $teil !== '') {
+                $puffer .= $teil;
+                while (($p = strpos($puffer, "\n")) !== false) {
+                    $zeilen[] = substr($puffer, 0, $p);
+                    $puffer = substr($puffer, $p + 1);
+                }
+            }
+        }
+        if ($warten) {
+            list(, $live) = mg_haus_zeilen_deuten($zeilen, $lesen);
+            $offen = false;
+            foreach ($warten as $t) {
+                if (empty($live[$t])) { $offen = true; break; }
+            }
+            if (!$offen) { break; }
+        }
+        $s = proc_get_status($pr);
+        if (!$s['running']) {
+            $rc = (int) $s['exitcode'];
+            $puffer .= (string) stream_get_contents($rohr[1]);
+            break;
+        }
+    }
+    if ($puffer !== '') {
+        foreach (explode("\n", $puffer) as $zz) {
+            if ($zz !== '') { $zeilen[] = $zz; }
+        }
+    }
+    $s = proc_get_status($pr);
+    if ($s['running']) {
+        @proc_terminate($pr, 15);
+    }
+    @fclose($rohr[1]);
+    @fclose($rohr[2]);
+    $ende = @proc_close($pr);
+    if ($rc === null && !$s['running']) {
+        $rc = (int) $s['exitcode'];
+    }
+    list($aus['werte'], $aus['live']) = mg_haus_zeilen_deuten($zeilen, $lesen);
+    // Endete mosquitto_sub von selbst mit einem Fehler, war keine Sitzung zustande gekommen.
+    if ($rc !== null && $rc !== 0 && $rc !== 27 && !$aus['werte']) {
+        $aus['lage'] = in_array($rc, array(4, 5), true) ? 'abgelehnt' : 'kein_broker';
+    } else {
+        $aus['lage'] = 'ok';
+    }
+    unset($ende);
+    return $aus;
+}
+
+/**
+ * Ankunftsflanke im Leser (Rein): $alt = {wert, frisch, nr}. Der erste Stand
+ * nach einem Start ist nie eine Flanke; eine Flanke 0 -> 1 zaehlt nur, wenn der
+ * vorige UND der jetzige Stand frisch sind. Rueckgabe der neue Stand; nr steigt
+ * je Flanke um eins (laufende Nummer, der Minutenlauf fuehrt sie einmal aus).
+ */
+function mg_ankunft_flanke($alt, $wert, $frisch)
+{
+    $wert = (string) $wert;
+    if (!is_array($alt) || !array_key_exists('wert', $alt)) {
+        return array('wert' => $wert, 'frisch' => (bool) $frisch, 'nr' => 0);
+    }
+    $nr = isset($alt['nr']) ? (int) $alt['nr'] : 0;
+    if (!empty($alt['frisch']) && $frisch && (string) $alt['wert'] === '0' && $wert === '1') {
+        $nr++;
+    }
+    return array('wert' => $wert, 'frisch' => (bool) $frisch, 'nr' => $nr);
+}
+
+/**
+ * Was tut der Minutenlauf mit einer Flanke? (Rein) Rueckgabe array(aktion,
+ * neue_ausgefuehrt_nr) mit aktion nichts | abfragen | gedrosselt | frisch. Jede
+ * Flanke genau einmal; hoechstens eine Abfrage je MG_ANKUNFT_ABSTAND; nur bei
+ * einem Fahrzeugstand aelter als MG_ANKUNFT_FZALTER Minuten (unbekannt = alt).
+ */
+function mg_ankunft_entscheiden($flanke_nr, $ausgefuehrt, $letzte_abfrage, $jetzt, $fzalter)
+{
+    if ((int) $flanke_nr <= (int) $ausgefuehrt) {
+        return array('nichts', (int) $ausgefuehrt);
+    }
+    $neu = (int) $flanke_nr;
+    if ((int) $letzte_abfrage > 0 && (int) $jetzt >= (int) $letzte_abfrage
+        && (int) $jetzt - (int) $letzte_abfrage < MG_ANKUNFT_ABSTAND) {
+        return array('gedrosselt', $neu);
+    }
+    if (is_numeric($fzalter) && (float) $fzalter >= 0 && (float) $fzalter <= MG_ANKUNFT_FZALTER) {
+        return array('frisch', $neu);
+    }
+    return array('abfragen', $neu);
+}
+
+/** Den Lesestand der Ankunftsquellen einarbeiten (Flanken je Fahrzeug). Rein bis auf die Konfiguration. */
+function mg_ankunft_merken(array $c, array $cfg, $jetzt)
+{
+    if (empty($cfg['ankunft_ein']) || !isset($cfg['ankunft_quellen']) || !is_array($cfg['ankunft_quellen'])) {
+        unset($c['ankunft']);
+        return $c;
+    }
+    $frisch = mg_haus_frisch($c, 'anwesenheit', $jetzt);
+    $ank = (isset($c['ankunft']) && is_array($c['ankunft'])) ? $c['ankunft'] : array();
+    $neu = array();
+    foreach ($cfg['ankunft_quellen'] as $i => $q) {
+        $t = mg_ankunft_thema($q);
+        if ($t === '') { continue; }
+        $nr = (string) ((int) $i + 1);
+        $w = isset($c['anwesenheit']['werte'][$t]) ? $c['anwesenheit']['werte'][$t] : '';
+        $alt = (isset($ank[$nr]) && is_array($ank[$nr]) && isset($ank[$nr]['thema']) && $ank[$nr]['thema'] === $t)
+            ? $ank[$nr] : null;
+        $neu[$nr] = mg_ankunft_flanke($alt, $w, $frisch) + array('thema' => $t);
+    }
+    $c['ankunft'] = $neu;
+    return $c;
+}
+
+/**
+ * Der Leser: liest die eingeschalteten Haus-Themen (bis $fenster s), arbeitet
+ * sie und die Ankunftsflanken ein und legt <tmp>/haus_quellen.json ab (0600).
+ * Er sendet nichts, schreibt nichts unter haus/ und loest keinen Befehl aus.
+ * Alle Haken aus: Ablage weg. Rueckgabe das Sitzungsergebnis oder null.
+ */
+function mg_haus_abnehmer(array $cfg, $jetzt = null, $fenster = MG_HAUS_LESEFENSTER)
+{
+    $themen = mg_haus_lesethemen($cfg);
+    $datei = mg_haus_quellen_datei();
+    if (!$themen) {
+        if (is_file($datei)) { @unlink($datei); }
+        return null;
+    }
+    if ($jetzt === null) { $jetzt = time(); }
+    $c = mg_haus_quellen();
+    $lesen = array();
+    foreach ($themen as $liste) {
+        foreach ($liste as $t) { $lesen[] = $t; }
+    }
+    $warten = mg_haus_wartethemen($themen, $c, $jetzt);
+    $erg = mg_haus_sitzung($lesen, $warten, $fenster);
+    $c = mg_haus_merken($c, $erg, $themen, time());
+    foreach (array('abfahrt', 'anwesenheit', 'strompreis') as $q) {
+        if (!isset($themen[$q])) { unset($c[$q]); }
+    }
+    $c = mg_ankunft_merken($c, $cfg, time());
+    $c['sitzung'] = array('zeit' => time(), 'lage' => $erg['lage'], 'gewartet' => count($warten));
+    mg_log_if_changed('haus_abnehmer', $erg['lage'] === 'ok' ? 'Haus-Themen lesen: Sitzung am Broker in Ordnung.'
+        : 'Haus-Themen lesen: Sitzung am Broker gescheitert (' . $erg['lage'] . ') - bis zur naechsten gilt das bisherige Verhalten.');
+    $p = mg_paths();
+    if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
+    mg_write_json($datei, $c, 0600);
+    return $erg;
+}
+
+function mg_haus_leser_sperre()
+{
+    return mg_paths()['tmp'] . '/haus_lesen.lock';
+}
+
+/**
+ * Den abgekoppelten Leser starten (bin/cron.php --haus-lesen) - hoechstens
+ * einen, der Minutenlauf wartet nie. Die Schale schliesst vor dem exec jede
+ * Deskriptor-Nummer ueber 2 (sonst erbte der Leser cron.lock und hielte den
+ * naechsten Takt an - Gedaechtnis "Sperre vererbt sich an Kinder").
+ * Rueckgabe: aus | laeuft | gestartet | kein_start.
+ */
+function mg_haus_abnehmer_starten(array $cfg, $skript)
+{
+    if (!mg_haus_lesethemen($cfg)) {
+        $d = mg_haus_quellen_datei();
+        if (is_file($d)) { @unlink($d); }
+        return 'aus';
+    }
+    $p = mg_paths();
+    if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
+    $fh = @fopen(mg_haus_leser_sperre(), 'ce');
+    if ($fh === false) { return 'kein_start'; }
+    if (!flock($fh, LOCK_EX | LOCK_NB)) {
+        fclose($fh);
+        return 'laeuft';
+    }
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    $php = (defined('PHP_BINARY') && PHP_BINARY !== '' && is_executable(PHP_BINARY)) ? PHP_BINARY : 'php';
+    $befehl = 'for f in /proc/$$/fd/*; do n=${f##*/}; [ "$n" -gt 2 ] 2>/dev/null && eval "exec $n>&-"; done; '
+            . 'exec ' . escapeshellarg($php) . ' ' . escapeshellarg($skript) . ' --haus-lesen';
+    $aus = array();
+    $rc = 1;
+    @exec('bash -c ' . escapeshellarg($befehl) . ' </dev/null >/dev/null 2>&1 &', $aus, $rc);
+    return $rc === 0 ? 'gestartet' : 'kein_start';
+}
+
+/** Der Leser selbst (cron.php --haus-lesen): eigene Sperre (close-on-exec), sonst still beenden. */
+function mg_haus_leser_lauf($fenster = MG_HAUS_LESEFENSTER)
+{
+    $p = mg_paths();
+    if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
+    $fh = @fopen(mg_haus_leser_sperre(), 'ce');
+    if ($fh === false || !flock($fh, LOCK_EX | LOCK_NB)) {
+        return 'laeuft';
+    }
+    $erg = mg_haus_abnehmer(mg_config(), null, $fenster);
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return $erg === null ? 'aus' : $erg['lage'];
+}
+
+/** Ein Wert einer Quelle aus der Ablage ('' wenn keiner). */
+function mg_haus_wert(array $c, $q, $thema)
+{
+    return isset($c[$q]['werte'][$thema]) ? (string) $c[$q]['werte'][$thema] : '';
+}
+
+/**
+ * Die Abfahrt fuer die Vorklimatisierung: array(lage ok|..., in_min, grund, quelle haus|termin).
+ * Haus-Thema zuerst (frisch); schweigt es, gilt wie bisher termin.php (E-E3: nur noch Rueckfall,
+ * entfaellt mit 1.1.29). Ein frisches -1 oder '-' heisst: keine Abfahrt bekannt.
+ */
+function mg_abfahrt_quelle(array $cfg, $c = null, $jetzt = null)
+{
+    if ($jetzt === null) { $jetzt = time(); }
+    if (!empty($cfg['haus_abfahrt_ein'])) {
+        if ($c === null) { $c = mg_haus_quellen(); }
+        if (mg_haus_frisch($c, 'abfahrt', $jetzt)) {
+            $v = trim(mg_haus_wert($c, 'abfahrt', 'haus/abfahrt/in_min'));
+            if (preg_match('/^-?[0-9]{1,6}\z/', $v) && (int) $v >= 0) {
+                return array('ok', (int) $v, 'haus/abfahrt', 'haus');
+            }
+            return array('ok', -1, 'haus/abfahrt: keine Abfahrt bekannt', 'haus');
+        }
+        $grund_haus = 'haus/abfahrt schweigt';
+    }
+    $ab = mg_abfahrt_lesen();
+    if ($ab['lage'] !== 'ok') {
+        return array($ab['lage'], -1, (isset($grund_haus) ? $grund_haus . '; ' : '') . $ab['grund'], 'termin');
+    }
+    return array('ok', (int) $ab['ok'] === 1 ? (int) $ab['in'] : -1,
+        (isset($grund_haus) ? $grund_haus . ' - ' : '') . 'termin.php', 'termin');
+}
+
+/* ---------------- 3.1: Ladekosten je Ladung ---------------- */
+
+/**
+ * Endpreis in ct/kWh zum Zeitpunkt $t (Rein): vorschau[floor((t - ab)/raster)]
+ * (Form wie marstek_haus_preisliste(): Zahlen mit ';', Raster 900 oder 3600, ab im
+ * Raster). Liegt t ausserhalb, gilt aktuell - aber nur bei frischer Quelle. Sonst null.
+ */
+function mg_preis_zum_zeitpunkt($vorschau, $ab, $raster, $aktuell, $frisch, $t)
+{
+    $v = is_string($vorschau) ? trim($vorschau) : '';
+    if ($v !== '' && strlen($v) <= 4096 && preg_match('/^-?\d{1,4}(\.\d{1,3})?(;-?\d{1,4}(\.\d{1,3})?)*\z/', $v)
+        && is_numeric($ab) && is_numeric($raster)) {
+        $ab = (int) $ab;
+        $r = (int) $raster;
+        if (in_array($r, array(900, 3600), true) && $ab > 0 && $ab % $r === 0 && (int) $t >= $ab) {
+            $l = explode(';', $v);
+            $i = (int) floor(((int) $t - $ab) / $r);
+            if ($i < count($l)) {
+                return (float) $l[$i];
+            }
+        }
+    }
+    if ($frisch && is_numeric($aktuell)) {
+        return (float) $aktuell;
+    }
+    return null;
+}
+
+/**
+ * Kosten einer Ladung aus den Proben {t, w, preis} (Rein). Eine Probe steht fuer
+ * die Zeit seit der vorigen (die erste fuer MG_LADUNG_TAKT s); ein Abstand ueber
+ * MG_LADUNG_LUECKE s ist eine Luecke (keine Energie), Leistung null ebenso.
+ * Gleiche t werden verworfen. Unter MG_LADUNG_ABDECKUNG Energie mit Preis oder
+ * ohne Energie: Kosten und Preis -1 - nie geschaetzt.
+ * Rueckgabe array(kwh_netz, kosten_eur, preis_ct, abdeckung, grund).
+ */
+function mg_ladung_kosten(array $proben)
+{
+    $p = array();
+    foreach ($proben as $x) {
+        if (is_array($x) && isset($x['t']) && is_numeric($x['t']) && !isset($p[(int) $x['t']])) {
+            $p[(int) $x['t']] = $x;
+        }
+    }
+    ksort($p);
+    $kwh = 0.0;
+    $mit_preis = 0.0;
+    $cent = 0.0;
+    $vorher = null;
+    foreach ($p as $t => $x) {
+        $dt = ($vorher === null) ? MG_LADUNG_TAKT : $t - $vorher;
+        $vorher = $t;
+        if ($dt <= 0 || $dt > MG_LADUNG_LUECKE) {
+            continue;
+        }
+        if (!isset($x['w']) || !is_numeric($x['w']) || (float) $x['w'] <= 0) {
+            continue;
+        }
+        $e = (float) $x['w'] * $dt / 3600000.0;
+        $kwh += $e;
+        if (isset($x['preis']) && is_numeric($x['preis'])) {
+            $mit_preis += $e;
+            $cent += (float) $x['preis'] * $e;
+        }
+    }
+    if ($kwh <= 0) {
+        return array(-1, -1, -1, 0, 'leistung_fehlt');
+    }
+    $abd = $mit_preis / $kwh;
+    if ($abd < MG_LADUNG_ABDECKUNG) {
+        return array(round($kwh, 3), -1, -1, round($abd, 3), 'preis_fehlt');
+    }
+    /* Der Preis gilt fuer die Energie mit Preis; die Kosten fuer die ganze
+     * Energie entstehen daraus nicht - bei voller Abdeckung sind sie gleich,
+     * darunter (90-99 %) stehen die Kosten der belegten Energie. */
+    return array(round($kwh, 3), round($cent / 100, 2), round($cent / $mit_preis, 1), round($abd, 3), 'ok');
+}
+
+function mg_ladung_laufend_datei($nr)
+{
+    return mg_paths()['datadir'] . '/ladung_laufend' . (int) $nr . '.json';
+}
+
+/** Je Minutenlauf mit LAEDT = 1: die Mitschrift fortschreiben (Datenordner, atomar). */
+function mg_ladung_mitschreiben(array $st, $nr, $cfg = null, $c = null)
+{
+    if ($cfg === null) { $cfg = mg_config(); }
+    if (empty($cfg['ladungen_ein']) || (int) $st['LAEDT'] !== 1) {
+        return false;
+    }
+    $f = mg_ladung_laufend_datei($nr);
+    $d = mg_json_lesen($f);
+    $jetzt = time();
+    if (!isset($d['beginn_t'])) {
+        $d = array('beginn_t' => $jetzt, 'sockwh_beginn' => (float) $st['SOCKWH'],
+                   'zuhause' => (int) $st['ZUHAUSE'], 'preis_ein' => empty($cfg['haus_strompreis_ein']) ? 0 : 1,
+                   'proben' => array());
+    }
+    if (!empty($d['preis_ein']) && (int) $d['zuhause'] === 1) {
+        if ($c === null) { $c = mg_haus_quellen(); }
+        $l = isset($d['proben']) && is_array($d['proben']) ? $d['proben'] : array();
+        $letzte = $l ? end($l) : null;
+        if (!is_array($letzte) || (int) $letzte['t'] !== $jetzt) {
+            $l[] = array('t' => $jetzt, 'w' => ((float) $st['ACLEISTUNG'] > 0 ? (float) $st['ACLEISTUNG'] : null),
+                         'preis' => mg_preis_zum_zeitpunkt(mg_haus_wert($c, 'strompreis', 'haus/strompreis/vorschau'),
+                             mg_haus_wert($c, 'strompreis', 'haus/strompreis/ab'),
+                             mg_haus_wert($c, 'strompreis', 'haus/strompreis/raster'),
+                             mg_haus_wert($c, 'strompreis', 'haus/strompreis/aktuell'),
+                             mg_haus_frisch($c, 'strompreis', $jetzt), $jetzt));
+        }
+        $d['proben'] = array_slice($l, -2000);
+    }
+    $p = mg_paths();
+    if (!is_dir($p['datadir'])) { @mkdir($p['datadir'], 0775, true); }
+    return mg_write_json($f, $d);
+}
+
+/** Beim Ladeende: die Felder der Kostenrechnung und kwh_akku; die Mitschrift wird nach ..._letzte.json umbenannt. */
+function mg_ladung_abschluss(array $st, $nr, $cfg = null)
+{
+    if ($cfg === null) { $cfg = mg_config(); }
+    $f = mg_ladung_laufend_datei($nr);
+    $d = mg_json_lesen($f);
+    $aus = array('kwh_akku' => -1, 'kwh_netz' => -1, 'kosten_eur' => -1, 'preis_ct' => -1, 'abdeckung' => 0,
+                 'kosten_grund' => 'aus');
+    if (isset($d['sockwh_beginn']) && (float) $d['sockwh_beginn'] >= 0 && (float) $st['SOCKWH'] >= 0) {
+        $aus['kwh_akku'] = round((float) $st['SOCKWH'] - (float) $d['sockwh_beginn'], 1);
+    }
+    if (!isset($d['beginn_t']) || empty($d['preis_ein'])) {
+        $aus['kosten_grund'] = 'aus';
+    } elseif ((int) $d['zuhause'] !== 1) {
+        $aus['kosten_grund'] = 'unterwegs';
+    } else {
+        list($k, $e, $pc, $ab, $g) = mg_ladung_kosten(isset($d['proben']) && is_array($d['proben']) ? $d['proben'] : array());
+        $aus = array('kwh_akku' => $aus['kwh_akku'], 'kwh_netz' => $k, 'kosten_eur' => $e, 'preis_ct' => $pc,
+                     'abdeckung' => $ab, 'kosten_grund' => $g);
+    }
+    if (is_file($f)) {
+        @rename($f, mg_paths()['datadir'] . '/ladung_laufend' . (int) $nr . '_letzte.json');
+    }
+    return $aus;
+}
+
+/** Die letzte eingetragene Ladung eines Fahrzeugs: kosten_eur, kwh_netz, preis_ct (je -1 ohne Aussage). */
+function mg_ladung_letzte($nr)
+{
+    $aus = array('kosten_eur' => -1, 'kwh_netz' => -1, 'preis_ct' => -1);
+    $d = mg_json_lesen(mg_ladungen_datei());
+    $l = isset($d['liste']) && is_array($d['liste']) ? $d['liste'] : array();
+    for ($i = count($l) - 1; $i >= 0; $i--) {
+        if (is_array($l[$i]) && isset($l[$i]['fz']) && (int) $l[$i]['fz'] === (int) $nr) {
+            foreach (array_keys($aus) as $k) {
+                if (isset($l[$i][$k]) && is_numeric($l[$i][$k])) { $aus[$k] = (float) $l[$i][$k]; }
+            }
+            break;
+        }
+    }
+    return $aus;
+}
+
+/* ---------------- 2.2: Befehlsbruecke 1.0.2 ---------------- */
+
+/** Die Bruecke als Bibliothek laden (BB_NUR_LADEN). Rueckgabe true, wenn bb_waechter() danach da ist. */
+function mg_bruecke_laden()
+{
+    if (function_exists('bb_waechter')) { return true; }
+    $p = mg_paths();
+    $kand = array();
+    if ($p['lbhome'] !== '') {
+        $kand[] = $p['lbhome'] . '/bin/plugins/' . $p['plugin'] . '/befehlsbruecke.php';
+    }
+    $kand[] = dirname(dirname(__DIR__)) . '/bin/befehlsbruecke.php';
+    foreach ($kand as $k) {
+        if (is_file($k)) {
+            if (!defined('BB_NUR_LADEN')) { define('BB_NUR_LADEN', true); }
+            require_once $k;
+            return function_exists('bb_waechter');
+        }
+    }
+    return false;
+}
+
+/** Die Befehlsliste der Bruecke (bb_liste()). array(Liste oder null, Fehlertext). */
+function mg_bruecke_liste()
+{
+    if (!mg_bruecke_laden()) { return array(null, mg_t('BEFEHL.T_NICHT_DA')); }
+    list($z, $fehler) = bb_zuordnung_laden();
+    if ($z === null) { return array(null, $fehler); }
+    $GLOBALS['bb_zuordnung'] = $z;
+    list($fehl) = bb_zuordnung_pruefen($z);
+    if ($fehl) { return array(null, $fehl[0]); }
+    return array(bb_liste($z, bb_einstellungen($z)), '');
+}
+
+/** Nach dem Speichern im Reiter MQTT: start (Haken an) bzw. stop. array(rc|null, start|stop|'', Ausgabe). */
+function mg_bruecke_schalten($cfg = null)
+{
+    if (!is_array($cfg)) { $cfg = mg_config(); }
+    if (!mg_bruecke_laden()) { return array(1, '', mg_t('BEFEHL.T_NICHT_DA')); }
+    $p = bb_pfade();
+    if (!$p) { return array(1, '', 'keine LoxBerry-Installation erkannt'); }
+    if (!empty($cfg['befehle_mqtt_ein'])) {
+        list($rc, $aus) = bb_sh($p, 'start');
+        return array($rc, 'start', $aus);
+    }
+    if (!bb_dienste()) { return array(null, '', ''); }
+    list($rc, $aus) = bb_sh($p, 'stop');
+    return array($rc, 'stop', $aus);
+}
+
+/** Lage der Bruecke (Reiter Test, Reiter MQTT): array(true|false|null, Text); null = aus (Haken). */
+function mg_bruecke_lage()
+{
+    if (!mg_bruecke_laden()) { return array(false, mg_t('BEFEHL.T_NICHT_DA')); }
+    list($soll, $grund) = bb_soll_ermitteln();
+    if ($soll === 1) { return array(null, mg_t('BEFEHL.T_AUS')); }
+    if ($soll !== 0) { return array(false, sprintf(mg_t('BEFEHL.T_DEFEKT'), $grund)); }
+    $zu = bb_zustand_lesen();
+    $pids = bb_dienste();
+    $alter = (is_array($zu) && isset($zu['ts'])) ? time() - (int) $zu['ts'] : null;
+    if ($pids && $alter !== null && $alter <= BB_WACHE_GRENZE && !empty($zu['abo'])) {
+        $zl = (isset($zu['zaehler']) && is_array($zu['zaehler'])) ? $zu['zaehler'] : array();
+        $txt = sprintf(mg_t('BEFEHL.T_LAEUFT'), count($pids),
+            isset($zl['angenommen']) ? (int) $zl['angenommen'] : 0, isset($zl['abgelehnt']) ? (int) $zl['abgelehnt'] : 0);
+        $lz = isset($zu['letzter']) && is_array($zu['letzter']) ? $zu['letzter'] : null;
+        if ($lz !== null && isset($lz['name'])) {
+            $txt .= ' ' . sprintf(mg_t('BEFEHL.T_LETZTER'), (string) $lz['name'],
+                isset($lz['ergebnis']) ? (string) $lz['ergebnis'] : '-',
+                isset($lz['zeit']) ? max(0, time() - (int) $lz['zeit']) : 0);
+        } else {
+            $txt .= ' ' . mg_t('BEFEHL.T_KEINER');
+        }
+        return array(true, $txt);
+    }
+    $wie = !$pids ? 'kein Dienst' : ($alter === null ? 'kein Zustand' : ($alter > BB_WACHE_GRENZE
+        ? 'Zustand ' . $alter . ' s alt' : 'ohne Abo'));
+    return array(false, sprintf(mg_t('BEFEHL.T_STEHT'), $wie));
+}
+
+/** befehlsbruecke.php --pruefen: array(rc, Zeilen). */
+function mg_bruecke_pruefen()
+{
+    if (!mg_bruecke_laden()) { return array(1, array(mg_t('BEFEHL.T_NICHT_DA'))); }
+    $p = bb_pfade();
+    $skript = $p ? $p['bin'] . '/befehlsbruecke.php' : dirname(dirname(__DIR__)) . '/bin/befehlsbruecke.php';
+    $php = (defined('PHP_BINARY') && PHP_BINARY !== '') ? PHP_BINARY : 'php';
+    $aus = array();
+    $rc = 1;
+    @exec(escapeshellarg($php) . ' ' . escapeshellarg($skript) . ' --pruefen 2>&1', $aus, $rc);
+    return array((int) $rc, $aus);
+}
+
+/** Der Rechnername fuer UDP-Adressen: nie die Rueckschleife (Regeln/07). */
+function mg_rechnername()
+{
+    $h = mg_host();
+    if (substr_count($h, ':') === 1) { $h = substr($h, 0, strpos($h, ':')); }
+    if (in_array(strtolower($h), array('', '127.0.0.1', 'localhost', '::1', '[::1]'), true)) {
+        $g = gethostname();
+        $h = ($g !== false && $g !== '') ? $g : 'loxberry';
+    }
+    return $h;
+}
+
+/** Die Vorlage "MG MQTT-Befehle" aus bb_vorlage() (CRLF, /dev/udp/<rechner>/<Udpinport>). array(Name, Inhalt|''). */
+function mg_vorlage_befehle()
+{
+    list($l) = mg_bruecke_liste();
+    if ($l === null) { return array('VQ_mgismart_mqtt.xml', ''); }
+    $bp = bb_pfade();
+    $port = $bp ? bb_broker($bp)['udpin'] : 11884;
+    return array('VQ_mgismart_mqtt.xml', bb_vorlage($l, mg_rechnername(), $port));
+}
+
+/* ---------------- 2.1: MQTT-Gateway V2 ---------------- */
+
+/** Der Name, den das MQTT-Gateway vergibt: '/', '%' und Leerzeichen werden '_' (Regeln/07 :69). Rein. */
+function mg_gateway_name($thema)
+{
+    return str_replace(array('/', '%', ' '), '_', (string) $thema);
+}
+
+/**
+ * Namenstabelle und V2-Hakenliste - EINE Quelle fuer Reiter, Selbsttest und
+ * Messskript. Je Fahrzeug alle Zahlen- und 0/1-Themen aus mg_felder() (keine
+ * Textthemen, nie vin), dazu status/zaehler, status/ok, status/befehle und
+ * gateway/anmeldung. Noncached: <n>/ok und die drei Dienstthemen.
+ * Rueckgabe Liste von array(thema, name, noncached, bez).
+ */
+function mg_v2_haken($cfg = null)
+{
+    if ($cfg === null) { $cfg = mg_config(); }
+    $pf = trim((string) $cfg['mqtt_praefix'], '/ ');
+    if ($pf === '') { $pf = 'mg'; }
+    $aus = array();
+    $n = max(1, mg_fahrzeug_anzahl($cfg));
+    for ($nr = 1; $nr <= $n; $nr++) {
+        foreach (mg_felder() as $info) {
+            if ($info['mqtt'] === '') { continue; }
+            $t = $pf . '/' . $nr . '/' . $info['mqtt'];
+            $aus[] = array('thema' => $t, 'name' => mg_gateway_name($t), 'noncached' => $info['mqtt'] === 'ok',
+                           'bez' => $info['bez']);
+        }
+    }
+    foreach (array('status/zaehler' => 'MQTT.STATUS_ZAEHLER', 'status/ok' => 'MQTT.STATUS_OK',
+                   'status/befehle' => 'MQTT.STATUS_BEFEHLE', 'gateway/anmeldung' => 'MQTT.ANMELDUNG') as $s => $b) {
+        $t = $pf . '/' . $s;
+        $aus[] = array('thema' => $t, 'name' => mg_gateway_name($t), 'noncached' => true, 'bez' => $b);
+    }
+    return $aus;
+}
+
+/** Die Liste der angehakten Datenpunkte aus subscriptions.json (Rein): Id => noncached. null = unlesbar. */
+function mg_v2_abos($daten)
+{
+    if (!is_array($daten)) { return null; }
+    $liste = array();
+    foreach (array('Subscriptions', 'subscriptions') as $s) {
+        if (isset($daten[$s]) && is_array($daten[$s])) { $liste = $daten[$s]; break; }
+    }
+    $abo = array();
+    foreach ($liste as $e) {
+        if (!is_array($e)) { continue; }
+        $id = '';
+        foreach (array('Id', 'id', 'Topic', 'topic') as $k) {
+            if (isset($e[$k]) && is_string($e[$k])) { $id = $e[$k]; break; }
+        }
+        if ($id === '') { continue; }
+        $nc = false;
+        foreach (array('Noncached', 'noncached') as $k) {
+            if (isset($e[$k])) {
+                $nc = ($e[$k] === true || in_array(strtolower(trim((string) $e[$k])), array('1', 'true', 'yes', 'on'), true));
+            }
+        }
+        $abo[$id] = $nc;
+    }
+    return $abo;
+}
+
+/** Soll gegen Ist (Rein): array(1|0, fehlt[], noncached_falsch[], da, soll). */
+function mg_v2_haken_abgleich(array $soll, array $abo)
+{
+    $fehlt = array();
+    $nc = array();
+    $da = 0;
+    foreach ($soll as $e) {
+        if (!array_key_exists($e['thema'], $abo)) {
+            $fehlt[] = $e['name'];
+            continue;
+        }
+        $da++;
+        if ((bool) $abo[$e['thema']] !== (bool) $e['noncached']) {
+            $nc[] = $e['name'] . ($e['noncached'] ? ' (Noncached fehlt)' : ' (Noncached zu viel)');
+        }
+    }
+    return array(($fehlt || $nc) ? 0 : 1, $fehlt, $nc, $da, count($soll));
+}
+
+/** Selbsttestzeile "Gateway V2: alle Datenpunkte angehakt?": array(1|0|2, Text). Liest nur. */
+function mg_v2_haken_lage($cfg = null)
+{
+    if ($cfg === null) { $cfg = mg_config(); }
+    $gw = mg_mqtt_gateway_info();
+    if ($gw === null || (int) $gw['fassung'] === 0) {
+        return array(2, mg_t('PRUEFTEXT.V2_UNKLAR'));
+    }
+    if ((int) $gw['fassung'] < 2) {
+        return array(2, mg_t('PRUEFTEXT.V2_V1'));
+    }
+    $abo = mg_v2_abos(mg_json_lesen(mg_paths()['lbhome'] . '/config/system/subscriptions.json'));
+    if ($abo === null) {
+        return array(2, mg_t('PRUEFTEXT.V2_UNKLAR'));
+    }
+    list($ok, $fehlt, $nc, $da, $soll) = mg_v2_haken_abgleich(mg_v2_haken($cfg), $abo);
+    $txt = sprintf(mg_t('PRUEFTEXT.V2_ZAHL'), $da, $soll);
+    if ($fehlt) { $txt .= ' ' . sprintf(mg_t('PRUEFTEXT.V2_FEHLT'), implode(', ', array_slice($fehlt, 0, 12))
+        . (count($fehlt) > 12 ? ' …' : '')); }
+    if ($nc) { $txt .= ' ' . sprintf(mg_t('PRUEFTEXT.V2_NC'), implode(', ', $nc)); }
+    return array($ok, $txt);
+}
+
+/* ---------------- Reiter Test: Zeilen der neuen Teile ---------------- */
+
+/** Je eingeschaltete Haus-Quelle eine Zeile: array(bez, ok, text). */
+function mg_haus_pruefzeilen($cfg = null)
+{
+    if ($cfg === null) { $cfg = mg_config(); }
+    $c = mg_haus_quellen();
+    $jetzt = time();
+    $gilt = array('abfahrt' => 'HAUS.RUECK_ABFAHRT', 'anwesenheit' => 'HAUS.RUECK_ANWESENHEIT',
+                  'strompreis' => 'HAUS.RUECK_STROMPREIS');
+    $z = array();
+    foreach (array_keys(mg_haus_lesethemen($cfg)) as $q) {
+        $seit = isset($c[$q]['seit']) ? (int) $c[$q]['seit'] : 0;
+        if (mg_haus_frisch($c, $q, $jetzt)) {
+            $z[] = array('HAUS.Q_' . strtoupper($q), 1, sprintf(mg_t('HAUS.FRISCH'), $jetzt - $seit));
+        } else {
+            $z[] = array('HAUS.Q_' . strtoupper($q), 0, sprintf(mg_t('HAUS.SCHWEIGT'),
+                $seit > 0 ? mg_dauer_text($jetzt - $seit) : mg_t('HAUS.NIE'), mg_t($gilt[$q])));
+        }
+    }
+    return $z;
+}
+
+/** Vorlagen: alle CRLF und wohlgeformt (VI_mgismart_*, VQ_mgismart, Bruecke). array(1|0|2, Text). */
+function mg_vorlagen_pruefen()
+{
+    $teile = array();
+    foreach (array_keys(mg_zeilen()) as $zk) {
+        $teile[] = mg_vorlage(1, $zk);
+    }
+    $teile[] = mg_vorlage_vo(1);
+    $b = mg_vorlage_befehle();
+    if ($b[1] !== '') { $teile[] = $b; }
+    $schlecht = array();
+    foreach ($teile as $t) {
+        $ohne = str_replace("\r\n", '', $t[1]);
+        $xml_ok = !function_exists('simplexml_load_string') || @simplexml_load_string($t[1]) !== false;
+        if (strpos($ohne, "\n") !== false || strpos($t[1], "\r\n") === false || !$xml_ok) {
+            $schlecht[] = $t[0];
+        }
+    }
+    return $schlecht ? array(0, implode(', ', $schlecht)) : array(1, count($teile) . ' ' . mg_t('PRUEF.VORLAGEN_CRLF'));
+}

@@ -18,6 +18,11 @@
 # Loeschen tun. $1 ist eine Kennung, $6 der Arbeitsordner des Installers.
 
 PFOLDER="${3:-mgismart}"
+# Gruppe 39 (1.1.28, V7-a/T1-3): dieselbe Pruefung wie preinstall.sh - ein Ordnername
+# mit "/" oder "." waere ein Pfad hinaus (Marke, Ablage). Bis 1.1.27 lief das Skript weiter.
+case "$PFOLDER" in
+    ''|.|..|*/*) echo "<FAIL> Unbrauchbarer Ordnername '$PFOLDER' - nichts angelegt."; exit 2 ;;
+esac
 
 # DIE WURZEL - gelesen, nicht angenommen (Regeln/06). Bis 1.1.16 stand hier
 # BASE="${5:-$LBHOMEDIR}", allenfalls mit "-d": ein fremder Baum ohne
@@ -91,6 +96,14 @@ if [ -z "$ABLAGE" ]; then
 fi
 mkdir -p "$ABLAGE" 2>/dev/null
 
+# Gruppe 39 (1.1.28, 2.2): die Befehlsbruecke vor dem Austausch der Dateien anhalten.
+# Die Marke liegt schon - der Waechter im Minutenlauf startet sie bis zum Ende des
+# Updates nicht neu. Bis 1.1.27 gab es keine Bruecke (dann fehlt die Datei).
+BBSH="$BASE/bin/plugins/$PFOLDER/befehlsbruecke.sh"
+if [ -f "$BBSH" ]; then
+    echo "<INFO> Befehlsbruecke: $(timeout 40 bash "$BBSH" stop 2>&1 | head -n 1)"
+fi
+
 # Gemeldet wird, was nachgesehen wurde: bis 1.1.16 lief jedes cp stumm, auch
 # wenn es scheiterte (unter "ulimit -f 0" gemessen, Pruefung-MGiSmart-1.1.17,
 # Fall A6). Die Ablage raeumt der Installer mit seinem Arbeitsordner weg.
@@ -110,6 +123,11 @@ mg_ablegen "$BASE/log/plugins/$PFOLDER/mg.log" mg.log
 # Installer ebenfalls entfernt. Sie sind kein Zustand, den das Plugin
 # wiederherstellen koennte - also mitnehmen.
 mg_ablegen "$BASE/data/plugins/$PFOLDER/ladungen.json" ladungen.json
+# Gruppe 39 (1.1.28, 3.1): die Mitschrift einer laufenden Ladung (Preis je Minute) -
+# der Installer leert den Datenordner; ohne sie gaebe es nach dem Update keine Kosten.
+for MG_LL in "$BASE/data/plugins/$PFOLDER"/ladung_laufend[0-9].json; do
+    [ -f "$MG_LL" ] && mg_ablegen "$MG_LL" "$(basename "$MG_LL")"
+done
 if [ "$MG_FEHL" != 0 ]; then
     echo "<WARNING> Die Einstellungen holt dann die Zweitschrift neben dem Konfigordner (<ordner>.backup.json) zurueck."
 fi

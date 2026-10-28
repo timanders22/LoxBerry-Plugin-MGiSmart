@@ -35,4 +35,12 @@ if [ ! -f REPLACELBPBINDIR/cron.php ]; then
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] cron.01min: REPLACELBPBINDIR/cron.php fehlt - Plugin neu installieren." >> "$ERR"
   exit 1
 fi
+# Gruppe 39 (1.1.28, V5/T3-2): nur EIN Minutenlauf zugleich. Holt cron nach dem
+# Boot Minuten nach, starten zwei Laeufe in derselben Sekunde (Gedaechtnis "Cron
+# holt Minuten nach"); der zweite endet still. Die Sperre steht hier in der
+# Schale, nicht in cron.php (Gedaechtnis "Sperre vererbt sich an Kinder"): die
+# Kinder, die laenger leben als der Lauf - der abgekoppelte Leser und die
+# Befehlsbruecke -, schliessen jeden geerbten Deskriptor ueber 2 selbst.
+exec 9>"$LOGV/cron.lock" || exit 0
+flock -n 9 || exit 0
 /usr/bin/php REPLACELBPBINDIR/cron.php >/dev/null 2>>"$ERR"

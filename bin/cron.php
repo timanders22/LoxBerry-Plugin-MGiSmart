@@ -34,6 +34,20 @@ if (!is_file($mg_lib)) {
 }
 require_once $mg_lib;
 
+/* Gruppe 39 (1.1.28, V7-f/T3-3): erlaubt sind nur die drei Schalter unten. Jeder
+ * andere Schalter - auch ein Wort ohne "--" - endet mit einem Satz auf STDERR und
+ * Rueckgabe 2, OHNE Wirkung (vor Laufzaehler, Momentaufnahme und Automatik). Bis
+ * 1.1.27 lief "--mqt-leeren" als voller Minutenlauf durch und schickte unter
+ * Umstaenden Befehle ans Auto. */
+$mg_erlaubt = array('--mqtt-leeren', '--gateway-leeren', '--haus-lesen');
+foreach (array_slice(isset($argv) ? $argv : array(), 1) as $mg_a) {
+    if (!in_array($mg_a, $mg_erlaubt, true)) {
+        fwrite(STDERR, 'cron.php: unbekannter Schalter ' . $mg_a . ' - erlaubt sind ' . implode(' ', $mg_erlaubt)
+            . ". Es wurde nichts getan.\n");
+        exit(2);
+    }
+}
+
 /* Ohne Anlage nichts tun: weder lesen noch senden noch schreiben. Bis 1.1.16
  * lief diese Datei aus einem ausgepackten Archiv unterhalb einer echten
  * Wurzel ohne jede Pruefung los - Momentaufnahme, Protokoll, MQTT und
@@ -79,12 +93,34 @@ if (in_array('--gateway-leeren', array_slice(isset($argv) ? $argv : array(), 1),
     exit($mg_rc);
 }
 
+/* Gruppe 39 (1.1.28, 2.4): der abgekoppelte Leser der Haus-Themen
+ * (mg_haus_abnehmer_starten() startet ihn, eigene Sperre haus_lesen.lock). Er
+ * wartet bis 65 s am Broker, bis jeder Zaehler einmal live kam (Phasenfalle),
+ * liest nur und schreibt <tmp>/haus_quellen.json. Kein Laufzaehler, keine
+ * Automatik, kein Senden. */
+if (in_array('--haus-lesen', array_slice(isset($argv) ? $argv : array(), 1), true)) {
+    mg_haus_leser_lauf(MG_HAUS_LESEFENSTER);
+    exit(0);
+}
+
 /* Welle Bild 19 (1.1.26, Entwurf Welle 19 mg E4): der Laufzaehler geht bei
  * JEDEM Minutenlauf eins weiter - gleich nach der Wurzelpruefung und nach den
  * beiden Aufrufen aus uninstall (die nur lesen sollen), vor jeder Frage nach
  * Einrichtung oder Broker. Er ist das Lebenszeichen der HTTP-Zeile (Feld
  * ZAEHLER) und speist status/zaehler; steht der Takt, bleibt er stehen. */
 mg_laufzaehler_weiter();
+
+/* Gruppe 39 (1.1.28, 2.2): der Waechter der Befehlsbruecke - vorn im Lauf, vor
+ * "eingerichtet?" (wie ACTi E-E5). Er startet die Bruecke nur mit dem Haken
+ * "Befehle ueber MQTT annehmen", haelt sie sonst an, startet nie waehrend eines
+ * Updates und sendet <mqtt_praefix>/status/befehle (1/0/-1, nie retained).
+ * befehlsbruecke.sh schliesst geerbte Deskriptoren (cron.lock) selbst. */
+if (mg_bruecke_laden()) {
+    list($mg_bbs, $mg_bbt) = bb_waechter();
+    if ($mg_bbs === -1) {
+        mg_log_if_changed('befehlsbruecke', 'Befehlsbruecke: ' . $mg_bbt);
+    }
+}
 
 /* a2 (Verbesserungsbau 01.10.2026): hat dieses Plugin einen Gateway-Container
  * angelegt (Merkdatei) und weicht der Broker-Zugang, den es jetzt nimmt, von
@@ -104,11 +140,15 @@ if (trim((string) $cfg['saic_user']) === '' || mg_fahrzeug_anzahl($cfg) === 0) {
  * wird nur, wenn sie abweicht - wie beim Speichern im Reiter MQTT. */
 mg_abo_datei($cfg['mqtt_praefix'], true);
 
+/* Gruppe 39 (1.1.28, 2.4): hoechstens einen abgekoppelten Leser starten - nie
+ * darauf warten; dieser Lauf nimmt den letzten Stand aus haus_quellen.json. */
+mg_haus_abnehmer_starten($cfg, __FILE__);
+
 list($ok, $info) = mg_snapshot(3);
 /* Das Lebenszeichen geht bei JEDEM Lauf hinaus, am Aenderungsfilter vorbei
  * und fluechtig (seit 1.1.18, Befund M3) - auch wenn das Einlesen scheitert:
  * es sagt, dass der Takt laeuft, nicht, dass die Werte stimmen. */
-mg_mqtt_lebenszeichen($cfg);
+mg_mqtt_lebenszeichen($cfg, $ok ? 1 : 0);   // Gruppe 39: dazu status/ok (2.1)
 if (!$ok) {
     mg_log_if_changed('verbindung', 'keine Werte vom Broker (' . $info . ')');
     /* Fehlerzweig: je Fahrzeug ok=0, fluechtig; die Zustaende bleiben stehen.
@@ -136,7 +176,10 @@ foreach (mg_fahrzeuge($cfg) as $nr => $fz) {
     // braucht ihn, und ein zweites Einlesen derselben Datei waere eine
     // zweite Stelle, die dasselbe liest.
     list($melden, $vorher) = mg_check_events($st, $nr);
+    // Gruppe 39 (1.1.28, 3.1): die Mitschrift der laufenden Ladung (Preis je Minute), dann der Abschluss.
+    mg_ladung_mitschreiben($st, $nr, $cfg);
     mg_ladung_pruefen($st, $vorher, $nr);
+    $st = mg_state($nr);   // die neue Ladung fuer ladung_kosten/kwh/preis
     mg_mqtt_senden($nr, $st);
 }
 

@@ -4,7 +4,10 @@
  * MG iSmart - Anschluss an den LoxBerry-Healthcheck (seit 1.1.19, Bauliste A2)
  *
  * sbin/healthcheck.pl ruft eine ausfuehrbare Datei bin/healthcheck des
- * Plugins auf - einmal mit "title", einmal mit "check" (Regeln/03). Der
+ * Plugins auf - einmal mit "title", einmal mit "check" (Regeln/03). Beide
+ * Antworten sind JSON: "title" -> {"desc":"MG iSmart"} (wie Smartmeter; bis
+ * 1.1.27 stand hier blanker Text, den healthcheck.pl mit JSON::PP nicht las -
+ * Gruppe 39, V7-e/T3-1). Der
  * Installer legt bin/ rekursiv mit 755 an. Antwort: JSON mit desc, status,
  * result und logfile; Status 3 Fehler, 4 Warnung, 5 in Ordnung, 6 Hinweis.
  *
@@ -31,7 +34,7 @@ ini_set('display_errors', '0');
 
 $mg_was = isset($argv[1]) ? strtolower((string) $argv[1]) : 'check';
 if ($mg_was === 'title') {
-    echo "MG iSmart\n";
+    echo json_encode(array('desc' => 'MG iSmart')) . "\n";
     exit(0);
 }
 

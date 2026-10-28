@@ -94,13 +94,21 @@ TMP="/tmp/$PDIR"
 
 # Das Themenpraefix steht in der Konfiguration; ohne es wird kein Prozess
 # angefasst.
+# Gruppe 39 (1.1.28, V7-b/T2-4): ist mg.json kaputt oder ohne Praefix, gilt die
+# Zweitschrift $BK - erst danach die Vorgabe. Bis 1.1.27 fiel das Skript dann
+# sofort auf "saic" zurueck, und ein Abruf auf einem eigenen Praefix lief weiter.
 PREFIX=""
-if [ -r "$PCONFIG/mg.json" ] && command -v python3 >/dev/null 2>&1; then
-    PREFIX=$(python3 -c 'import json,sys
+if command -v python3 >/dev/null 2>&1; then
+    for MG_Q in "$PCONFIG/mg.json" "$BK"; do
+        [ -r "$MG_Q" ] || continue
+        PREFIX=$(python3 -c 'import json,sys
 try:
-    print(str(json.load(open(sys.argv[1])).get("prefix") or ""))
+    d = json.load(open(sys.argv[1]))
+    print(str(d.get("prefix") or "") if isinstance(d, dict) else "")
 except Exception:
-    print("")' "$PCONFIG/mg.json" 2>/dev/null)
+    print("")' "$MG_Q" 2>/dev/null)
+        [ -n "$PREFIX" ] && break
+    done
 fi
 [ -n "$PREFIX" ] || PREFIX="saic"
 
@@ -242,6 +250,21 @@ if [ "$MG_GW_WEG" = 1 ]; then
     else
         echo "<INFO> PHP, cron.php oder die Konfiguration fehlt - die Themen des Gateways wurden nicht geleert."
     fi
+fi
+
+# Gruppe 39 (1.1.28, 2.2): die Befehlsbruecke anhalten - VOR dem Leeren, solange
+# bin/ noch da ist (Muster Fensterbilanz 0.12.20). stop beendet Dienst und
+# mosquitto_sub; die Optionsdateien mit dem Broker-Kennwort werden ueberschrieben.
+BBSH="$BASE/bin/plugins/$PDIR/befehlsbruecke.sh"
+BBDIR="$PDATA/befehle"
+if [ -f "$BBSH" ]; then
+    timeout -k 5 40 bash "$BBSH" stop
+fi
+if [ -d "$BBDIR/mosquitto" ]; then
+    for MG_F in "$BBDIR/mosquitto/mosquitto_sub" "$BBDIR/mosquitto/mosquitto_pub"; do
+        [ -f "$MG_F" ] && head -c "$(stat -c %s "$MG_F" 2>/dev/null || echo 64)" /dev/zero > "$MG_F" 2>/dev/null
+    done
+    rm -rf "$BBDIR" && echo "<OK> Zugangsdaten der Befehlsbruecke entfernt."
 fi
 
 # Die zurueckbehaltenen MQTT-Themen dieses Plugins abraeumen: bin/cron.php

@@ -160,6 +160,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['vorlage'])) {
     $mg_vzeile = isset($_POST['vzeile']) && is_string($_POST['vzeile']) ? $_POST['vzeile'] : 'mg';
     if ($_POST['vorlage'] === 'vo') {
         list($mg_vname, $mg_vinhalt) = mg_vorlage_vo($mg_vnr);
+    } elseif ($_POST['vorlage'] === 'vq_mqtt') {
+        // Gruppe 39 (1.1.28, 2.2): Vorlage der Befehlsbruecke (bb_vorlage(), CRLF, UDP 11884).
+        list($mg_vname, $mg_vinhalt) = mg_vorlage_befehle();
     } else {
         list($mg_vname, $mg_vinhalt) = mg_vorlage($mg_vnr, $mg_vzeile);
     }
@@ -282,7 +285,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['sendcmd'])
     if (!preg_match('/^[a-z0-9_]{1,32}$/', (string) $_POST['sendcmd'])) {
         $mg_fehler[] = mg_t('MELDUNG.BEFEHL_UNGUELTIG');
     } else {
-        list($mg_ok, $mg_info, $mg_code) = mg_send((string) $_POST['sendcmd'], $mg_swert, $mg_snr);
+        // Gruppe 39 (1.1.28, 2.2): dieselbe Funktion wie Endpunkt und Bruecke, Quelle oberflaeche.
+        list($mg_ok, $mg_info, $mg_code) = mg_befehl_annehmen((string) $_POST['sendcmd'], $mg_swert, $mg_snr, 'oberflaeche');
         if ($mg_ok) {
             $mg_meldungen[] = mg_t('MELDUNG.BEFEHL_GESENDET') . ' ' . $mg_info;
         } else {
@@ -302,6 +306,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['token_neu'])) {
         $mg_fehler[] = mg_t('FEHLER.SPEICHERN');
     }
     $mg_tab = 'tab-loxone';
+}
+
+/* Gruppe 39 (1.1.28, 2.2/2.3, Regeln/07 Abschnitt 7): eigenes Formular "Befehle
+ * ueber MQTT" im Reiter MQTT - die beiden Haken der Befehlsbruecke und der Haken
+ * fuer den HTTP-Endpunkt. Nach dem Speichern wird die Bruecke sofort geschaltet. */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['befehle_save'])) {
+    $mg_neu = mg_config();
+    foreach (array('befehle_mqtt_ein', 'befehle_mqtt_steuern', 'endpunkt_ein') as $mg_h) {
+        $mg_neu[$mg_h] = isset($_POST[$mg_h]) ? 1 : 0;
+    }
+    if (mg_config_save($mg_neu)) {
+        $mg_meldungen[] = mg_t('MELDUNG.GESPEICHERT');
+        $mg_cfg = mg_config();
+        $mg_fmt = mg_formtoken($mg_cfg);
+        list($mg_brc, $mg_bwas, $mg_baus) = mg_bruecke_schalten($mg_cfg);
+        if ($mg_bwas === 'start') {
+            $mg_meldungen[] = $mg_brc === 0 ? mg_t('BEFEHL.M_EIN') : sprintf(mg_t('BEFEHL.M_START_FEHL'), $mg_baus);
+        } elseif ($mg_bwas === 'stop') {
+            $mg_meldungen[] = $mg_brc === 0 ? mg_t('BEFEHL.M_AUS') : sprintf(mg_t('BEFEHL.M_STOP_FEHL'), $mg_baus);
+        } elseif ($mg_brc === 1) {
+            $mg_fehler[] = sprintf(mg_t('BEFEHL.M_START_FEHL'), $mg_baus);
+        }
+    } else {
+        $mg_fehler[] = mg_t('FEHLER.SPEICHERN');
+    }
+    $mg_tab = 'tab-mqtt';
 }
 
 /* Eigener Handler je Reiter mit eigenem Formular.
@@ -562,6 +592,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
     // Ein unbekannter Befehl wird gemeldet (bis 1.1.17 blieb still der alte).
     mg_formfeld('ladeempf_hoch', 'EINST.LADEEMPF_HOCH', $mg_neu, $mg_fehler);
     mg_formfeld('ladeempf_runter', 'EINST.LADEEMPF_RUNTER', $mg_neu, $mg_fehler);
+
+    /* Gruppe 39 (1.1.28): Haus-Themen (2.4), Wettergrenze (3.2), Ladekosten (3.1). */
+    foreach (array('haus_abfahrt_ein', 'vorklima_anwesend_ein', 'vorklima_wetter_ein', 'ankunft_ein',
+                   'haus_strompreis_ein') as $mg_h) {
+        $mg_neu[$mg_h] = isset($_POST[$mg_h]) ? 1 : 0;
+    }
+    mg_formfeld('vorklima_kalt_unter', 'EINST.VORKLIMA_KALT', $mg_neu, $mg_fehler);
+    mg_formfeld('vorklima_heiss_ueber', 'EINST.VORKLIMA_HEISS', $mg_neu, $mg_fehler);
+    if ((int) $mg_neu['vorklima_kalt_unter'] >= (int) $mg_neu['vorklima_heiss_ueber']) {
+        $mg_fehler[] = mg_t('FEHLER.KALT_HEISS');
+        $mg_beanstandet[] = 'vorklima_kalt_unter';
+        $mg_beanstandet[] = 'vorklima_heiss_ueber';
+    }
+    if (isset($_POST['ankunft_quelle']) && is_array($_POST['ankunft_quelle'])) {
+        $mg_aq = array();
+        foreach (array_values($_POST['ankunft_quelle']) as $mg_i => $mg_q) {
+            $mg_q = is_string($mg_q) ? trim($mg_q) : '';
+            $mg_art = (isset($_POST['ankunft_art'][$mg_i]) && is_string($_POST['ankunft_art'][$mg_i]))
+                ? $_POST['ankunft_art'][$mg_i] : 'tag';
+            $mg_v = ($mg_q === '') ? '' : (($mg_art === 'person' ? 'person:' : 'tag:') . $mg_q);
+            if ($mg_v !== '' && mg_ankunft_thema($mg_v) === '') {
+                $mg_fehler[] = sprintf(mg_t('FEHLER.FELD'), mg_t('EINST.ANKUNFT_QUELLE'), mg_t('WERT.QUELLEN'));
+                $mg_beanstandet[] = 'ankunft_quelle';
+            }
+            $mg_aq[] = $mg_v;
+        }
+        while ($mg_aq && end($mg_aq) === '') { array_pop($mg_aq); }
+        $mg_neu['ankunft_quellen'] = $mg_aq;
+    }
 
     if (count($mg_fehler) > $mg_f0) {
         $mg_fehler[] = mg_t('FEHLER.NICHTS_GESPEICHERT');   // Nr. 16 (Einstellungen)
@@ -1053,6 +1112,19 @@ foreach ($mg_befund as $mg_kopf_e) {
 <?php } ?>
 <tr><td><?= mg_e(mg_t('KOPF.FAHRZEUGE')) ?></td>
     <td><?= (int) $mg_anzahl ?></td></tr>
+<?php
+/* Gruppe 39 (1.1.28, 2.1): die Zeile MQTT in der Hausform der Kopfkachel (Regeln/04 :798) - gross der Schalter
+ * DIESES Plugins, klein Autostart und Fassung des Gateways (mg_mqtt_gateway_autostart(), mg_mqtt_gateway_info()). */
+$mg_kopf_gw = mg_mqtt_gateway_info();
+$mg_kopf_auto = mg_mqtt_gateway_autostart();
+$mg_kopf_fass = ($mg_kopf_gw === null || (int) $mg_kopf_gw['fassung'] === 0) ? mg_t('ALLG.NICHT_FESTSTELLBAR')
+    : ('V' . (int) $mg_kopf_gw['fassung']);
+?>
+<tr><td>MQTT</td>
+    <td<?= !empty($mg_cfg['mqtt_ein']) ? ' class="sm-an"' : ' class="sm-aus"' ?>><?= mg_e(mg_t(!empty($mg_cfg['mqtt_ein']) ? 'ALLG.EIN' : 'ALLG.AUS')) ?>
+    <div class="sm-hilfe" style="font-weight:400;"><?= mg_e(sprintf(mg_t('ALLG.KACHEL_MQTT_HILFE'),
+        mg_t($mg_kopf_auto === true ? 'ALLG.EIN' : ($mg_kopf_auto === false ? 'ALLG.AUS' : 'ALLG.NICHT_FESTSTELLBAR')),
+        $mg_kopf_fass)) ?></div></td></tr>
 </table>
 
 <div class="sm-tabs">
@@ -1066,7 +1138,7 @@ foreach ($mg_befund as $mg_kopf_e) {
 	   href="index.php?form=loxone"><?= mg_e(mg_t('REITER.LOXONE')) ?></a>
 	<a data-role="none" class="sm-tab<?= $mg_tab === 'tab-ladungen' ? ' sm-active' : '' ?>" data-ziel="tab-ladungen"
 	   href="index.php?form=ladungen"><?= mg_e(mg_t('REITER.LADUNGEN')) ?></a>
-	<a data-role="none" class="sm-tab<?= $mg_tab === 'tab-test' ? ' sm-active' : '' ?>" data-ziel="tab-test"
+	<a data-role="none" class="sm-tab<?= $mg_tab === 'tab-test' ? ' sm-active' : '' ?>" data-ziel="tab-test" data-neuladen="1"
 	   href="index.php?form=test"><?= mg_e(mg_t('REITER.TEST')) ?></a>
 	<a data-role="none" class="sm-tab<?= $mg_tab === 'tab-log' ? ' sm-active' : '' ?>" data-ziel="tab-log"
 	   href="index.php?form=log"><?= mg_e(mg_t('REITER.LOG')) ?></a>
@@ -1198,12 +1270,66 @@ foreach ($mg_befund as $mg_kopf_e) {
 	<label><?= mg_e(mg_t('EINST.ABFAHRT_FAHRZEUG')) ?></label>
 	<input data-role="none" type="number" name="abfahrt_fahrzeug" min="1" max="9" value="<?= mg_e(mg_eingabe('settings', 'abfahrt_fahrzeug', (int) $mg_cfg['abfahrt_fahrzeug'])) ?>"<?= mg_markierung('settings', 'abfahrt_fahrzeug') ?>>
 </div>
+<?php /* Gruppe 39 (1.1.28): Haus-Themen (2.4) und Wettergrenze (3.2), je ab Werk aus. */ ?>
+<div class="sm-feld">
+	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
+	<input data-role="none" type="checkbox" name="haus_abfahrt_ein" <?= mg_eingabe_an('settings', 'haus_abfahrt_ein', !empty($mg_cfg['haus_abfahrt_ein'])) ? 'checked' : '' ?>>
+	<?= mg_e(mg_t('EINST.HAUS_ABFAHRT')) ?></label>
+	<div class="sm-hilfe"><?php echo mg_t('EINST.HAUS_ABFAHRT_HILFE'); ?></div>
+</div>
+<div class="sm-feld">
+	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
+	<input data-role="none" type="checkbox" name="vorklima_anwesend_ein" <?= mg_eingabe_an('settings', 'vorklima_anwesend_ein', !empty($mg_cfg['vorklima_anwesend_ein'])) ? 'checked' : '' ?>>
+	<?= mg_e(mg_t('EINST.VORKLIMA_ANWESEND')) ?></label>
+	<div class="sm-hilfe"><?php echo mg_t('EINST.VORKLIMA_ANWESEND_HILFE'); ?></div>
+</div>
+<div class="sm-feld">
+	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
+	<input data-role="none" type="checkbox" name="vorklima_wetter_ein" <?= mg_eingabe_an('settings', 'vorklima_wetter_ein', !empty($mg_cfg['vorklima_wetter_ein'])) ? 'checked' : '' ?>>
+	<?= mg_e(mg_t('EINST.VORKLIMA_WETTER')) ?></label>
+	<div class="sm-hilfe"><?php echo mg_t('EINST.VORKLIMA_WETTER_HILFE'); ?></div>
+</div>
+<div class="sm-feld">
+	<label><?= mg_e(mg_t('EINST.VORKLIMA_KALT')) ?></label>
+	<input data-role="none" type="number" name="vorklima_kalt_unter" min="-30" max="45" value="<?= mg_e(mg_eingabe('settings', 'vorklima_kalt_unter', (int) $mg_cfg['vorklima_kalt_unter'])) ?>"<?= mg_markierung('settings', 'vorklima_kalt_unter') ?>>
+</div>
+<div class="sm-feld">
+	<label><?= mg_e(mg_t('EINST.VORKLIMA_HEISS')) ?></label>
+	<input data-role="none" type="number" name="vorklima_heiss_ueber" min="-30" max="45" value="<?= mg_e(mg_eingabe('settings', 'vorklima_heiss_ueber', (int) $mg_cfg['vorklima_heiss_ueber'])) ?>"<?= mg_markierung('settings', 'vorklima_heiss_ueber') ?>>
+</div>
+<div class="sm-feld">
+	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
+	<input data-role="none" type="checkbox" name="ankunft_ein" <?= mg_eingabe_an('settings', 'ankunft_ein', !empty($mg_cfg['ankunft_ein'])) ? 'checked' : '' ?>>
+	<?= mg_e(mg_t('EINST.ANKUNFT')) ?></label>
+	<div class="sm-hilfe"><?php echo mg_t('EINST.ANKUNFT_HILFE'); ?></div>
+</div>
+<div class="sm-breit">
+<table class="sm-tbl">
+<tr><th>#</th><th><?= mg_e(mg_t('EINST.ANKUNFT_ART')) ?></th><th><?= mg_e(mg_t('EINST.ANKUNFT_QUELLE')) ?></th></tr>
+<?php for ($mg_i = 0; $mg_i < max(1, $mg_anzahl); $mg_i++) {
+    $mg_aq = isset($mg_cfg['ankunft_quellen'][$mg_i]) && is_string($mg_cfg['ankunft_quellen'][$mg_i])
+        ? $mg_cfg['ankunft_quellen'][$mg_i] : '';
+    $mg_aqa = (strpos($mg_aq, 'person:') === 0) ? 'person' : 'tag';
+    $mg_aqn = ($mg_aq !== '') ? substr($mg_aq, strpos($mg_aq, ':') + 1) : ''; ?>
+<tr><td><?= mg_e(mg_fahrzeugname($mg_i + 1, $mg_cfg)) ?></td>
+	<td><select data-role="none" name="ankunft_art[]">
+		<option value="tag"<?= $mg_aqa === 'tag' ? ' selected' : '' ?>><?= mg_e(mg_t('EINST.ANKUNFT_TAG')) ?></option>
+		<option value="person"<?= $mg_aqa === 'person' ? ' selected' : '' ?>><?= mg_e(mg_t('EINST.ANKUNFT_PERSON')) ?></option>
+	</select></td>
+	<td><input data-role="none" type="text" name="ankunft_quelle[]" value="<?= mg_e($mg_aqn) ?>" placeholder="auto_mg"<?= mg_markierung('settings', 'ankunft_quelle') ?>></td></tr>
+<?php } ?>
+</table>
+</div>
+<div class="sm-hilfe"><?php echo mg_t('EINST.ANKUNFT_QUELLE_HILFE'); ?></div>
 
 <div class="sm-feld">
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
 	<input data-role="none" type="checkbox" name="ladeempf_ein" <?= mg_eingabe_an('settings', 'ladeempf_ein', !empty($mg_cfg['ladeempf_ein'])) ? 'checked' : '' ?>>
 	<?= mg_e(mg_t('EINST.LADEEMPF_EIN')) ?></label>
 	<div class="sm-hilfe"><?php echo mg_t('EINST.LADEEMPF_HILFE'); ?></div>
+<?php if (!empty($mg_cfg['ladeempf_ein'])) { /* Gruppe 39 (E-E6): zwei Regler arbeiten gegeneinander */ ?>
+	<div class="sm-warnung"><?php echo mg_t('EINST.LADEEMPF_ZWEI_REGLER'); ?></div>
+<?php } ?>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.LADEEMPF_THEMA')) ?></label>
@@ -1281,6 +1407,12 @@ foreach ($mg_befund as $mg_kopf_e) {
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
 	<input data-role="none" type="checkbox" name="ladungen_ein" <?= mg_eingabe_an('settings', 'ladungen_ein', !empty($mg_cfg['ladungen_ein'])) ? 'checked' : '' ?>>
 	<?= mg_e(mg_t('EINST.LADUNGEN_EIN')) ?></label>
+</div>
+<div class="sm-feld">
+	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
+	<input data-role="none" type="checkbox" name="haus_strompreis_ein" <?= mg_eingabe_an('settings', 'haus_strompreis_ein', !empty($mg_cfg['haus_strompreis_ein'])) ? 'checked' : '' ?>>
+	<?= mg_e(mg_t('EINST.HAUS_STROMPREIS')) ?></label>
+	<div class="sm-hilfe"><?php echo mg_t('EINST.HAUS_STROMPREIS_HILFE'); ?></div>
 </div>
 
 <div class="sm-knopfreihe">
@@ -1424,6 +1556,44 @@ for ($mg_i = 0; $mg_i < max(3, $mg_anzahl + 1, $mg_ev !== null ? count($mg_ev) :
 	<button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= mg_e(mg_t('KNOPF.SPEICHERN')) ?></button>
 </div>
 </form>
+
+<?php
+/* Gruppe 39 (1.1.28, 2.2/2.3, E-E1/E-E2): eigenes Formular nach Regeln/07 Abschnitt 7 - die Haken der
+ * Befehlsbruecke und des HTTP-Endpunkts. Darunter die Lage der Bruecke (gemessen wie im Waechter). */
+list($mg_bl_ok, $mg_bl_txt) = mg_bruecke_lage();
+?>
+<h2><?= mg_e(mg_t('BEFEHL.H_FORM')) ?></h2>
+<div class="sm-warnung"><?php echo mg_t('BEFEHL.UDP_WARNUNG'); ?></div>
+<form action="index.php" method="post">
+<input data-role="none" type="hidden" name="activetab" value="tab-mqtt">
+<input data-role="none" type="hidden" name="befehle_save" value="1">
+<div class="sm-feld">
+	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
+	<input data-role="none" type="checkbox" name="befehle_mqtt_ein" value="1" <?= mg_eingabe_an('befehle', 'befehle_mqtt_ein', !empty($mg_cfg['befehle_mqtt_ein'])) ? 'checked' : '' ?>>
+	<?= mg_e(mg_t('BEFEHL.HAKEN_EIN')) ?></label>
+	<div class="sm-hilfe"><?php echo mg_t('BEFEHL.HAKEN_EIN_HILFE'); ?></div>
+</div>
+<div class="sm-feld">
+	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
+	<input data-role="none" type="checkbox" name="befehle_mqtt_steuern" value="1" <?= mg_eingabe_an('befehle', 'befehle_mqtt_steuern', !empty($mg_cfg['befehle_mqtt_steuern'])) ? 'checked' : '' ?>>
+	<?= mg_e(mg_t('BEFEHL.HAKEN_STEUERN')) ?></label>
+	<div class="sm-hilfe"><?php echo mg_t('BEFEHL.HAKEN_STEUERN_HILFE'); ?></div>
+<?php if (!empty($mg_cfg['befehle_mqtt_steuern']) && empty($mg_cfg['gefahr_ein'])) { ?>
+	<div class="sm-hilfe"><b><?= mg_e(mg_t('BEFEHL.GEFAHR_FEHLT')) ?></b></div>
+<?php } ?>
+</div>
+<div class="sm-feld">
+	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
+	<input data-role="none" type="checkbox" name="endpunkt_ein" value="1" <?= mg_eingabe_an('befehle', 'endpunkt_ein', !empty($mg_cfg['endpunkt_ein'])) ? 'checked' : '' ?>>
+	<?= mg_e(mg_t('BEFEHL.ENDPUNKT_EIN')) ?></label>
+	<div class="sm-hilfe"><?php echo mg_t('BEFEHL.ENDPUNKT_HILFE'); ?></div>
+</div>
+<div class="sm-knopfreihe">
+	<button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= mg_e(mg_t('KNOPF.SPEICHERN')) ?></button>
+</div>
+<input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
+</form>
+<div class="<?= $mg_bl_ok === true ? 'sm-hinweis' : ($mg_bl_ok === null ? 'sm-step' : 'sm-warnung') ?>"><b><?= mg_e(mg_t('BEFEHL.T_H')) ?>:</b> <?= mg_e($mg_bl_txt) ?></div>
 
 <h2><?= mg_e(mg_t('MQTTR.H_AUFRAEUMEN')) ?></h2>
 <div class="sm-warnung"><?php echo mg_t('MQTTR.AUFRAEUMEN_WARNUNG'); ?></div>
@@ -1679,30 +1849,82 @@ if ($mg_eok) {
 
 <div class="sm-step"><b><?= mg_e(mg_t('LOX.S1_TITEL')) ?></b><br><?php echo mg_t('LOX.S1'); ?></div>
 
-<div class="sm-step"><b><?= mg_e(mg_t('LOX.S2_TITEL')) ?></b><br><?php echo mg_t('LOX.S2'); ?>
-<table class="sm-tbl">
-<tr><th><?= mg_e(mg_t('LOX.ABO')) ?></th><th><?= mg_e(mg_t('LOX.WANN')) ?></th></tr>
-<tr><td><span class="sm-mono"><?= mg_e(trim((string) $mg_cfg['mqtt_praefix'], '/ ')) ?>/#</span></td><td><?= mg_e(mg_t('LOX.ABO_EIGEN')) ?></td></tr>
-<tr><td><span class="sm-mono"><?= mg_e($mg_cfg['prefix'] ?: 'saic') ?>/#</span></td><td><?= mg_e(mg_t('LOX.ABO_ROH')) ?></td></tr>
-</table>
-<div class="sm-warnung"><?php echo mg_t('LOX.ABO_ROH_WARNUNG'); ?></div>
 <?php
-/* Was hier steht, haengt von der Fassung des MQTT-Gateways ab - siehe
- * mg_mqtt_gateway_info(). Ein pauschaler Satz waere fuer eine der beiden
- * Fassungen falsch. */
+/* Gruppe 39 (1.1.28, 2.1): Gateway V2 ist die Hausform. Namenstabelle und Hakenliste aus EINER Funktion
+ * (mg_v2_haken()) - dieselbe nutzen Selbsttest und Messskript. Fassung 1: das Abo mg/# als Rueckfall; Fassung
+ * nicht lesbar: beides. */
 $mg_gw = mg_mqtt_gateway_info();
 $mg_gwf = ($mg_gw === null) ? 0 : (int) $mg_gw['fassung'];
+$mg_v2 = mg_v2_haken($mg_cfg);
 ?>
-<?php if ($mg_gwf >= 2) { ?>
-<div class="sm-hinweis"><?php echo mg_t('LOX.ABO_V2'); ?></div>
-<?php } elseif ($mg_gwf === 1) { ?>
-<div class="sm-warnung"><?php echo mg_t('LOX.ABO_PFLICHT'); ?></div>
+<div class="sm-step"><b><?= mg_e(mg_t('LOX.V2_TITEL')) ?></b><br>
+<?php if ($mg_gwf !== 1) { ?>
+<div class="sm-hinweis"><?php echo mg_t('LOX.V2_ANHAKEN'); ?></div>
+<div class="sm-breit">
+<table class="sm-tbl">
+<tr><th><?= mg_e(mg_t('LOX.V2_NAME')) ?></th><th><?= mg_e(mg_t('LOX.V2_THEMA')) ?></th><th>Noncached</th><th><?= mg_e(mg_t('LOX.BEDEUTUNG')) ?></th></tr>
+<?php foreach ($mg_v2 as $mg_ve) { ?>
+<tr><td><span class="sm-mono"><?= mg_e($mg_ve['name']) ?></span></td><td><span class="sm-mono"><?= mg_e($mg_ve['thema']) ?></span></td>
+	<td><?= mg_e(mg_t($mg_ve['noncached'] ? 'WORT.JA' : 'WORT.NEIN')) ?></td><td><?= mg_e(mg_t($mg_ve['bez'])) ?></td></tr>
+<?php } ?>
+</table>
+</div>
+<div class="sm-hilfe"><?php echo mg_t('LOX.V2_HILFE'); ?></div>
+<?php } ?>
+<?php if ($mg_gwf <= 1) { ?>
+<div class="sm-warnung"><b><?= mg_e(mg_t('LOX.ABO_V1')) ?></b> <span class="sm-mono"><?= mg_e(trim((string) $mg_cfg['mqtt_praefix'], '/ ')) ?>/#</span><br><?php echo mg_t('LOX.ABO_PFLICHT'); ?></div>
+<?php } ?>
+<div class="sm-warnung"><?php echo mg_t('LOX.ABO_ROH_WARNUNG'); ?></div>
+</div>
+
+<?php
+/* Gruppe 39 (1.1.28, 2.2): Befehle ueber MQTT - Liste aus bb_liste() und die Vorlage aus bb_vorlage() (CRLF,
+ * /dev/udp/<Rechnername>/<Udpinport>). */
+list($mg_bl, $mg_bl_fehl) = mg_bruecke_liste();
+$mg_bp = function_exists('bb_pfade') ? bb_pfade() : array();
+$mg_udp = $mg_bp ? bb_broker($mg_bp)['udpin'] : 11884;
+?>
+<div class="sm-step"><b><?= mg_e(mg_t('LOX.BEFEHLE_TITEL')) ?></b><br>
+<?php if ($mg_bl === null) { ?>
+<div class="sm-warnung"><?= mg_e(sprintf(mg_t('BEFEHL.NICHT_LADBAR'), $mg_bl_fehl)) ?></div>
 <?php } else { ?>
-<div class="sm-warnung"><?php echo mg_t('LOX.ABO_PFLICHT'); ?></div>
-<div class="sm-hilfe"><?php echo mg_t('LOX.ABO_V2'); ?></div>
+<div class="sm-hilfe"><?= mg_e(sprintf(mg_t('BEFEHL.TEXT'), mg_rechnername(), (int) $mg_udp)) ?></div>
+<div class="<?= !empty($mg_cfg['befehle_mqtt_ein']) ? 'sm-hinweis' : 'sm-warnung' ?>"><?= mg_e(mg_t(!empty($mg_cfg['befehle_mqtt_ein']) ? 'BEFEHL.HAKEN_AN' : 'BEFEHL.HAKEN_AUS')) ?></div>
+<div class="sm-warnung"><?php echo mg_t('BEFEHL.UDP_WARNUNG'); ?></div>
+<div class="sm-breit">
+<table class="sm-tbl">
+<tr><th><?= mg_e(mg_t('BEFEHL.SP_TITEL')) ?></th><th><?= mg_e(mg_t('BEFEHL.SP_BEFEHL')) ?></th><th><?= mg_e(mg_t('BEFEHL.SP_WERT')) ?></th><th><?= mg_e(mg_t('BEFEHL.SP_SPERRE')) ?></th></tr>
+<?php foreach ($mg_bl['befehle'] as $mg_bb) {
+    if ($mg_bb['muster']) { continue; }
+    $mg_bw = $mg_bb['art'];
+    if (isset($mg_bb['min'])) { $mg_bw .= ' ' . $mg_bb['min'] . ' &ndash; ' . $mg_bb['max']; }
+    if (isset($mg_bb['werte'])) { $mg_bw .= ': ' . implode(', ', $mg_bb['werte']); } ?>
+<tr><td><?= mg_e($mg_bb['titel']) ?><?= $mg_bb['eingreifend'] ? ' <b>' . mg_e(mg_t('BEFEHL.EINGREIFEND')) . '</b>' : '' ?></td>
+	<td><span class="sm-mono"><?= mg_e(isset($mg_bb['loxone']['ein']) ? $mg_bb['loxone']['ein'] : implode(' | ', $mg_bb['loxone']['je_wert'])) ?></span><?php if (!empty($mg_bb['loxone']['aus'])) { ?><br><span class="sm-mono"><?= mg_e($mg_bb['loxone']['aus']) ?></span><?php } ?></td>
+	<td><?= $mg_bw ?></td><td><?= (int) $mg_bb['sperre_s'] ?> s</td></tr>
+<?php } ?>
+</table>
+</div>
+<div class="sm-hilfe"><?php echo sprintf(mg_t('BEFEHL.FAHRZEUG_N'), mg_e($mg_bl['abo'])); ?></div>
+<div class="sm-hilfe"><?php echo sprintf(mg_t('BEFEHL.QUITTUNG_H'), mg_e($mg_bl['lebenszeichen'])); ?></div>
+<form action="index.php" method="post">
+<input data-role="none" type="hidden" name="activetab" value="tab-loxone">
+<input data-role="none" type="hidden" name="vorlage" value="vq_mqtt">
+<div class="sm-knopfreihe">
+	<button data-role="none" class="sm-btn sm-b-technik" type="submit"><?= mg_e(mg_t('KNOPF.VORLAGE_MQTT')) ?></button>
+</div>
+<input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
+</form>
 <?php } ?>
 </div>
 
+<div class="sm-step"><b><?= mg_e(mg_t('LOX.S6_TITEL')) ?></b><br><?php echo mg_t('LOX.S6'); ?></div>
+
+<div class="sm-warnung"><?php echo mg_t('LOX.WARNUNG_DATEN'); ?></div>
+
+<?php /* Gruppe 39 (1.1.28, 2.3): der bisherige Weg ueber HTTP - eingeklappt, fuer Bestandsanlagen und Drittsoftware. */ ?>
+<details class="sm-step"><summary><b><?= mg_e(mg_t('LOX.HTTP_TITEL')) ?></b></summary>
+<div class="sm-hinweis"><?php echo mg_t('LOX.HTTP_HINWEIS'); ?></div>
 <div class="sm-step"><b><?= mg_e(mg_t('LOX.S3_TITEL')) ?></b><br><?php echo mg_t('LOX.S3'); ?>
 <div class="sm-breit">
 <table class="sm-tbl">
@@ -1773,11 +1995,7 @@ $mg_gwf = ($mg_gw === null) ? 0 : (int) $mg_gw['fassung'];
 <?php } ?>
 </div>
 
-<div class="sm-step"><b><?= mg_e(mg_t('LOX.S6_TITEL')) ?></b><br><?php echo mg_t('LOX.S6'); ?></div>
-
-<div class="sm-warnung"><?php echo mg_t('LOX.WARNUNG_DATEN'); ?></div>
-
-<h2><?= mg_e(mg_t('LOX.H_VORLAGE')) ?></h2>
+<h3><?= mg_e(mg_t('LOX.H_VORLAGE')) ?></h3>
 <div class="sm-hinweis"><?php echo mg_t('LOX.VORLAGE_TEXT'); ?></div>
 <form action="index.php" method="post">
 <input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
@@ -1817,6 +2035,8 @@ $mg_gwf = ($mg_gw === null) ? 0 : (int) $mg_gw['fassung'];
 </div>
 <div class="sm-hilfe"><?php echo mg_t('LOX.TOKEN_NEU_HILFE'); ?></div>
 </form>
+
+</details>
 
 <div class="sm-step"><b><?= mg_e(mg_t('LOX.S7_TITEL')) ?></b><br>
 <?php echo mg_t('LOX.S7'); ?>
@@ -2118,6 +2338,7 @@ foreach (mg_bausteinliste(1) as $mg_bs) { ?>
 </div>
 <h2><?= mg_e(mg_t('LAD.H')) ?></h2>
 <div class="sm-hilfe"><?php echo mg_t('LAD.HILFE'); ?></div>
+<div class="sm-hilfe"><?php echo mg_t('LAD.KOSTEN_HILFE'); ?></div>
 <?php if (!$mg_ladungen) { ?>
 <div class="sm-hinweis"><?= mg_e(mg_t('LAD.LEER')) ?></div>
 <?php } else { ?>
@@ -2125,7 +2346,9 @@ foreach (mg_bausteinliste(1) as $mg_bs) { ?>
 <table class="sm-tbl">
 <tr><th><?= mg_e(mg_t('LAD.BEGINN')) ?></th><th><?= mg_e(mg_t('LAD.ENDE')) ?></th><th><?= mg_e(mg_t('LAD.DAUER')) ?></th>
 	<th><?= mg_e(mg_t('LAD.SOC')) ?></th><th><?= mg_e(mg_t('LAD.KWH')) ?></th><th><?= mg_e(mg_t('LAD.KM')) ?></th>
-	<th><?= mg_e(mg_t('LAD.VERBRAUCH')) ?></th><th><?= mg_e(mg_t('LAD.FZ')) ?></th></tr>
+	<th><?= mg_e(mg_t('LAD.VERBRAUCH')) ?></th><th><?= mg_e(mg_t('LAD.FZ')) ?></th>
+	<th><?= mg_e(mg_t('LAD.KWH_AKKU')) ?></th><th><?= mg_e(mg_t('LAD.NETZ')) ?></th><th><?= mg_e(mg_t('LAD.PREIS')) ?></th>
+	<th><?= mg_e(mg_t('LAD.KOSTEN')) ?></th></tr>
 <?php foreach ($mg_ladungen as $mg_l) {
     $mg_v100 = ($mg_l['strecke'] > 0 && $mg_l['verbrauch'] > 0)
         ? round($mg_l['verbrauch'] / $mg_l['strecke'] * 100, 1) : -1; ?>
@@ -2136,7 +2359,15 @@ foreach (mg_bausteinliste(1) as $mg_bs) { ?>
 	<td><?= mg_z($mg_l['kwh'], ' kWh') ?></td>
 	<td><?= mg_z($mg_l['km'], ' km') ?></td>
 	<td><?= $mg_v100 >= 0 ? mg_e(number_format($mg_v100, 1, ',', '.')) . ' kWh/100&nbsp;km' : '&ndash;' ?></td>
-	<td><?= (int) $mg_l['fz'] ?></td></tr>
+	<td><?= (int) $mg_l['fz'] ?></td>
+	<?php /* Gruppe 39 (1.1.28, 3.1/F6): neue Felder; alte Eintraege ohne sie zeigen einen Strich. */
+	$mg_lk = function ($k) use ($mg_l) { return isset($mg_l[$k]) && is_numeric($mg_l[$k]) ? (float) $mg_l[$k] : -1; }; ?>
+	<td><?= mg_z($mg_lk('kwh_akku'), ' kWh') ?></td>
+	<td><?= mg_z($mg_lk('kwh_netz'), ' kWh') ?></td>
+	<td><?= $mg_lk('preis_ct') >= 0 ? mg_e(number_format($mg_lk('preis_ct'), 1, ',', '.')) . ' ct' : '&ndash;' ?></td>
+	<td><?= $mg_lk('kosten_eur') >= 0 ? mg_e(number_format($mg_lk('kosten_eur'), 2, ',', '.')) . ' &euro;'
+	    : (isset($mg_l['kosten_grund']) && $mg_l['kosten_grund'] !== 'ok'
+	       ? '<span class="sm-hilfe">' . mg_e(mg_t('LAD.GRUND_' . strtoupper((string) $mg_l['kosten_grund']))) . '</span>' : '&ndash;') ?></td></tr>
 <?php } ?>
 </table>
 </div>
@@ -2186,6 +2417,20 @@ if ($mg_ampel_rot) { ?>
 <?php } ?>
 </table>
 <div class="sm-hilfe"><?php echo mg_t('TEST.STRICH_HILFE'); ?></div>
+<?php
+/* Gruppe 39 (1.1.28, 2.2): die Einrichtungspruefung der Befehlsbruecke (befehlsbruecke.php --pruefen) - nur im
+ * offenen Reiter Test, nur Zeilen mit [OK]/[FEHL]/[INFO]. */
+if ($mg_tab === 'tab-test') {
+    list($mg_bprc, $mg_bpz) = mg_bruecke_pruefen();
+    $mg_bpz = array_values(array_filter($mg_bpz, function ($z) { return preg_match('/^\[(OK|FEHL|INFO)\]/', $z) === 1; }));
+    $mg_bpf = count(array_filter($mg_bpz, function ($z) { return strpos($z, '[FEHL]') === 0; })); ?>
+<h3><?= mg_e(mg_t('TEST.H_BRUECKE')) ?></h3>
+<div class="<?= ($mg_bprc === 0 && $mg_bpf === 0) ? 'sm-hinweis' : 'sm-warnung' ?>"><?= mg_e(sprintf(mg_t('TEST.BRUECKE_PRUEFEN'),
+    count($mg_bpz), $mg_bpf)) ?></div>
+<?php if ($mg_bpf > 0) { ?>
+<div class="sm-log"><?= mg_e(implode("\n", array_slice($mg_bpz, 0, 80))) ?></div>
+<?php } ?>
+<?php } ?>
 
 <h3><?= mg_e(mg_t('TEST.H_BEFUND')) ?></h3>
 <div class="sm-hilfe"><?php echo mg_t('TEST.BEFUND_HILFE'); ?></div>
@@ -2310,6 +2555,14 @@ if ($mg_ampel_rot) { ?>
 <div class="sm-hilfe"><span class="sm-mono"><?= mg_e($mg_p['cronerr']) ?></span></div>
 <div class="sm-log"><?= mg_e(implode("\n", $mg_cronerr)) ?></div>
 <?php } ?>
+<?php /* Gruppe 39 (1.1.28, 2.2): das Startprotokoll der Befehlsbruecke (befehlsbruecke.sh, log/plugins/<ordner>/). */
+$mg_bblog_datei = dirname($mg_logfile) . '/befehle_start.log';
+$mg_bblog = mg_log_tail($mg_bblog_datei, 40);
+if ($mg_bblog) { ?>
+<h3><?= mg_e(mg_t('LOG.BEFEHLE_START')) ?></h3>
+<div class="sm-hilfe"><span class="sm-mono"><?= mg_e($mg_bblog_datei) ?></span></div>
+<div class="sm-log"><?= mg_e(implode("\n", $mg_bblog)) ?></div>
+<?php } ?>
 <form action="index.php" method="post">
 <input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
 <input data-role="none" type="hidden" name="activetab" value="tab-log">
@@ -2333,7 +2586,11 @@ if ($mg_ampel_rot) { ?>
 		if (history.replaceState) { history.replaceState(null, '', 'index.php?form=' + id.replace('tab-', '')); }
 	}
 	reiter.forEach(function (r) {
-		r.addEventListener('click', function (e) { e.preventDefault(); zeige(r.dataset.ziel); });
+		r.addEventListener('click', function (e) {
+			// Gruppe 39 (1.1.28, V4, Regeln/04 :189): nur der Reiter Test laedt neu - seine Pruefungen messen beim Aufruf.
+			if (r.getAttribute('data-neuladen') === '1') { return; }
+			e.preventDefault(); zeige(r.dataset.ziel);
+		});
 	});
 	// Der Server hat sm-active bereits gesetzt; dieser Aufruf richtet nur die
 	// versteckten activetab-Felder aus und ist ansonsten wirkungslos.

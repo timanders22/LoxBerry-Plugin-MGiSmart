@@ -14,6 +14,10 @@
 
 ARGV3=$3
 PFOLDER="${ARGV3:-mgismart}"
+# Gruppe 39 (1.1.28, V7-a/T1-3): dieselbe Pruefung wie preinstall.sh.
+case "$PFOLDER" in
+    ''|.|..|*/*) echo "<FAIL> Unbrauchbarer Ordnername '$PFOLDER' - nichts angelegt."; exit 2 ;;
+esac
 
 # DIE WURZEL - gelesen, nicht angenommen (Regeln/06). Bis 1.1.16 stand hier
 # BASE="${5:-$LBHOMEDIR}", allenfalls mit "-d": ein fremder Baum ohne
@@ -283,6 +287,50 @@ if [ -n "$ARGV1" ] && [ -f "$LA" ]; then
     fi
 fi
 
+# Gruppe 39 (1.1.28, 3.1): die Mitschrift einer laufenden Ladung zurueck - nur, wenn
+# der Minutentakt in der Luecke keine neue begonnen hat.
+if [ -n "$ARGV1" ]; then
+    for MG_LL in "$ARGV1"/ladung_laufend[0-9].json; do
+        [ -f "$MG_LL" ] || continue
+        MG_LZ="$DDIR/$(basename "$MG_LL")"
+        if [ -e "$MG_LZ" ]; then
+            echo "<INFO> $(basename "$MG_LL"): im Datenordner liegt schon eine neue Mitschrift - die alte bleibt in der Ablage."
+        elif mg_kopieren "$MG_LL" "$MG_LZ" 644; then
+            echo "<OK> Mitschrift der laufenden Ladung uebernommen ($(basename "$MG_LL"))."
+        else
+            echo "<WARNING> Die Mitschrift $(basename "$MG_LL") liess sich nicht uebernehmen."
+        fi
+    done
+fi
+
+# Gruppe 39 (1.1.28, 2.3/E-E1): endpunkt_ein. Eine Neuinstallation hat ihn aus
+# (Vorgabe 0); der BESTAND behaelt seinen offenen Endpunkt - fehlt der Schluessel
+# in mg.json oder in der Zweitschrift, wird er auf 1 gesetzt. Ein vorhandener Wert
+# bleibt, wie er ist. Atomar, Rechte 0600 bleiben.
+mg_endpunkt_bestand() {   # $1 Datei
+    [ -f "$1" ] && hat_inhalt "$1" || return 0
+    command -v php >/dev/null 2>&1 || { echo "<WARNING> php fehlt - endpunkt_ein in $(basename "$1") nicht gesetzt."; return 0; }
+    php -r '
+        $f = $argv[1];
+        $d = json_decode((string) @file_get_contents($f), true);
+        if (!is_array($d)) { exit(1); }
+        if (array_key_exists("endpunkt_ein", $d)) { exit(3); }
+        $d["endpunkt_ein"] = 1;
+        $j = json_encode($d, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        $t = $f . ".neu." . getmypid();
+        if ($j === false || @file_put_contents($t, "") === false) { exit(1); }
+        @chmod($t, 0600);
+        if (@file_put_contents($t, $j) !== strlen($j) || !@rename($t, $f)) { @unlink($t); exit(1); }
+        exit(0);' -- "$1" 2>/dev/null
+    case $? in
+        0) echo "<OK> endpunkt_ein = 1 gesetzt ($(basename "$1"), Bestand: der HTTP-Endpunkt bleibt offen)." ;;
+        3) ;;
+        *) echo "<WARNING> endpunkt_ein liess sich in $(basename "$1") nicht setzen." ;;
+    esac
+}
+mg_endpunkt_bestand "$CF"
+mg_endpunkt_bestand "$BASE/config/plugins/$PFOLDER.backup.json"
+
 # Altlast aus 1.0.2: cron.php lag im UNANGEMELDETEN Webordner und war damit
 # fuer jeden erreichbar, der die LoxBerry-Oberflaeche im Netz sieht. Jeder
 # Aufruf startet mosquitto_sub mit -W 3, haelt also drei Sekunden lang einen
@@ -323,6 +371,20 @@ if [ $MG_VORHER = 0 ] && [ $MG_GESICHERT = 1 ]; then
         echo "<WARNING> Zugangsdaten des Brokers, der iSMART-Benutzername und die"
         echo "<WARNING> Fahrzeug-Kennung (VIN) hinein."
     fi
+fi
+
+# Gruppe 39 (1.1.28, 2.2): die Befehlsbruecke starten - als Letztes, nach dem
+# Zurueckholen der Konfiguration. Die Marke hat postinstall.sh schon abgeraeumt
+# (trap); befehlsbruecke.sh startet nur mit dem Haken "Befehle ueber MQTT
+# annehmen" (ab Werk aus, auch beim Update) und misst danach, ob sie laeuft.
+BBSH="$BASE/bin/plugins/$PFOLDER/befehlsbruecke.sh"
+if [ -f "$BBSH" ]; then
+    BB_AUS=$(timeout 40 bash "$BBSH" start 2>&1 | head -n 1)
+    case "$BB_AUS" in
+        *gestartet*|*laeuft*) echo "<OK> Befehlsbruecke: $BB_AUS" ;;
+        "Haken aus - kein Start.") echo "<INFO> Befehlsbruecke: aus (Reiter MQTT, Haken 'Befehle ueber MQTT annehmen')." ;;
+        *) echo "<WARNING> Befehlsbruecke: $BB_AUS - der Minutentakt versucht es erneut." ;;
+    esac
 fi
 
 exit 0

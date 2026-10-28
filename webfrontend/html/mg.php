@@ -117,8 +117,21 @@ if (mg_gesetzt('selftest')) {
     exit;
 }
 
-/* ---------------- Welches Fahrzeug ---------------- */
+/* ---------------- Gruppe 39 (1.1.28, 2.3/E-E1): endpunkt_ein ----------------
+ *
+ * Ist der Haken "HTTP-Endpunkt offen" aus, sperrt das den GANZEN Endpunkt
+ * ausser ?selftest (oben): Statuszeile, ?json, ?cmd, ?refresh, ?ptest, ?debug,
+ * ?ladungen. Eine neue Anlage braucht keinen dieser Wege mehr (Gateway V2 und
+ * Befehlsbruecke); ?cmd waere ein zweiter schreibender Weg neben MQTT
+ * (Regeln/07 :303, fail closed), ?debug zeigt Mail, VIN und Standort.
+ * Neuinstallation: aus; Bestand: postupgrade.sh setzt 1, wenn der Schluessel
+ * fehlt. */
 $mg_cfg = mg_config();
+if (empty($mg_cfg['endpunkt_ein'])) {
+    mg_abweisen(403, 'MG;OK=0;ERR=ENDPUNKT_AUS');
+}
+
+/* ---------------- Welches Fahrzeug ---------------- */
 $mg_anzahl = mg_fahrzeug_anzahl($mg_cfg);
 $mg_nr = (int) mg_get('fahrzeug', '1');
 if ($mg_nr < 1) {
@@ -181,13 +194,16 @@ if (mg_gesetzt('cmd')) {
             $mg_wert[$mg_z] = mg_get($mg_z);
         }
     }
-    list($mg_ok, $mg_info, $mg_code) = mg_send($mg_befehl, $mg_wert, $mg_nr);
+    // Gruppe 39 (1.1.28, 2.2/2.3): dieselbe Funktion wie die Befehlsbruecke, Quelle http (mit Wartezeit).
+    list($mg_ok, $mg_info, $mg_code) = mg_befehl_annehmen($mg_befehl, $mg_wert, $mg_nr, 'http');
     $mg_ergebnis = 'CMD;OK=' . (int) $mg_ok . ';CODE=' . $mg_code
                  . ';INFO=' . str_replace(array(';', "\n", "\r"), ' ', $mg_info);
     /* X-7 (Entscheidung Nr. 19, seit 1.1.21): derselbe Sollwert innerhalb von
      * 60 s - nichts gesendet, HTTP 200 mit UNVERAENDERT=1 (wie EVCC). Seit
      * 1.1.22 ebenso derselbe Zustand (Laden, Klima, Heizungen an/aus). */
-    if ($mg_code === 'UNVERAENDERT') {
+    /* Gruppe 39 (1.1.28, V1): auch SCHON_SO heisst "nichts gesendet" - seit
+     * 1.1.28 nur bei frischem Fahrzeugstand (mg_schon_so_erlaubt()). */
+    if ($mg_code === 'UNVERAENDERT' || $mg_code === 'SCHON_SO') {
         $mg_ergebnis .= ';UNVERAENDERT=1';
     }
     if (!$mg_ok && !headers_sent()) {
@@ -264,7 +280,13 @@ if (mg_gesetzt('json')) {
     exit;
 }
 
-/* ---------------- Die Statuszeile ---------------- */
+/* ---------------- Die Statuszeile ----------------
+ * Gruppe 39 (1.1.28, V7-c/T2-5): die Zeile antwortet auch bei OK=0 mit HTTP
+ * 200. Das ist die begruendete Ausnahme von Regeln/07 Abschnitt 6 ("Faellt die
+ * Quelle ganz aus, liefert der Endpunkt HTTP 503 ohne Daten"): OK ist hier der
+ * Gesundheitsmerker der Zeile - Loxone liest ihn als Wert (Baustein-Liste,
+ * Ausfallerkennung mit ZAEHLER), und eine 503 liesse die Eingaenge auf dem
+ * letzten Stand stehen, statt OK=0 zu zeigen. */
 mg_kopf();
 if ($mg_ergebnis !== '') {
     echo $mg_ergebnis . "\n";

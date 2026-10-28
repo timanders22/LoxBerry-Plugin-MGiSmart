@@ -6,3 +6,6 @@
 # Fehlt das Paket, meldet die Oberflaeche das deutlich - nachinstallieren mit
 # "sudo apt-get update && sudo apt-get install -y mosquitto-clients".
 mosquitto-clients
+# Gruppe 39 (1.1.28, V7-d/T2-6): mbstring fuer mb_substr (Regeln/03 :800); ohne es
+# kuerzt das Plugin byteweise (mg_kuerzen()).
+php-mbstring

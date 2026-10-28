@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.27
+Version 1.1.28
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -8,6 +8,37 @@ Klima, Standort — und schickt Befehle zurück: Laden stoppen, Ziel-Ladestand,
 Ladestrombegrenzung, Standklima, „Auto finden".
 
 Kompatibel mit LoxBerry 3.x und **LoxBerry 4** (reines PHP, PHP 7.4 und 8.x).
+
+## Neu in 1.1.28
+
+Erste Fassung dieser Linie auf dem **MQTT-Gateway V2** und der gemeinsamen **Befehlsbrücke 1.0.2**.
+
+* **Wer die HTTP-Vorlagen nutzt, ändert nichts.** Beim Update bleibt der Endpunkt `mg.php` offen (`endpunkt_ein` = 1),
+  Adressen und Merkwort bleiben gültig. Eine Neuinstallation hat ihn bis auf `?selftest` gesperrt (Reiter MQTT).
+* **Wer auf Gateway V2 umsteigt**, hakt die Datenpunkte aus der Tabelle im Reiter „Einbindung in Loxone“ an
+  (Namen wie `mg_1_soc`; Noncached für `mg_1_ok`, `mg_status_zaehler`, `mg_status_ok`, `mg_status_befehle`,
+  `mg_gateway_anmeldung`) und importiert die **Vorlage Befehle über MQTT** (Ausgang „MG MQTT-Befehle“,
+  `/dev/udp/<loxberry>/11884`). Der Reiter Test zählt nach, ob alle Haken stehen. Neu ist `mg/status/ok`.
+* **Befehle über MQTT** (`mg/befehl/<name>`, Fahrzeug 2–9 `mg/befehl/<n>/<name>`, Quittung unter `…/quittung`):
+  Haken „Befehle über MQTT annehmen“, ab Werk aus. Eingreifende Befehle – Auto finden, Ver- und **Entriegeln**,
+  **Kofferraum öffnen** – nur mit dem zweiten Haken „Eingreifende Befehle über MQTT annehmen“ **und**
+  „Eingreifende Befehle erlauben“. **Der UDP-Eingang 11884 ist im Heimnetz ohne Anmeldung erreichbar**; Schutz
+  sind allein diese Haken. Dazu `mg/befehl/aussentemp` (Außentemperatur aus Loxone, gilt 30 min).
+* **Haus-Themen** (je eigener Haken, ab Werk aus): `haus/abfahrt` für die Vorklimatisierung (statt `termin.php`, das
+  nur noch Rückfall ist und mit 1.1.29 entfällt), `haus/anwesenheit` (Vorklimatisierung nur, wenn jemand zu Hause
+  ist; bei Ankunft einmal abfragen, höchstens alle 30 min), `haus/strompreis` (Ladekosten). Ein abgekoppelter Leser
+  wartet bis zu 65 s; schweigt eine Quelle 120 s, gilt das bisherige Verhalten.
+* **Ladekosten je Ladung** zu Hause: Netzenergie, Ø Preis, Kosten (Endpreis ohne Grundpreis, nie geschätzt), auch als
+  `mg/<n>/ladung_kosten|ladung_kwh|ladung_preis` und HTTP-Felder `LKOSTEN`, `LKWH`, `LPREIS` (hinten in der Zeile laden).
+* **Vorklimatisierung**: höchstens drei Versuche je Abfahrt (Senden, vor dem zweiten Senden einmal Abfragen, Senden),
+  danach eine LoxBerry-Benachrichtigung; wahlweise nur bei Kälte oder Hitze. Neues Feld `VORKLIMA` / `mg/<n>/vorklima`.
+* **Behoben:** „Zielzustand liegt schon an“ gilt nur noch bei einem Fahrzeugstand bis 10 min (sonst wird gesendet);
+  mehrzeilige Ladepläne und Fehlermeldungen des Gateways werden ganz gelesen und lesbar gezeigt; das Ergebnis eines
+  Befehls kommt aus `…/result` des Gateways; der Reiter Test lädt neu; nur ein Minutenlauf zugleich (`cron.lock`);
+  ein unbekannter Schalter von `cron.php` endet mit Rückgabe 2; `bin/healthcheck title` antwortet als JSON;
+  `php-mbstring` in `dpkg/apt`.
+* **Die kWh-Spalte im Reiter Ladungen heißt jetzt „Akku am Ende“** – sie war immer der Akkuinhalt am Ladeende.
+* Die freie **Ladeempfehlung** bleibt ab Werk aus; regelt die Wallbox schon nach Überschuss, bitte aus lassen.
 
 ## Neu in 1.1.27
 
@@ -467,6 +498,19 @@ Beim nächsten vollständigen Durchgang stieg die Flanke ein zweites Mal.
 * **`?debug=1` verlangt jetzt das Merkwort.** Dort stehen iSMART-Benutzername,
   Fahrzeug-Kennung und die Standortthemen; „lesende Abrufe verraten nichts"
   stimmte dafür nicht.
+
+## Ladungen
+
+Eine Ladung wird an der Flanke von *lädt* nach *lädt nicht* erkannt und in `data/plugins/<ordner>/ladungen.json`
+geschrieben (Reiter Ladungen, `mg.php?ladungen=1`).
+
+| Spalte | Herkunft |
+|---|---|
+| Akku am Ende (kWh) | `drivetrain/lastChargeEndingPower` – der **Akkuinhalt am Ende** der Ladung, nicht die geladene Menge (Schlüssel `kwh`, Bestand) |
+| In den Akku (kWh) | Akkuinhalt Ende minus Beginn (`kwh_akku`, −1 wenn einer fehlt) |
+| Netz (kWh), Ø Preis, Kosten (€) | nur zu Hause mit „Strompreis vom Spotpreis-Plugin für die Ladekosten“: je Minute Leistung und Endpreis aus `haus/strompreis`; Endpreis ohne Grundpreis; unter 90 % Preisabdeckung −1 (`kosten_grund`) |
+
+Ältere Einträge ohne die neuen Felder zeigen einen Strich.
 
 ## Wie es funktioniert
 

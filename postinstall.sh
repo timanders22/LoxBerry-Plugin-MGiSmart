@@ -11,6 +11,10 @@
 
 ARGV3=$3
 PFOLDER="${ARGV3:-mgismart}"
+# Gruppe 39 (1.1.28, V7-a/T1-3): dieselbe Pruefung wie preinstall.sh.
+case "$PFOLDER" in
+    ''|.|..|*/*) echo "<FAIL> Unbrauchbarer Ordnername '$PFOLDER' - nichts angelegt."; exit 2 ;;
+esac
 
 # DIE WURZEL - gelesen, nicht angenommen (Regeln/06). Bis 1.1.16 stand hier
 # BASE="${5:-$LBHOMEDIR}", allenfalls mit "-d": ein fremder Baum ohne
