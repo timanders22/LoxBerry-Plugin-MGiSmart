@@ -125,7 +125,10 @@ mg_ablegen "$BASE/log/plugins/$PFOLDER/mg.log" mg.log
 mg_ablegen "$BASE/data/plugins/$PFOLDER/ladungen.json" ladungen.json
 # Gruppe 39 (1.1.28, 3.1): die Mitschrift einer laufenden Ladung (Preis je Minute) -
 # der Installer leert den Datenordner; ohne sie gaebe es nach dem Update keine Kosten.
-for MG_LL in "$BASE/data/plugins/$PFOLDER"/ladung_laufend[0-9].json; do
+# 1.1.30 (Fremdpruefung T1-4): auch Fahrzeug 10 bis 99 (bis 1.1.29 nur [0-9]); nicht [0-9]* - das traefe
+# auch ladung_laufend<n>_letzte.json.
+for MG_LL in "$BASE/data/plugins/$PFOLDER"/ladung_laufend[0-9].json \
+             "$BASE/data/plugins/$PFOLDER"/ladung_laufend[0-9][0-9].json; do
     [ -f "$MG_LL" ] && mg_ablegen "$MG_LL" "$(basename "$MG_LL")"
 done
 if [ "$MG_FEHL" != 0 ]; then

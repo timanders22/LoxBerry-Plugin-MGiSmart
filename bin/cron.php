@@ -110,6 +110,19 @@ if (in_array('--haus-lesen', array_slice(isset($argv) ? $argv : array(), 1), tru
  * ZAEHLER) und speist status/zaehler; steht der Takt, bleibt er stehen. */
 mg_laufzaehler_weiter();
 
+/* 1.1.30 (Fremdpruefung T3-1): waehrend eines Updates (Upgrade-Marke frisch, mg_upgrade_marke_liegt()) nur der
+ * Zaehler und das Lebenszeichen <mqtt_praefix>/status/ts|zaehler - beides laeuft weiter. Sonst nichts: keine
+ * Selbstheilung der mg.json (nur lesen, mg_nur_lesen), kein Haus-Leser, keine Momentaufnahme, keine Mitschrift,
+ * keine Automatik. Bis 1.1.29 lief der volle Takt in der Luecke zwischen preupgrade.sh und postinstall.sh
+ * (Regeln/06, Einspeisebremse 0.9.19): er begann im geleerten Datenordner eine neue Mitschrift der laufenden
+ * Ladung, und postupgrade.sh liess dann die gerettete liegen. status/ok geht nicht hinaus - eingelesen wird nichts. */
+if (mg_upgrade_marke_liegt()) {
+    mg_nur_lesen(true);
+    mg_mqtt_lebenszeichen(mg_config());
+    mg_log('Minutenlauf: Aktualisierung laeuft (Upgrade-Marke) - nur Zaehler und Lebenszeichen.');
+    exit(0);
+}
+
 /* Gruppe 39 (1.1.28, 2.2): der Waechter der Befehlsbruecke - vorn im Lauf, vor
  * "eingerichtet?" (wie ACTi E-E5). Er startet die Bruecke nur mit dem Haken
  * "Befehle ueber MQTT annehmen", haelt sie sonst an, startet nie waehrend eines

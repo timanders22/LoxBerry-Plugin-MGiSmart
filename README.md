@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.29
+Version 1.1.30
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -8,6 +8,42 @@ Klima, Standort — und schickt Befehle zurück: Laden stoppen, Ziel-Ladestand,
 Ladestrombegrenzung, Standklima, „Auto finden".
 
 Kompatibel mit LoxBerry 3.x und **LoxBerry 4** (reines PHP, PHP 7.4 und 8.x).
+
+## Neu in 1.1.30
+
+Ein zweiter Programmierer hat das Plugin durchgesehen. Jede seiner Aussagen ist am Code nachgemessen; die
+zutreffenden sind behoben:
+
+* **Die Vorklimatisierung prüft jetzt nach.** Bisher galt „Befehl abgesetzt, Ergebnis unbekannt“ schon als
+  Erfolg – der vorgesehene zweite Versuch kam deshalb fast nie. Jetzt ist eine Abfahrt erst erledigt, wenn das
+  Gateway den Befehl bestätigt oder der frische Fahrzeugstand (höchstens 10 Minuten alt) das Klima an zeigt.
+  Sonst fragt das Plugin nach zwei Minuten einmal ab und schaltet nur dann noch ein zweites Mal ein. Es bleibt
+  bei höchstens zwei „Klima ein“ je Abfahrt.
+* **Während eines Updates ruht der Minutenlauf.** Solange die Update-Marke liegt (höchstens eine Stunde), zählt
+  er nur den Zähler weiter und sendet das Lebenszeichen `mg/status/ts` und `mg/status/zaehler`. Er heilt keine
+  Konfiguration, startet keinen Leser der Haus-Themen und schickt nichts ans Auto. Damit geht die Mitschrift
+  einer laufenden Ladung (Ladekosten) bei einem Update nicht mehr verloren.
+* **Reiter Einstellungen, Ankunft:** Nach einer Beanstandung stehen Art und Quelle wieder so da, wie sie
+  eingetippt waren, und rot umrandet ist nur die fehlerhafte Zeile – bisher waren es alle.
+* **Neues Kennwort und „löschen“ zugleich** (Broker-Kennwort im Reiter MQTT, iSMART-Kennwort im Reiter Gateway)
+  wird abgewiesen statt still gelöscht. Bitte nur eines von beiden.
+* **`mg.php?refresh=1`** antwortet bei gescheitertem Einlesen mit HTTP 503 (wie `?cmd` mit 409/503). Die
+  gewöhnliche Statuszeile bleibt bei HTTP 200 mit `OK=0`.
+* **Update:** Der HTTP-Endpunkt bleibt nur bei einer *eingerichteten* Anlage offen; eine nie eingerichtete wird
+  wie eine Neuinstallation behandelt (Endpunkt aus, Haken im Reiter MQTT). Fehlt die Zweitschrift neben dem
+  Konfigordner, legt das Update sie an. Die Mitschrift laufender Ladungen wird auch für Fahrzeug 10 und mehr
+  gesichert.
+* **Deinstallation:** Sie wartet einen laufenden Minutenlauf ab (höchstens 30 s) und beendet auch den Leser der
+  Haus-Themen. Eigene Abrufe erkennt sie an Benutzer und Zugangsordner des Plugins, nicht mehr am Thema.
+* **Protokoll:** Zeilen der Befehlsbrücke trugen „Befehlsbruecke:“ doppelt, jetzt einmal.
+* Kleinigkeiten: `bin/befehle_zuordnung.php` lädt die Bibliothek wie `bin/cron.php` nur aus der eigenen Lage;
+  `bin/mg_notify.php` erkennt die LoxBerry-Wurzel wie die Bibliothek (mit `general.json`); die Hilfe zur
+  Vorklimatisierung nennt kein überholtes „entfällt mit 1.1.29“ mehr.
+
+Geprüft und **nicht** geändert, weil es so richtig ist: der Kachelname der Befehlsbrücke ist absichtlich ein
+Sprachschlüssel (`BEFEHL.K_…`, so in allen Linien); `mg/status/…` liegt nie behalten im Broker und gilt deshalb
+nie als verwaist; die Zwischenstände der Automatik (`vorher*.json`, `automatik.json`) liegen unter `/tmp` und
+überstehen ein Update ohnehin.
 
 ## Neu in 1.1.29
 

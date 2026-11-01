@@ -3246,7 +3246,18 @@ function mg_automatik()
             $merk['vorklima'][(string) $nr] = $m;
             $aktion = 'nichts';
         } else {
-            list($aktion, $m) = mg_vorklima_schritt($m, $in, $jetzt, $vorlauf, null);
+            /* 1.1.30 (Fremdpruefung T2-1): nach einem Senden ohne Bestaetigung fragt jeder Lauf den Fahrzeugstand.
+             * Zeigt der FRISCHE Stand (hoechstens MG_SCHON_SO_FRISCH min) das Klima an, ist die Abfahrt erledigt -
+             * ohne weiteres Abfragen oder Senden. */
+            $bestaetigt = null;
+            if (!empty($m['versuche']) && empty($m['erfolg']) && empty($m['aufgegeben'])) {
+                $st_vk = mg_state($nr);
+                if (isset($st_vk['KLIMA']) && (int) $st_vk['KLIMA'] === 1 && mg_schon_so_erlaubt(mg_fzalter($nr))) {
+                    $bestaetigt = true;
+                    mg_log('Automatik Vorklimatisierung: Fahrzeug ' . $nr . ' - Klima laut frischem Fahrzeugstand an, erledigt.');
+                }
+            }
+            list($aktion, $m) = mg_vorklima_schritt($m, $in, $jetzt, $vorlauf, $bestaetigt);
         }
         if ($aktion === 'senden' && (int) $m['versuche'] === 1) {
             /* 3.2: einmal je Abfahrt - mild heisst erledigt, ohne Befehl und
@@ -3267,7 +3278,13 @@ function mg_automatik()
              * haelt klima_an nicht auf. */
             list($o1, $m1, $c1) = mg_befehl_annehmen('klimatemp', array('temp' => (string) (int) $cfg['abfahrt_temp']), $nr, 'automatik');
             list($o2, $m2, $c2) = mg_befehl_annehmen('klima_an', null, $nr, 'automatik');
-            if ((int) $o2 > 0) { $m['erfolg'] = 1; }
+            /* 1.1.30 (Fremdpruefung T2-1): erledigt nur bei ok = 1 (Gateway bestaetigt, Wirkung gesehen oder der
+             * Zustand lag bei frischem Stand schon an). Bis 1.1.29 galt auch ABGESETZT (ok = 2, Ergebnis in der
+             * Wartezeit unbekannt) als Erfolg - der zweite Versuch (Abfragen, dann Senden) kam so kaum je. Jetzt
+             * entscheidet der naechste Lauf am Fahrzeugstand (oben). Nur beim letzten Versuch bleibt ABGESETZT
+             * "erledigt": ungewiss ist nicht gescheitert, und eine Fehlmeldung waere hier falsch. Hoechstens zwei
+             * "Klima ein" je Abfahrt wie bisher (Senden - Abfragen - Senden). */
+            if ((int) $o2 === 1 || ((int) $o2 === 2 && (int) $m['versuche'] >= MG_VORKLIMA_VERSUCHE)) { $m['erfolg'] = 1; }
             $meldungen[] = 'Vorklimatisierung (' . $in . ' min bis Abfahrt, Versuch ' . (int) $m['versuche'] . '): ' . $m2;
             mg_log('Automatik Vorklimatisierung: Fahrzeug ' . $nr . ', ' . $in . ' min bis Abfahrt (' . $quelle
                 . '), Versuch ' . (int) $m['versuche'] . ' von ' . MG_VORKLIMA_VERSUCHE . ', Zieltemperatur '
@@ -4178,6 +4195,30 @@ function mg_laufzaehler_datei()
 {
     $p = mg_paths();
     return $p['tmp'] . '/lebenszeichen_zaehler';
+}
+
+/**
+ * 1.1.30 (Fremdpruefung T3-1): liegt die Upgrade-Marke <datadir>.upgrade_laeuft (preupgrade.sh, Unixzeit) frisch?
+ * Gilt bis 3600 s; unlesbar oder aus der Zukunft gilt sie nicht (Regeln/06, wie bb_marke_liegt() der
+ * Befehlsbruecke) - eine abgebrochene Installation legt den Takt hoechstens eine Stunde still.
+ */
+function mg_upgrade_marke_liegt($jetzt = null)
+{
+    $p = mg_paths();
+    if ($p['lbhome'] === '') {
+        return false;
+    }
+    $f = $p['datadir'] . '.upgrade_laeuft';
+    if (!is_file($f)) {
+        return false;
+    }
+    $jetzt = ($jetzt === null) ? time() : (int) $jetzt;
+    $t = trim((string) @file_get_contents($f));
+    if (!preg_match('/^[0-9]{1,12}\z/', $t)) {
+        return false;
+    }
+    $t = (int) $t;
+    return $t <= $jetzt && $jetzt - $t < 3600;
 }
 
 /** Der Stand des Laufzaehlers, -1 = seit dem Start noch kein Lauf. */
@@ -7807,7 +7848,7 @@ function mg_eingabe_felder($form)
                              'n_stecker', 'n_offen', 'n_fenster', 'n_fehler', 'abfahrt_ein', 'ladeempf_ein',
                              'ladeempf_unter', 'plan_ein', 'ladungen_ein', 'haus_abfahrt_ein',
                              'vorklima_anwesend_ein', 'vorklima_wetter_ein', 'ankunft_ein', 'haus_strompreis_ein'),
-            'liste' => array('ankunft_quelle'), 'nie' => array()),
+            'liste' => array('ankunft_art', 'ankunft_quelle'), 'nie' => array()),   // 1.1.30 (T2-4): auch die Art
         'befehle' => array(
             'text' => array(), 'haken' => array('befehle_mqtt_ein', 'befehle_mqtt_steuern', 'endpunkt_ein'),
             'liste' => array(), 'nie' => array()),
@@ -7900,7 +7941,7 @@ function mg_eingaben_setzen($roh = null)
     $bean = array();
     foreach ($roh_b as $b) {
         if (is_string($b) && (in_array($b, $erlaubt, true)
-                || ($f['liste'] && preg_match('/^(vin|fzname)\.[0-9]{1,2}\z/', $b)))) {
+                || ($f['liste'] && preg_match('/^(vin|fzname|ankunft_quelle)\.[0-9]{1,2}\z/', $b)))) {
             $bean[] = $b;
         }
     }
@@ -8232,7 +8273,8 @@ function mg_vorklima_kennung($jetzt, $in_min)
  * - Hoechstens MG_VORKLIMA_VERSUCHE Versuche je Kennung, Abstand mindestens
  *   MG_VORKLIMA_ABSTAND s: 1. Senden, 2. Auffrischen (das Gateway fragt das Auto
  *   ab; gesendet wird in diesem Lauf nicht), 3. Senden; danach aufgeben.
- * - $letztes_ok === true (das letzte Senden hatte ok > 0) -> erledigt.
+ * - $letztes_ok === true -> erledigt. Seit 1.1.30 heisst das: der frische Fahrzeugstand zeigt das Klima an
+ *   (mg_automatik(); bis 1.1.29 stand hier "ok > 0", gerufen wurde aber immer mit null).
  */
 function mg_vorklima_schritt(array $m, $in_min, $jetzt, $vorlauf, $letztes_ok)
 {

@@ -189,6 +189,17 @@ if [ -n "$ARGV1" ] && [ -f "$ARGV1/mg.json" ] && ! hat_inhalt "$CF" && hat_inhal
     fi
     if mg_kopieren "$ARGV1/mg.json" "$CF" 600; then
         echo "<OK> Konfiguration aus dem Upgrade uebernommen."
+        # 1.1.30 (Fremdpruefung T1-1 B): fehlt die Zweitschrift neben dem Konfigordner, entsteht sie jetzt
+        # aus demselben Stand. Bis 1.1.29 entstand sie erst beim naechsten Speichern; bis dahin haette ein
+        # weiteres Update ohne Ablage nichts zum Zurueckholen gehabt.
+        MG_BK="$BASE/config/plugins/$PFOLDER.backup.json"
+        if [ ! -e "$MG_BK" ]; then
+            if mg_kopieren "$CF" "$MG_BK" 600; then
+                echo "<OK> Die fehlende Zweitschrift $(basename "$MG_BK") wurde angelegt."
+            else
+                echo "<WARNING> Die fehlende Zweitschrift $MG_BK liess sich nicht anlegen - sie entsteht beim naechsten Speichern."
+            fi
+        fi
     else
         echo "<WARNING> Die Konfiguration von vor dem Upgrade liess sich nicht nach $CF kopieren."
     fi
@@ -290,7 +301,9 @@ fi
 # Gruppe 39 (1.1.28, 3.1): die Mitschrift einer laufenden Ladung zurueck - nur, wenn
 # der Minutentakt in der Luecke keine neue begonnen hat.
 if [ -n "$ARGV1" ]; then
-    for MG_LL in "$ARGV1"/ladung_laufend[0-9].json; do
+    # 1.1.30 (Fremdpruefung T1-4): auch Fahrzeug 10 bis 99 - bis 1.1.29 nur [0-9]. Nicht [0-9]*: das
+    # traefe auch die abgeschlossene Mitschrift ladung_laufend<n>_letzte.json.
+    for MG_LL in "$ARGV1"/ladung_laufend[0-9].json "$ARGV1"/ladung_laufend[0-9][0-9].json; do
         [ -f "$MG_LL" ] || continue
         MG_LZ="$DDIR/$(basename "$MG_LL")"
         if [ -e "$MG_LZ" ]; then
@@ -309,6 +322,10 @@ fi
 # bleibt, wie er ist. Atomar, Rechte 0600 bleiben.
 mg_endpunkt_bestand() {   # $1 Datei
     [ -f "$1" ] && hat_inhalt "$1" || return 0
+    # 1.1.30 (Fremdpruefung T1-1 A): Bestand ist nur eine EINGERICHTETE Anlage (iSMART-Benutzer oder VIN).
+    # hat_inhalt() fragt nur nach dem Merkwort - bis 1.1.29 bekam so auch eine nie eingerichtete Anlage den
+    # offenen Endpunkt. Sie wird jetzt wie eine Neuinstallation behandelt (Schluessel fehlt = 0 = aus).
+    mg_eingerichtet "$1" || return 0
     command -v php >/dev/null 2>&1 || { echo "<WARNING> php fehlt - endpunkt_ein in $(basename "$1") nicht gesetzt."; return 0; }
     php -r '
         $f = $argv[1];

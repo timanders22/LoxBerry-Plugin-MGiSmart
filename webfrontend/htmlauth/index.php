@@ -375,7 +375,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mqtt_save'])) {
         } elseif ($mg_pw !== '') {
             $mg_neu['broker_pass'] = $mg_pw;
         }
-        if (!empty($_POST['broker_pass_loeschen'])) { $mg_neu['broker_pass'] = ''; }
+        if (!empty($_POST['broker_pass_loeschen'])) {
+            /* 1.1.30 (Fremdpruefung T1-5): ein neues Kennwort UND der Haken "loeschen" widersprechen sich -
+             * abweisen statt still loeschen (wie Renault NG, F_LOESCHEN_WIDERSPRUCH). */
+            if (trim($mg_roh) !== '' && !in_array('broker_pass', $mg_beanstandet, true)) {
+                $mg_fehler[] = sprintf(mg_t('FEHLER.LOESCHEN_WIDERSPRUCH'), mg_t('MQTTR.PASS'));
+                $mg_beanstandet[] = 'broker_pass';
+                $mg_pw = '';
+            }
+            $mg_neu['broker_pass'] = '';
+        }
         // Ohne Benutzer ist nur ein Broker auf einem ANDEREN Rechner eine
         // eigene Angabe (Nacharbeit N2); lokal gaelte ohnehin general.json.
         if ($mg_neu['broker_user'] === '' && !in_array('broker_user', $mg_beanstandet, true)) {
@@ -614,7 +623,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
             $mg_v = ($mg_q === '') ? '' : (($mg_art === 'person' ? 'person:' : 'tag:') . $mg_q);
             if ($mg_v !== '' && mg_ankunft_thema($mg_v) === '') {
                 $mg_fehler[] = sprintf(mg_t('FEHLER.FELD'), mg_t('EINST.ANKUNFT_QUELLE'), mg_t('WERT.QUELLEN'));
-                $mg_beanstandet[] = 'ankunft_quelle';
+                $mg_beanstandet[] = 'ankunft_quelle.' . (int) $mg_i;   // 1.1.30 (T1-2): nur diese Zeile
             }
             $mg_aq[] = $mg_v;
         }
@@ -717,7 +726,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $mg_formular === 'gateway') {
     }
     $mg_pw = isset($_POST['saic_pass']) && is_string($_POST['saic_pass']) ? $_POST['saic_pass'] : '';
     $mg_loeschen = !empty($_POST['saic_pass_loeschen']);
-    if ($mg_pw !== '') {
+    if ($mg_loeschen && $mg_pw !== '') {
+        /* 1.1.30 (Fremdpruefung T1-5): neues Kennwort UND "loeschen" - abweisen statt still loeschen. */
+        $mg_fehler[] = sprintf(mg_t('FEHLER.LOESCHEN_WIDERSPRUCH'), mg_t('GW.PASS'));
+        $mg_beanstandet[] = 'saic_pass';
+        $mg_ok = false;
+    } elseif ($mg_pw !== '') {
         list($mg_pok, $mg_pw, $mg_grund) = mg_wert_pruefen('saic_pass', $mg_pw, true);
         if ($mg_pok) {
             $mg_neu['saic_pass'] = $mg_pw;
@@ -1306,17 +1320,27 @@ $mg_kopf_fass = ($mg_kopf_gw === null || (int) $mg_kopf_gw['fassung'] === 0) ? m
 <div class="sm-breit">
 <table class="sm-tbl">
 <tr><th>#</th><th><?= mg_e(mg_t('EINST.ANKUNFT_ART')) ?></th><th><?= mg_e(mg_t('EINST.ANKUNFT_QUELLE')) ?></th></tr>
-<?php for ($mg_i = 0; $mg_i < max(1, $mg_anzahl); $mg_i++) {
+<?php
+/* 1.1.30 (Fremdpruefung T1-2/T2-4): nach einer Beanstandung stehen Art und Quelle so da, wie sie eingetippt waren
+ * (ankunft_art, ankunft_quelle), und rot ist nur die beanstandete Zeile (ankunft_quelle.<n>) - wie die
+ * Fahrzeugtabelle (X-2). Bis 1.1.29 zeigte die Tabelle den gespeicherten Stand, und jede Zeile war rot. */
+$mg_eaq = mg_eingabe_liste('settings', 'ankunft_quelle');
+$mg_eaa = mg_eingabe_liste('settings', 'ankunft_art');
+for ($mg_i = 0; $mg_i < max(1, $mg_anzahl); $mg_i++) {
     $mg_aq = isset($mg_cfg['ankunft_quellen'][$mg_i]) && is_string($mg_cfg['ankunft_quellen'][$mg_i])
         ? $mg_cfg['ankunft_quellen'][$mg_i] : '';
     $mg_aqa = (strpos($mg_aq, 'person:') === 0) ? 'person' : 'tag';
-    $mg_aqn = ($mg_aq !== '') ? substr($mg_aq, strpos($mg_aq, ':') + 1) : ''; ?>
+    $mg_aqn = ($mg_aq !== '') ? substr($mg_aq, strpos($mg_aq, ':') + 1) : '';
+    if ($mg_eaq !== null) {
+        $mg_aqn = isset($mg_eaq[$mg_i]) ? $mg_eaq[$mg_i] : '';
+        $mg_aqa = (is_array($mg_eaa) && isset($mg_eaa[$mg_i]) && $mg_eaa[$mg_i] === 'person') ? 'person' : 'tag';
+    } ?>
 <tr><td><?= mg_e(mg_fahrzeugname($mg_i + 1, $mg_cfg)) ?></td>
 	<td><select data-role="none" name="ankunft_art[]">
 		<option value="tag"<?= $mg_aqa === 'tag' ? ' selected' : '' ?>><?= mg_e(mg_t('EINST.ANKUNFT_TAG')) ?></option>
 		<option value="person"<?= $mg_aqa === 'person' ? ' selected' : '' ?>><?= mg_e(mg_t('EINST.ANKUNFT_PERSON')) ?></option>
 	</select></td>
-	<td><input data-role="none" type="text" name="ankunft_quelle[]" value="<?= mg_e($mg_aqn) ?>" placeholder="auto_mg"<?= mg_markierung('settings', 'ankunft_quelle') ?>></td></tr>
+	<td><input data-role="none" type="text" name="ankunft_quelle[]" value="<?= mg_e($mg_aqn) ?>" placeholder="auto_mg"<?= mg_markierung('settings', 'ankunft_quelle.' . $mg_i) ?>></td></tr>
 <?php } ?>
 </table>
 </div>

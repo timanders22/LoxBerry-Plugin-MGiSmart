@@ -21,17 +21,17 @@
  * Endpunkt legt die Bruecke nichts an (mg_nur_lesen(true)).
  */
 if (!function_exists('mg_befehl_annehmen')) {
-    $mg_kand = array();
-    $mg_kand[] = 'REPLACELBPHTMLDIR/mg_lib.php';
-    $mg_kand[] = dirname(__DIR__) . '/webfrontend/html/mg_lib.php';
+    /* 1.1.30 (Fremdpruefung T2-2): welche Lage gilt, entscheidet der eigene Ablageort - wie bin/cron.php (Fall P1,
+     * Pruefung-MGiSmart-1.1.17). Bis 1.1.29 stand eine Kandidatenliste da: installiert gewann zwar der vom
+     * Installer eingesetzte Pfad (am Geraet 01.11.2026 nachgesehen), fehlte er aber, waere als Naechstes
+     * <home>/bin/plugins/webfrontend/html/mg_lib.php geladen worden - ein Ort ausserhalb des Plugins. */
     if (basename(dirname(__DIR__)) === 'plugins') {
-        $mg_kand[] = dirname(dirname(dirname(__DIR__))) . '/webfrontend/html/plugins/' . basename(__DIR__) . '/mg_lib.php';
+        $mg_bib = dirname(dirname(dirname(__DIR__))) . '/webfrontend/html/plugins/' . basename(__DIR__) . '/mg_lib.php';
+    } else {
+        $mg_bib = dirname(__DIR__) . '/webfrontend/html/mg_lib.php';
     }
-    foreach ($mg_kand as $mg_k) {
-        if (strpos($mg_k, 'REPLACE') !== 0 && is_file($mg_k)) {
-            require_once $mg_k;
-            break;
-        }
+    if (is_file($mg_bib)) {
+        require_once $mg_bib;
     }
 }
 $mg_grund_soll = 'Die 60-s-Gleichwert-Bremse X-7 des Plugins bleibt die eine Pruefung; sie antwortet UNVERAENDERT, '
@@ -117,7 +117,8 @@ return array(
                      'mqtt_ein'    => !empty($c['mqtt_ein']));
     },
     'protokoll' => function ($stufe, $text) {
-        mg_log('Befehlsbruecke: ' . ($stufe === 'INFO' ? '' : $stufe . ' ') . $text);
+        // 1.1.30 (Fremdpruefung T3-3): bb_log() setzt "Befehlsbruecke: " schon vor den Text - bis 1.1.29 stand es doppelt.
+        mg_log(($stufe === 'INFO' ? '' : $stufe . ' ') . $text);
     },
     'teile' => array('nr' => '[2-9]'),
     'befehle' => $mg_befehle,

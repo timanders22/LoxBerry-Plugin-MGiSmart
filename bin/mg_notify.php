@@ -61,7 +61,9 @@ if (!function_exists('lb_wurzel_ermitteln')) {
 }
 
 $home = getenv('LBHOMEDIR');
-if (!$home || !is_dir($home . '/config/plugins') || !is_dir($home . '/data/plugins')) {
+// 1.1.30 (Fremdpruefung T3-2): auch unter $LBHOMEDIR gilt nur eine Wurzel mit general.json - wie mg_lbhome().
+if (!$home || !is_dir($home . '/config/plugins') || !is_dir($home . '/data/plugins')
+    || !is_file($home . '/config/system/general.json')) {
     $home = lb_wurzel_ermitteln();
 }
 if (!$home) {

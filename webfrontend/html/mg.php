@@ -220,6 +220,12 @@ if (mg_gesetzt('refresh')) {
     list($mg_ok, $mg_info) = mg_snapshot(4);
     $mg_ergebnis = 'REFRESH;OK=' . (int) $mg_ok . ';INFO='
                  . str_replace(array(';', "\n", "\r"), ' ', $mg_info);
+    /* 1.1.30 (Fremdpruefung T1-3): scheitert das Einlesen, antwortet der Aufruf mit 503 - die Quelle faellt aus
+     * (Regeln/07 Abschnitt 6), wie ?cmd mit 409/503. ?refresh ist ein Auftrag, keine Abfragezeile; die blosse
+     * Statuszeile bleibt bei 200 (OK ist dort der Gesundheitsmerker, Begruendung unten). */
+    if (!$mg_ok && !headers_sent()) {
+        http_response_code(503);
+    }
 }
 
 $mg_st = mg_state($mg_nr);

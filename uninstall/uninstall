@@ -129,13 +129,59 @@ mg_eigener_abruf() {   # $1 PID
     [ -r "$d/cmdline" ] || return 1
     a0=$( { tr '\0' '\n' < "$d/cmdline" | head -1; } 2>/dev/null)
     [ "$(basename -- "$a0" 2>/dev/null)" = "mosquitto_sub" ] || return 1
-    { tr '\0' '\n' < "$d/cmdline" | grep -qxF -- "$PREFIX/#"; } 2>/dev/null || return 1
+    # 1.1.30 (Fremdpruefung T2-6): nicht mehr am Thema "<prefix>/#" - der Leser der Haus-Themen (haus/...) und
+    # das Horchen auf .../result liefen damit nicht als eigene durch. Eigen ist, was dem Dienstbenutzer gehoert
+    # UND die Zugangsdaten aus DIESEM Datenordner liest (XDG_CONFIG_HOME, unten); den Ordner hat kein anderes
+    # Plugin, die Befehlsbruecke hat ihren eigenen (befehle/mosquitto, haelt befehlsbruecke.sh stop an).
     u=$(awk '/^Uid:/ {print $2}' "$d/status" 2>/dev/null)
     [ -n "$u" ] && [ "$u" = "$MG_UID" ] || return 1
     x=$( { tr '\0' '\n' < "$d/environ" | sed -n 's/^XDG_CONFIG_HOME=//p' | head -1; } 2>/dev/null)
     [ -n "$x" ] && [ -n "$MG_XDG" ] && [ "$(readlink -f "$x" 2>/dev/null)" = "$MG_XDG" ] || return 1
     return 0
 }
+# 1.1.30 (Fremdpruefung T2-6): zuerst einen laufenden Minutenlauf abwarten (cron.lock, hoechstens 30 s) und die
+# Sperre bis zum Ende dieses Skripts halten - ein Lauf startet sonst nach dem Aufraeumen noch einen Leser oder
+# legt /tmp/<ordner> neu an. Nur lesend geoeffnet: als root wird keine Datei angelegt.
+MG_LOCK="$BASE/log/plugins/$PDIR/cron.lock"
+if [ -f "$MG_LOCK" ] && command -v flock >/dev/null 2>&1 && exec 8<"$MG_LOCK"; then
+    if ! flock -w 30 8; then
+        echo "<INFO> Ein Minutenlauf haelt cron.lock nach 30 s noch - es wird trotzdem aufgeraeumt."
+    fi
+fi
+# Dann der abgekoppelte Leser der Haus-Themen (bin/cron.php --haus-lesen, bis 65 s): er schrieb bis 1.1.29 nach
+# dem Aufraeumen noch /tmp/<ordner>/haus_quellen.json. Eigen ist er, wenn er dem Dienstbenutzer gehoert und
+# argumentweise genau "<php> <dieses cron.php> --haus-lesen" lautet (Regeln/06, /proc/<pid>/cmdline).
+MG_CRONPHP=$(readlink -f "$BASE/bin/plugins/$PDIR/cron.php" 2>/dev/null)
+mg_eigener_leser() {   # $1 PID
+    d="/proc/$1"
+    [ -n "$MG_CRONPHP" ] && [ -r "$d/cmdline" ] || return 1
+    u=$(awk '/^Uid:/ {print $2}' "$d/status" 2>/dev/null)
+    [ -n "$u" ] && [ "$u" = "$MG_UID" ] || return 1
+    n=$( { tr '\0' '\n' < "$d/cmdline" | wc -l; } 2>/dev/null)
+    [ "$n" = 3 ] || return 1
+    a0=$( { tr '\0' '\n' < "$d/cmdline" | sed -n 1p; } 2>/dev/null)
+    case "$(basename -- "$a0" 2>/dev/null)" in php|php[0-9]*) ;; *) return 1 ;; esac
+    a1=$( { tr '\0' '\n' < "$d/cmdline" | sed -n 2p; } 2>/dev/null)
+    [ "$(readlink -f "$a1" 2>/dev/null)" = "$MG_CRONPHP" ] || return 1
+    a2=$( { tr '\0' '\n' < "$d/cmdline" | sed -n 3p; } 2>/dev/null)
+    [ "$a2" = "--haus-lesen" ] || return 1
+    return 0
+}
+for D in /proc/[0-9]*; do
+    P=${D#/proc/}
+    mg_eigener_leser "$P" || continue
+    kill "$P" 2>/dev/null
+    for i in 1 2 3; do
+        mg_eigener_leser "$P" || break
+        sleep 1
+    done
+    mg_eigener_leser "$P" && kill -9 "$P" 2>/dev/null && sleep 1
+    if mg_eigener_leser "$P"; then
+        echo "<WARNING> Der Leser der Haus-Themen (PID $P) laeuft weiter."
+    else
+        echo "<OK> Leser der Haus-Themen beendet (PID $P)."
+    fi
+done
 GEFUNDEN=0
 for D in /proc/[0-9]*; do
     P=${D#/proc/}
