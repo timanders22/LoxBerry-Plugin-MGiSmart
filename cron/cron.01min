@@ -28,6 +28,10 @@ LOGV="REPLACELBPLOGDIR"
 ERR="$LOGV/cron.err"
 mkdir -p "$LOGV" 2>/dev/null
 touch "$ERR" 2>/dev/null
+# 1.1.31 (in WSL gemessen, vb_s1b_mg_skripte/s1b_probe_cron.sh): bis 1.1.30 brach die Umlenkung 2>>"$ERR" den Befehl ab, BEVOR php
+# startete, wenn cron.err nicht schreibbar war - kein Takt, keine Spur. touch schuetzt nicht: es gelingt als Eigentuemer auf 0444 und
+# auf einem Verzeichnis. Dann geht die Fehlerausgabe nach /dev/null, und der Takt laeuft.
+( : >>"$ERR" ) 2>/dev/null || ERR=/dev/null
 if [ -f "$ERR" ] && [ "$(stat -c %s "$ERR" 2>/dev/null || echo 0)" -gt 262144 ]; then
   tail -n 300 "$ERR" > "$ERR.neu" 2>/dev/null && mv -f "$ERR.neu" "$ERR"
 fi
@@ -41,6 +45,13 @@ fi
 # Schale, nicht in cron.php (Gedaechtnis "Sperre vererbt sich an Kinder"): die
 # Kinder, die laenger leben als der Lauf - der abgekoppelte Leser und die
 # Befehlsbruecke -, schliessen jeden geerbten Deskriptor ueber 2 selbst.
+# 1.1.31: die Sperre laesst sich nicht oeffnen - bis 1.1.30 still zu Ende, der Takt stand ohne Spur. Vorab in einer Unterschale gefragt:
+# dash beendet das Skript schon am misslungenen exec, ein "|| ..." dahinter kaeme nie dran. Eine Zeile ins Protokoll, nur in Minute 00
+# (je Minute waeren es 1440 am Tag auf der Ramdisk).
+if ! ( : >>"$LOGV/cron.lock" ) 2>/dev/null; then
+  [ "$(date +%M)" = 00 ] && ( echo "[$(date '+%Y-%m-%d %H:%M:%S')] FEHLER: Sperrdatei $LOGV/cron.lock nicht zu oeffnen - der Minutenlauf laeuft nicht. Rechte und freien Platz pruefen." >>"$LOGV/mg.log" ) 2>/dev/null
+  exit 1
+fi
 exec 9>"$LOGV/cron.lock" || exit 0
 flock -n 9 || exit 0
 /usr/bin/php REPLACELBPBINDIR/cron.php >/dev/null 2>>"$ERR"

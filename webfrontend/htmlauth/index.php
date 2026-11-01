@@ -187,6 +187,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mg_sichern'])) {
      * Namen, nie Werte. Geliefert wird sie trotzdem vollstaendig; das
      * Zurueckspielen uebergeht Schluessel mit '_'. */
     $mg_sich = mg_config();
+    $mg_sich['tts'] = ansage_sicherung_bereinigen(mg_tts($mg_sich));    // 1.1.31: ein Sprechtoken steht in keiner Sicherung
+    unset($mg_sich['ansage_token_herkunft']);
     $mg_sich_namen = mg_rueckspiel_maengel($mg_sich);
     $mg_js = json_encode(array('_hinweis' => mg_t('EINST.SICH_KOPF'), '_stand' => date('Y-m-d H:i'))
         + ($mg_sich_namen ? array('_warnung' => sprintf(mg_t('EINST.SICH_WARN_KOPF'), implode(', ', $mg_sich_namen)))
@@ -275,6 +277,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['refreshnow'])) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ptest'])) {
     mg_ptest_ausloesen();
     $mg_meldungen[] = mg_t('MELDUNG.PTEST_AUSGELOEST');
+    $mg_tab = 'tab-test';
+}
+
+/* 1.1.31: die Testansage geht an den Regeln vorbei (auch nachts, auch mit "Ansagen aus") - wer den Knopf drueckt, will es hoeren. */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['ansage_test']) || isset($_POST['ansage_test_ziel']))) {
+    $mg_tk = mg_ansage_k();
+    $mg_tnur = isset($_POST['ansage_test_ziel']) ? ansage_test_ziel($_POST) : 0;
+    if (isset($_POST['ansage_test_ziel']) && $mg_tnur === 0) {
+        $mg_fehler[] = mg_t('MELDUNG.ANSAGE_TEST_FEHL');
+    } else {
+        $mg_tr = ansage_testansage(ansage_token_fuer_lauf(mg_tts($mg_cfg), $mg_cfg['ansage_token_herkunft'], $mg_tk), $mg_tk, $mg_tnur);
+        mg_log('Testansage' . ($mg_tnur >= 1 ? ' an Ziel ' . $mg_tnur : '') . ': ' . ansage_kurz($mg_tr));
+        if ($mg_tr['stand'] === 1) {
+            $mg_meldungen[] = mg_t('MELDUNG.ANSAGE_TEST_OK');
+        } else {
+            $mg_fehler[] = mg_t('MELDUNG.ANSAGE_TEST_FEHL') . ' ' . ansage_kennung_text($mg_tr['kennung'], $mg_tk);
+        }
+    }
     $mg_tab = 'tab-test';
 }
 
@@ -458,6 +478,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mqtt_save'])) {
     $mg_neu['namen'] = $mg_namen;
 
     $mg_neu['mqtt_ein'] = isset($_POST['mqtt_ein']) ? 1 : 0;
+    $mg_neu['haus_fahrzeug_ein'] = isset($_POST['haus_fahrzeug_ein']) ? 1 : 0;     // 1.1.31
     mg_formfeld('mqtt_praefix', 'MQTTR.EIGEN_PRAEFIX', $mg_neu, $mg_fehler);
 
     /* Zwei verschiedene Praefixe: unter 'prefix' HORCHT das Plugin auf
@@ -554,6 +575,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
         'offen' => isset($_POST['n_offen']) ? 1 : 0,
         'fenster' => isset($_POST['n_fenster']) ? 1 : 0,
         'fehler' => isset($_POST['n_fehler']) ? 1 : 0,
+        'kabel_vergessen' => isset($_POST['n_kabel']) ? 1 : 0,
         'push_minutes' => (int) $mg_cfg['notify']['push_minutes'],
     );
     mg_formfeld('push_minutes', 'EINST.PUSH_MINUTEN', $mg_neu, $mg_fehler, 'notify.push_minutes');
@@ -604,11 +626,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
 
     /* Gruppe 39 (1.1.28): Haus-Themen (2.4), Wettergrenze (3.2), Ladekosten (3.1). */
     foreach (array('haus_abfahrt_ein', 'vorklima_anwesend_ein', 'vorklima_wetter_ein', 'ankunft_ein',
-                   'haus_strompreis_ein') as $mg_h) {
+                   'haus_strompreis_ein', 'signal_kabel', 'vorklima_nur_kabel') as $mg_h) {
         $mg_neu[$mg_h] = isset($_POST[$mg_h]) ? 1 : 0;
     }
     mg_formfeld('vorklima_kalt_unter', 'EINST.VORKLIMA_KALT', $mg_neu, $mg_fehler);
     mg_formfeld('vorklima_heiss_ueber', 'EINST.VORKLIMA_HEISS', $mg_neu, $mg_fehler);
+    mg_formfeld('vorklima_min_soc', 'EINST.VORKLIMA_MIN_SOC', $mg_neu, $mg_fehler);
+    mg_formfeld('kabel_soc', 'EINST.KABEL_SOC', $mg_neu, $mg_fehler);
+    mg_formfeld('kabel_uhr', 'EINST.KABEL_UHR', $mg_neu, $mg_fehler);
+    mg_formfeld('kabel_abfahrt_min', 'EINST.KABEL_ABFAHRT', $mg_neu, $mg_fehler);
+    mg_formfeld('signal_praefix', 'EINST.SIGNAL_PRAEFIX', $mg_neu, $mg_fehler);
     if ((int) $mg_neu['vorklima_kalt_unter'] >= (int) $mg_neu['vorklima_heiss_ueber']) {
         $mg_fehler[] = mg_t('FEHLER.KALT_HEISS');
         $mg_beanstandet[] = 'vorklima_kalt_unter';
@@ -629,6 +656,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
         }
         while ($mg_aq && end($mg_aq) === '') { array_pop($mg_aq); }
         $mg_neu['ankunft_quellen'] = $mg_aq;
+    }
+
+    /* 1.1.31: Sprachansagen. Nur, wenn das Formular sie schickt. Ein eingetipptes Token gilt als von Hand (Vermerk, Stamm 1.3.1). */
+    if (isset($_POST['tts_mode'])) {
+        $mg_tmangel = array();
+        $mg_tbean = array();
+        $mg_thinw = array();
+        $mg_tneu = ansage_formular_lesen($_POST, mg_tts($mg_cfg), $mg_tmangel, $mg_tbean, mg_ansage_opt(), mg_ansage_k(), $mg_thinw);
+        list($mg_rneu, $mg_hneu) = ansage_regeln_formular($_POST, mg_ansage_regeln($mg_cfg), mg_ansage_anlaesse(), $mg_tmangel, $mg_tbean, mg_ansage_k());
+        foreach ($mg_tmangel as $mg_tm) { $mg_fehler[] = $mg_tm['text']; }
+        foreach ($mg_tbean as $mg_tb) { $mg_beanstandet[] = mg_ziele_x2_name($mg_tb); }
+        foreach ($mg_thinw as $mg_th) { $mg_meldungen[] = $mg_th['text']; }
+        $mg_neu['tts'] = $mg_tneu;
+        $mg_neu['ansage_regeln'] = $mg_rneu;
+        $mg_neu['ansage_haken'] = $mg_hneu;
+        $mg_neu['ansage_token_herkunft'] = ansage_token_herkunft_formular($_POST, isset($mg_neu['ansage_token_herkunft']) ? $mg_neu['ansage_token_herkunft'] : array());
     }
 
     if (count($mg_fehler) > $mg_f0) {
@@ -1254,12 +1297,56 @@ $mg_kopf_fass = ($mg_kopf_gw === null || (int) $mg_kopf_gw['fassung'] === 0) ? m
 	<?= mg_e(mg_t('EINST.N_FENSTER')) ?></label><br>
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
 	<input data-role="none" type="checkbox" name="n_fehler" <?= mg_eingabe_an('settings', 'n_fehler', !empty($mg_notify['fehler'])) ? 'checked' : '' ?>>
-	<?= mg_e(mg_t('EINST.N_FEHLER')) ?></label>
+	<?= mg_e(mg_t('EINST.N_FEHLER')) ?></label><br>
+	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
+	<input data-role="none" type="checkbox" name="n_kabel" <?= mg_eingabe_an('settings', 'n_kabel', !empty($mg_notify['kabel_vergessen'])) ? 'checked' : '' ?>>
+	<?= mg_e(mg_t('EINST.N_KABEL_VERGESSEN')) ?></label>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.PUSH_MINUTEN')) ?></label>
 	<input data-role="none" type="number" name="push_minutes" min="1" max="60" value="<?= mg_e(mg_eingabe('settings', 'push_minutes', (int) $mg_notify['push_minutes'])) ?>"<?= mg_markierung('settings', 'push_minutes') ?>>
 	<div class="sm-hilfe"><?php echo mg_t('EINST.PUSH_HILFE'); ?></div>
+</div>
+
+<h2><?= mg_e(mg_t('EINST.H_ANSAGE')) ?></h2>
+<?php
+/* 1.1.31: Formularbausteine aus dem Stamm 1.3.0 (ohne <form>). */
+$mg_te = mg_eingaben_setzen();
+$mg_th = array(
+    'w' => function ($n, $v) { return mg_eingabe('settings', $n, $v); },
+    'm' => function ($n) { return mg_markierung('settings', mg_ziele_x2_name($n)); },
+    'c' => function ($n, $v) { return mg_eingabe_an('settings', $n, $v); },
+);
+echo ansage_formular_html(mg_tts($mg_cfg), $mg_th + array('modi' => mg_ansage_modi(), 'ziele' => true,
+    'ziele_post' => $mg_te['form'] === 'settings' ? mg_ziele_x2_post($mg_te['werte']) : null), mg_ansage_k());
+echo ansage_regeln_html(mg_ansage_regeln($mg_cfg), isset($mg_cfg['ansage_haken']) && is_array($mg_cfg['ansage_haken']) ? $mg_cfg['ansage_haken'] : array(),
+    mg_ansage_anlaesse(), $mg_th + array('token_vor_ort' => true), mg_ansage_k());
+?>
+
+<h3><?= mg_e(mg_t('EINST.H_KABEL')) ?></h3>
+<div class="sm-hilfe"><?php echo mg_t('EINST.KABEL_HILFE'); ?></div>
+<div class="sm-feld">
+	<label><?= mg_e(mg_t('EINST.KABEL_SOC')) ?></label>
+	<input data-role="none" type="number" name="kabel_soc" min="1" max="100" value="<?= mg_e(mg_eingabe('settings', 'kabel_soc', (int) $mg_cfg['kabel_soc'])) ?>"<?= mg_markierung('settings', 'kabel_soc') ?>>
+</div>
+<div class="sm-feld">
+	<label><?= mg_e(mg_t('EINST.KABEL_UHR')) ?></label>
+	<input data-role="none" type="time" name="kabel_uhr" value="<?= mg_e(mg_eingabe('settings', 'kabel_uhr', $mg_cfg['kabel_uhr'])) ?>"<?= mg_markierung('settings', 'kabel_uhr') ?>>
+</div>
+<div class="sm-feld">
+	<label><?= mg_e(mg_t('EINST.KABEL_ABFAHRT')) ?></label>
+	<input data-role="none" type="number" name="kabel_abfahrt_min" min="0" max="720" value="<?= mg_e(mg_eingabe('settings', 'kabel_abfahrt_min', (int) $mg_cfg['kabel_abfahrt_min'])) ?>"<?= mg_markierung('settings', 'kabel_abfahrt_min') ?>>
+	<div class="sm-hilfe"><?php echo mg_t('EINST.KABEL_ABFAHRT_HILFE'); ?></div>
+</div>
+<div class="sm-feld">
+	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
+	<input data-role="none" type="checkbox" name="signal_kabel" <?= mg_eingabe_an('settings', 'signal_kabel', !empty($mg_cfg['signal_kabel'])) ? 'checked' : '' ?>>
+	<?= mg_e(mg_t('EINST.SIGNAL_KABEL')) ?></label>
+	<div class="sm-hilfe"><?php echo mg_t('EINST.SIGNAL_KABEL_HILFE'); ?></div>
+</div>
+<div class="sm-feld">
+	<label><?= mg_e(mg_t('EINST.SIGNAL_PRAEFIX')) ?></label>
+	<input data-role="none" type="text" name="signal_praefix" maxlength="40" value="<?= mg_e(mg_eingabe('settings', 'signal_praefix', $mg_cfg['signal_praefix'])) ?>"<?= mg_markierung('settings', 'signal_praefix') ?>>
 </div>
 
 <h2><?= mg_e(mg_t('EINST.H_AUTOMATIK')) ?></h2>
@@ -1310,6 +1397,17 @@ $mg_kopf_fass = ($mg_kopf_gw === null || (int) $mg_kopf_gw['fassung'] === 0) ? m
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.VORKLIMA_HEISS')) ?></label>
 	<input data-role="none" type="number" name="vorklima_heiss_ueber" min="-30" max="45" value="<?= mg_e(mg_eingabe('settings', 'vorklima_heiss_ueber', (int) $mg_cfg['vorklima_heiss_ueber'])) ?>"<?= mg_markierung('settings', 'vorklima_heiss_ueber') ?>>
+</div>
+<div class="sm-feld">
+	<label><?= mg_e(mg_t('EINST.VORKLIMA_MIN_SOC')) ?></label>
+	<input data-role="none" type="number" name="vorklima_min_soc" min="0" max="100" value="<?= mg_e(mg_eingabe('settings', 'vorklima_min_soc', (int) $mg_cfg['vorklima_min_soc'])) ?>"<?= mg_markierung('settings', 'vorklima_min_soc') ?>>
+	<div class="sm-hilfe"><?php echo mg_t('EINST.VORKLIMA_MIN_SOC_HILFE'); ?></div>
+</div>
+<div class="sm-feld">
+	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
+	<input data-role="none" type="checkbox" name="vorklima_nur_kabel" <?= mg_eingabe_an('settings', 'vorklima_nur_kabel', !empty($mg_cfg['vorklima_nur_kabel'])) ? 'checked' : '' ?>>
+	<?= mg_e(mg_t('EINST.VORKLIMA_NUR_KABEL')) ?></label>
+	<div class="sm-hilfe"><?php echo mg_t('EINST.VORKLIMA_NUR_KABEL_HILFE'); ?></div>
 </div>
 <div class="sm-feld">
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
@@ -1519,7 +1617,7 @@ $mg_eigen = ($mg_zugang['quelle'] === 'eigen');
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('MQTTR.PASS')) ?></label>
-	<input data-role="none" type="password" name="broker_pass" value=""<?= mg_markierung('mqtt', 'broker_pass') ?> placeholder="<?= $mg_cfg['broker_pass'] !== '' ? mg_e(mg_t('MQTTR.PASS_GESPEICHERT')) : mg_e(mg_t('MQTTR.PASS_LEER')) ?>">
+	<input data-role="none" type="password" name="broker_pass" value=""<?= mg_markierung('mqtt', 'broker_pass') ?> autocomplete="new-password" placeholder="<?= $mg_cfg['broker_pass'] !== '' ? mg_e(mg_t('MQTTR.PASS_GESPEICHERT')) : mg_e(mg_t('MQTTR.PASS_LEER')) ?>">
 	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;margin-top:6px;">
 	<input data-role="none" type="checkbox" name="broker_pass_loeschen" value="1"<?= mg_eingabe_an('mqtt', 'broker_pass_loeschen', false) ? ' checked' : '' ?>>
 	<?= mg_e(mg_t('MQTTR.PASS_LOESCHEN')) ?></label>
@@ -1567,6 +1665,12 @@ for ($mg_i = 0; $mg_i < max(3, $mg_anzahl + 1, $mg_ev !== null ? count($mg_ev) :
 	<input data-role="none" type="checkbox" name="mqtt_ein" <?= mg_eingabe_an('mqtt', 'mqtt_ein', !empty($mg_cfg['mqtt_ein'])) ? 'checked' : '' ?>>
 	<?= mg_e(mg_t('MQTTR.EIGEN_EIN')) ?></label>
 	<div class="sm-hilfe"><?php echo mg_t('MQTTR.EIGEN_HILFE'); ?></div>
+</div>
+<div class="sm-feld">
+	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
+	<input data-role="none" type="checkbox" name="haus_fahrzeug_ein" <?= mg_eingabe_an('mqtt', 'haus_fahrzeug_ein', !empty($mg_cfg['haus_fahrzeug_ein'])) ? 'checked' : '' ?>>
+	<?= mg_e(mg_t('MQTTR.HAUS_FAHRZEUG')) ?></label>
+	<div class="sm-hilfe"><?php echo mg_t('MQTTR.HAUS_FAHRZEUG_HILFE'); ?></div>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('MQTTR.EIGEN_PRAEFIX')) ?></label>
@@ -2128,6 +2232,14 @@ function mg_bausteinliste($nr = 1)
             array(mg_t('BAUSTEIN.Z1_31')),
             array(mg_t('BAUSTEIN.Z1_32')),
             array(mg_t('BAUSTEIN.Z1_33')),
+            array(mg_t('BAUSTEIN.Z1_34')),
+            array(mg_t('BAUSTEIN.Z1_35')),
+            array(mg_t('BAUSTEIN.Z1_36')),
+            array(mg_t('BAUSTEIN.Z1_37')),
+            array(mg_t('BAUSTEIN.Z1_38')),
+            array(mg_t('BAUSTEIN.Z1_39')),
+            array(mg_t('BAUSTEIN.Z1_40')),
+            array(mg_t('BAUSTEIN.Z1_41')),
         ), array(
             'BAUSTEIN.SEITE1_SCHRITT1',
             'BAUSTEIN.SEITE1_SCHRITT2',
@@ -2143,6 +2255,7 @@ function mg_bausteinliste($nr = 1)
             'BAUSTEIN.SEITE1_H5',
             'BAUSTEIN.SEITE1_H6',
             'BAUSTEIN.SEITE1_H7',
+            'BAUSTEIN.SEITE1_H8',
         )),
         array('MGiSmart Laden', 'einbindung_loxone_laden.png', array(
             array(mg_t('BAUSTEIN.Z2_01'), mg_eingangsname('LAEDT', $nr)),
@@ -2520,6 +2633,17 @@ if ($mg_tab === 'tab-test') {
 <input data-role="none" type="hidden" name="ptest" value="1">
 <div class="sm-knopfreihe">
 	<button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= mg_e(mg_t('KNOPF.PTEST')) ?></button>
+</div>
+</form>
+
+<h3><?= mg_e(mg_t('TEST.H_ANSAGE')) ?></h3>
+<div class="sm-hilfe"><?= mg_e(mg_t('TEST.ANSAGE_HILFE')) ?></div>
+<form action="index.php" method="post">
+<input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
+<input data-role="none" type="hidden" name="activetab" value="tab-test">
+<div class="sm-knopfreihe">
+	<button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="ansage_test" value="1"><?= mg_e(mg_t('KNOPF.ANSAGE_TEST')) ?></button>
+	<?php echo ansage_testknoepfe_html(mg_tts($mg_cfg), mg_ansage_k(), array('klasse' => 'sm-btn sm-b-aktion')); ?>
 </div>
 </form>
 

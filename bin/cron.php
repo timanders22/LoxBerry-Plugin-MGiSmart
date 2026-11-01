@@ -39,7 +39,7 @@ require_once $mg_lib;
  * Rueckgabe 2, OHNE Wirkung (vor Laufzaehler, Momentaufnahme und Automatik). Bis
  * 1.1.27 lief "--mqt-leeren" als voller Minutenlauf durch und schickte unter
  * Umstaenden Befehle ans Auto. */
-$mg_erlaubt = array('--mqtt-leeren', '--gateway-leeren', '--haus-lesen');
+$mg_erlaubt = array('--mqtt-leeren', '--gateway-leeren', '--haus-lesen', '--ansage-senden');
 foreach (array_slice(isset($argv) ? $argv : array(), 1) as $mg_a) {
     if (!in_array($mg_a, $mg_erlaubt, true)) {
         fwrite(STDERR, 'cron.php: unbekannter Schalter ' . $mg_a . ' - erlaubt sind ' . implode(' ', $mg_erlaubt)
@@ -79,7 +79,11 @@ if (in_array('--mqtt-leeren', array_slice(isset($argv) ? $argv : array(), 1), tr
     foreach ($mg_zeilen as $mg_z) {
         echo $mg_z . "\n";
     }
-    exit($mg_rc);
+    list($mg_rc2, $mg_zeilen) = mg_haus_fahrzeug_leeren();      // 1.1.31
+    foreach ($mg_zeilen as $mg_z) {
+        echo $mg_z . "\n";
+    }
+    exit(max($mg_rc, $mg_rc2));
 }
 /* Seit 1.1.18 (Bauliste G7): die zurueckbehaltenen Themen des GATEWAYS unter
  * <prefix>/ - nur aus uninstall/uninstall und nur, nachdem dort ein Container
@@ -100,6 +104,13 @@ if (in_array('--gateway-leeren', array_slice(isset($argv) ? $argv : array(), 1),
  * Automatik, kein Senden. */
 if (in_array('--haus-lesen', array_slice(isset($argv) ? $argv : array(), 1), true)) {
     mg_haus_leser_lauf(MG_HAUS_LESEFENSTER);
+    exit(0);
+}
+
+/* 1.1.31: der abgekoppelte Sender der Sprachansagen (mg_ansage_starten(), eigene Sperre ansage_senden.lock). Kein Laufzaehler,
+ * keine Automatik; waehrend eines Updates tut er nichts (die Warteliste bleibt, zu Altes verfaellt). */
+if (in_array('--ansage-senden', array_slice(isset($argv) ? $argv : array(), 1), true)) {
+    if (!mg_upgrade_marke_liegt()) { mg_ansage_lauf(); }
     exit(0);
 }
 
@@ -143,31 +154,36 @@ if (mg_bruecke_laden()) {
  * "eingerichtet?": der Container kann vor dem ersten Fahrzeug da sein. */
 mg_broker_wechsel_pruefen();
 
-$cfg = mg_config();
-if (trim((string) $cfg['saic_user']) === '' || mg_fahrzeug_anzahl($cfg) === 0) {
+/* 1.1.31: nie $cfg in diesem globalen Bereich: das LoxBerry-SDK ueberschreibt beim Lesen der general.json ein globales $cfg mit einem stdClass
+ * (Ausfall am Geraet 01.11.2026, "Cannot use object of type stdClass as array"). */
+$mg_lauf_cfg = mg_config();
+if (trim((string) $mg_lauf_cfg['saic_user']) === '' || mg_fahrzeug_anzahl($mg_lauf_cfg) === 0) {
     exit;   // noch nicht eingerichtet
 }
 
 /* Die Abo-Datei des MQTT-Gateways nachfuehren (seit 1.1.18, Befund M8): ein
  * Update legt die mitgelieferte mit dem Vorgabepraefix zurueck. Geschrieben
  * wird nur, wenn sie abweicht - wie beim Speichern im Reiter MQTT. */
-mg_abo_datei($cfg['mqtt_praefix'], true);
+mg_abo_datei($mg_lauf_cfg['mqtt_praefix'], true);
 
 /* Gruppe 39 (1.1.28, 2.4): hoechstens einen abgekoppelten Leser starten - nie
  * darauf warten; dieser Lauf nimmt den letzten Stand aus haus_quellen.json. */
-mg_haus_abnehmer_starten($cfg, __FILE__);
+mg_haus_abnehmer_starten($mg_lauf_cfg, __FILE__);
+
+/* 1.1.31: das Sprechtoken aus dem Zielplugin - schreibt nur bei einer Aenderung (Stamm 1.3.1). */
+mg_ansage_token_pflegen($mg_lauf_cfg);
 
 list($ok, $info) = mg_snapshot(3);
 /* Das Lebenszeichen geht bei JEDEM Lauf hinaus, am Aenderungsfilter vorbei
  * und fluechtig (seit 1.1.18, Befund M3) - auch wenn das Einlesen scheitert:
  * es sagt, dass der Takt laeuft, nicht, dass die Werte stimmen. */
-mg_mqtt_lebenszeichen($cfg, $ok ? 1 : 0);   // Gruppe 39: dazu status/ok (2.1)
+mg_mqtt_lebenszeichen($mg_lauf_cfg, $ok ? 1 : 0);   // Gruppe 39: dazu status/ok (2.1)
 if (!$ok) {
     mg_log_if_changed('verbindung', 'keine Werte vom Broker (' . $info . ')');
     /* Fehlerzweig: je Fahrzeug ok=0, fluechtig; die Zustaende bleiben stehen.
      * Bis 1.1.17 ging hier nichts hinaus, und ok hielt im Miniserver die
      * letzte 1. */
-    mg_mqtt_ok_null($cfg);
+    mg_mqtt_ok_null($mg_lauf_cfg);
     exit;
 }
 mg_log_if_changed('verbindung', 'Broker erreichbar (' . $info . ')');
@@ -176,9 +192,9 @@ mg_log_if_changed('verbindung', 'Broker erreichbar (' . $info . ')');
  * gelungenen Einlesen und FLUECHTIG wie ok: eine Aussage des Gateways ueber
  * sich selbst ist eine Dienstaussage (Entscheidung des Hausherrn 30.09.2026,
  * Regeln/07 vom 19.09.2026). Scheitert das Einlesen, geht nichts hinaus. */
-mg_mqtt_anmeldung_senden($cfg);
+mg_mqtt_anmeldung_senden($mg_lauf_cfg);
 
-foreach (mg_fahrzeuge($cfg) as $nr => $fz) {
+foreach (mg_fahrzeuge($mg_lauf_cfg) as $nr => $fz) {
     $st = mg_state($nr);
     mg_log_if_changed('zustand' . $nr,
         $fz['name'] . ': SoC=' . $st['SOC'] . ' % Ziel=' . $st['ZIEL']
@@ -190,13 +206,17 @@ foreach (mg_fahrzeuge($cfg) as $nr => $fz) {
     // zweite Stelle, die dasselbe liest.
     list($melden, $vorher) = mg_check_events($st, $nr);
     // Gruppe 39 (1.1.28, 3.1): die Mitschrift der laufenden Ladung (Preis je Minute), dann der Abschluss.
-    mg_ladung_mitschreiben($st, $nr, $cfg);
+    mg_ladung_mitschreiben($st, $nr, $mg_lauf_cfg);
     mg_ladung_pruefen($st, $vorher, $nr);
     $st = mg_state($nr);   // die neue Ladung fuer ladung_kosten/kwh/preis
     mg_mqtt_senden($nr, $st);
+    mg_haus_fahrzeug_senden($nr, $st, $mg_lauf_cfg);    // 1.1.31: Sammelthemen haus/fahrzeug/<name>/...
 }
 
 foreach (mg_automatik() as $m) {
     // mg_automatik() protokolliert selbst; hier bleibt nichts zu tun.
     unset($m);
 }
+
+/* 1.1.31: was angesagt werden soll, spricht ein abgekoppelter Sender; dieser Lauf wartet nicht darauf. */
+mg_ansage_starten(__FILE__);

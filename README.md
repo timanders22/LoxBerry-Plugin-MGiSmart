@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.30
+Version 1.1.31
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -8,6 +8,84 @@ Klima, Standort — und schickt Befehle zurück: Laden stoppen, Ziel-Ladestand,
 Ladestrombegrenzung, Standklima, „Auto finden".
 
 Kompatibel mit LoxBerry 3.x und **LoxBerry 4** (reines PHP, PHP 7.4 und 8.x).
+
+## Neu in 1.1.31: Das Plugin spricht – ab Werk an
+
+**Ab dieser Fassung sagt das Plugin Ereignisse über Ihre Lautsprecher an, auch nach einem Update, ohne dass Sie etwas
+einschalten.** Das gilt, sobald auf diesem LoxBerry ein Lautsprecher dafür bereitsteht (Punkt „Wohin“).
+
+**Ausschalten:** Reiter *Einstellungen*, Abschnitt *Sprachansagen*, Ausgabeart **„aus“** wählen und speichern. Das bleibt aus,
+auch nach jedem weiteren Update. Einzelne Ereignisse schalten Sie darunter mit ihrem Haken ab.
+
+### Sprachansagen
+
+**Was angesagt wird**, jedes mit eigenem Haken, getrennt von den Benachrichtigungen:
+
+* das Auto steht seit 10 Minuten unverschlossen (nicht während der Fahrt, einmal je Mal),
+* das Ladeziel ist erreicht,
+* die Ladung ist beendet,
+* die Ladung wurde abgebrochen (sie endete mehr als einen Prozentpunkt unter dem Ladeziel),
+* ein Fenster steht offen,
+* ein Befehl ans Auto ist fehlgeschlagen,
+* das Auto steht zu Hause ohne Kabel und der Akku ist niedrig (siehe „Kabel vergessen“).
+
+Kabel ein oder ab wird nicht angesagt; das bleibt eine Benachrichtigung.
+
+**Wohin.** Ab Werk an drei Ziele zugleich: Loxone Music Server, Google-Lautsprecher über *Chromecast4lox* und Amazon Echo über
+*Alexa-NG*. Ein Ziel, das nicht bereitsteht, wird übergangen; das ist kein Fehler und steht nicht im Protokoll. Der Reiter
+*Test* nennt, welches Ziel spricht und was den anderen fehlt.
+
+* **Music Server:** Tragen Sie dessen Adresse ein. Ohne Adresse wird er übergangen.
+* **Chromecast4lox:** Dort muss die *Sprachausgabe für andere Plugins* eingeschaltet sein, mit Sprechtoken und Standardgerät.
+* **Alexa-NG:** Es muss angemeldet sein und ein Standardgerät haben.
+* **Das Sprechtoken** müssen Sie nicht abschreiben. Ist das Feld leer, übernimmt das Plugin es aus dem anderen Plugin auf diesem LoxBerry und
+  speichert es in seiner Konfiguration (Dateirechte 0600). Ändert es sich dort, zieht das Plugin es nach. Ein von Hand eingetragenes Token bleibt, wie
+  es ist. Ist bei Chromecast4lox die Sprachausgabe für andere Plugins aus, wird nichts übernommen und das Übernommene nicht benutzt. In „Einstellungen
+  sichern“ steht ein Sprechtoken nie; beim Zurückspielen bleibt das geltende. Es steht in keinem Protokoll.
+
+Bis zu sechs Ziele sind möglich, je mit eigener Lautstärke. Gesprochen wird in einem eigenen Vorgang; der Minutenlauf wartet nicht
+auf Lautsprecher.
+
+**Wann nicht:**
+
+* **Nachtruhe**, ab Werk 22 bis 7 Uhr: Die Ansage entfällt, wird nicht nachgeholt und steht im Protokoll. Keine Ansage dieses
+  Plugins gilt als dringend.
+* **Dieselbe Ansage** höchstens einmal in 30 Minuten, je Ereignis und Fahrzeug (einstellbar, 5 bis 240 Minuten).
+* **Schalter „Ansagen aus“ in Loxone:** Solange das MQTT-Thema `haus/ansage/ruhe` retained auf `1` steht, schweigen alle Plugins des
+  Hauses, die ihn kennen, auch mit Dringendem. Fehlt der Wert oder der Broker, wird gesprochen. Die Bausteine stehen im Reiter
+  *Einbindung in Loxone*, Seite *MGiSmart*, Zeilen 34 bis 41. Der Schalter gehört nur einmal ins Projekt.
+* **Anwesenheit** spielt keine Rolle.
+
+Die **Testansage** im Reiter *Test* spricht immer, auch nachts und mit gesetztem Schalter.
+
+Berichtigt: Trafen in einem Minutenlauf mehrere Ereignisse zusammen, ging bis 1.1.30 nur eines als Meldung hinaus. Jetzt stehen alle
+in der Meldung. Der Leser der Haus-Themen beendet einen hängenden `mosquitto_sub` nach höchstens 2 Sekunden hart, statt stundenlang zu warten. `?selftest=0` und `?selftest=` gelten nicht mehr als Selbsttest. Ist `cron.err` nicht schreibbar, läuft der Minutenlauf weiter (bis 1.1.30 startete er nicht, ohne Spur);
+lässt sich die Sperrdatei nicht öffnen, steht das einmal je Stunde im Protokoll.
+
+Berichtigt: Unter PHP 7.4 ohne UTF-8 (`LANG=C`, so startet Apache) strich `escapeshellarg()` Umlaute und den Halbgeviertstrich aus dem, was an `mosquitto_pub` ging. Der Reiter *Test* zeigte deshalb bei „Kommt bei der Veröffentlichung an, was hineingegeben wurde?“ rot, sobald ein Wert solche Zeichen trug (der Ladeplan: `22:00–06:00`). Die Veröffentlichung selbst läuft im Minutenlauf und blieb unter `LANG=C.UTF-8` richtig; verstümmelt wurden Themen mit einem Umlaut in der iSMART-Anmeldung, wenn ein Befehl über `mg.php` oder eine Befehlsbrücke ohne UTF-8 ging, und jeder Text auf einem LoxBerry, dessen Cron keine UTF-8-Locale hat. Thema und Wert gehen jetzt Byte für Byte durch `mg_shell_arg()`; die Prüfzeile prüft zusätzlich immer einen Wert mit „–“ und „ü“.
+
+### Kabel vergessen
+
+Steht das Auto zu Hause, steckt das Kabel nicht und liegt der Akku unter 30 % (einstellbar), meldet sich das Plugin ab 20:00 Uhr (einstellbar)
+oder wenn laut `haus/abfahrt` eine Abfahrt naht (ab Werk binnen 60 Minuten, wirkt nur mit dem Haken „Minuten bis zur Abfahrt aus dem Haus-Thema“).
+Wege, jeder mit eigenem Haken im Reiter *Einstellungen*: Ansage und Benachrichtigung ab Werk an, SignalBot ab Werk aus.
+
+* **Höchstens einmal** je Standzeit und je Kalendertag. Die Standzeit endet, wenn das Auto wegfährt oder das Kabel steckt.
+* **Nur mit frischem Stand:** Der Fahrzeugstand darf höchstens 12 Stunden alt sein. Ist etwas unbekannt (Heimzone nicht eingetragen, Kabel, Akku), bleibt es still.
+* **In der Nachtruhe** meldet sich das Plugin auf keinem der Wege und verbraucht dabei nichts. Wurde das Auto spät abgestellt, kommt die Warnung am Morgen, wenn die
+  Nachtruhe endet und das Kabel noch fehlt.
+
+### Vorklimatisierung: Mindest-Akku
+
+Liegt der Akku unter 20 % (einstellbar, 0 = keine Grenze), unterbleibt die Vorklimatisierung dieser Abfahrt. Das Feld `VORKLIMA` zeigt **5**, kein Versuch wird verbraucht.
+Mit dem Haken „nur mit gestecktem Kabel“ (ab Werk aus) zeigt es **6**, wenn das Kabel nicht steckt. Ist der Akkustand oder das Kabel unbekannt, klimatisiert das Plugin wie bisher.
+Ein schon begonnener Ablauf wird nicht abgebrochen.
+
+### Sammelthemen `haus/fahrzeug/<name>/…`
+
+Ab Werk an (Reiter *MQTT*, abschaltbar): `soc`, `reichweite_km`, `kabel`, `laedt`, `zuhause` retained, ohne Aussage `-`; dazu `zaehler` (0…999 je Minutenlauf, nie retained). So lesen
+andere Plugins und Loxone ein Fahrzeug, gleich welcher Marke. `<name>` ist der Fahrzeugname nach der Namensregel. Es geht kein Standort hinaus, nur 0/1 für „zu Hause“.
+Ausschalten und Deinstallation räumen die Themen mit Rücklesen ab.
 
 ## Neu in 1.1.30
 
@@ -401,7 +479,7 @@ Haken steht ab Werk aus. Der HTTP-Weg nach Loxone war nie betroffen.*
 
 * **PHP führt die Argumente selbst an.** Statt einer Schleife, die eine Datei
   zerlegt, schreibt das Plugin eine fertige Befehlsdatei, in der jedes Argument
-  durch `escapeshellarg()` gegangen ist. Es gibt kein Trennzeichen mehr, das
+  durch `escapeshellarg()` (seit 1.1.31 `mg_shell_arg()`) gegangen ist. Es gibt kein Trennzeichen mehr, das
   falsch verstanden werden könnte.
 * **Eine Prüfzeile, die das misst — ohne Broker.** Der Reiter *Test* lässt die
   erzeugten Befehlszeilen wirklich durch `sh` laufen, mit einem `set --` statt

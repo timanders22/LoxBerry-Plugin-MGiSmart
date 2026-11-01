@@ -110,7 +110,9 @@ function mg_token_pruefen($kopf = 'MG')
  * dann geht Licht und Hupe an -, oder man erfaehrt nie, ob die Adresse im
  * Miniserver noch stimmt. Kein Geraetekontakt, kein Schreibzugriff.
  */
-if (mg_gesetzt('selftest')) {
+/* 1.1.31: bis 1.1.30 zaehlte das nackte isset auch ?selftest=0 und ?selftest= als Selbsttest - eine Adresse mit diesem Anhang tat nie
+ * etwas anderes. Geaendert an dieser Stelle: mg_gesetzt() dient auch anderen Parametern (?cmd=, ?refresh ...). */
+if (!empty($_GET['selftest'])) {
     mg_token_pruefen('SELFTEST');
     mg_kopf();
     echo "SELFTEST;OK=1;TOKEN=OK\n";

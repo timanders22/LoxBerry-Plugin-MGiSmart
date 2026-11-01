@@ -128,6 +128,9 @@ if (!function_exists('lb_wurzel_ermitteln')) {
     }
 }
 
+/* 1.1.31: die gemeinsame Sprachausgabe (Stamm 1.3.0), neben dieser Datei - wie sie selbst in html/ (kein Endpunkt, 403). */
+require_once __DIR__ . '/sprachausgabe.php';
+
 /* Die LoxBerry-Wurzel: $LBHOMEDIR, wenn dort config/plugins, data/plugins und
  * config/system/general.json liegen, sonst die Aufwaertssuche
  * lb_wurzel_ermitteln() (mit general.json). '' heisst: keine Wurzel.
@@ -353,6 +356,26 @@ function mg_vorgaben()
 
         // --- Benachrichtigungen ---
         'notify' => array(),
+
+        // --- Sprachansagen (1.1.31): ab Werk EIN; gilt nur, solange der Schluessel nie gespeichert wurde (mg_config(): $cfg += Vorgaben) ---
+        'tts' => ansage_werk_block(),
+        'ansage_regeln' => ansage_regeln_vorgaben(),
+        'ansage_haken' => mg_ansage_haken_vorgabe(),
+        'ansage_token_herkunft' => array(),     // Feldname => 'nachbar': uebernommen, nicht von Hand (Stamm 1.3.1)
+
+        // --- Kabel vergessen (1.1.31) ---
+        'kabel_soc' => 30,
+        'kabel_uhr' => '20:00',
+        'kabel_abfahrt_min' => 60,
+        'signal_kabel' => 0,
+        'signal_praefix' => 'signalbot',
+
+        // --- Vorklimatisierung: Mindest-Akku (1.1.31) ---
+        'vorklima_min_soc' => 20,
+        'vorklima_nur_kabel' => 0,
+
+        // --- Sammelthemen haus/fahrzeug/<name>/... (1.1.31, ab Werk an) ---
+        'haus_fahrzeug_ein' => 1,
 
         // --- Eigene MQTT-Veroeffentlichung (Regelweg laut Hausregeln) ---
         'mqtt_ein' => 0,
@@ -647,6 +670,13 @@ function mg_config()
     if (!is_array($cfg['notify'])) {
         $cfg['notify'] = array();
     }
+    if (!is_array($cfg['ansage_haken'])) {      // 1.1.31: eine verbogene Datei schaltet keinen Haken still ab oder um
+        $cfg['ansage_haken'] = array();
+    }
+    $cfg['ansage_haken'] += mg_ansage_haken_vorgabe();
+    if (!is_array($cfg['ansage_token_herkunft'])) {
+        $cfg['ansage_token_herkunft'] = array();
+    }
     if (!is_array($cfg['ankunft_quellen'])) {   // Gruppe 39 (1.1.28)
         $cfg['ankunft_quellen'] = array();
     }
@@ -657,6 +687,7 @@ function mg_config()
         'offen' => 1,         // melden, wenn das Auto unverschlossen steht
         'fenster' => 1,       // melden, wenn ein Fenster offen steht
         'fehler' => 1,        // melden, wenn ein Befehl scheiterte
+        'kabel_vergessen' => 1,   // 1.1.31: zu Hause, Kabel nicht gesteckt, Akku niedrig
         'push_minutes' => 5,
     );
     return $cfg;
@@ -903,6 +934,9 @@ function mg_log($msg)
      * das iSMART-Kennwort und das Broker-Kennwort des LoxBerry (general.json),
      * das mg_broker_zugang() benutzt, wenn keine eigenen Angaben stehen. */
     $mg_geheim = array($cfg['broker_pass'], $cfg['aktionstoken'], $cfg['saic_pass']);
+    foreach (array('alexa_token', 'google_token') as $mg_s) {     // 1.1.31: Sprechtoken
+        if (isset($cfg['tts'][$mg_s])) { $mg_geheim[] = $cfg['tts'][$mg_s]; }
+    }
     $mg_lb = mg_general_mqtt();
     if ($mg_lb !== null) {
         $mg_geheim[] = $mg_lb['pass'];
@@ -1202,6 +1236,21 @@ function mg_broker_optionsdatei($erzwingen = false)
     return $ordner;
 }
 
+/**
+ * Ein Argument fuer die Schale anfuehren, Byte fuer Byte. Fuer alles, was einen Text traegt: Thema und Wert von mosquitto_pub und mosquitto_sub.
+ *
+ * escapeshellarg() verwirft unter PHP 7.4 jedes Byte, das im eingestellten LC_CTYPE kein gueltiges Zeichen ist. Apache startet mit LANG=C
+ * (/etc/apache2/envvars), eine Befehlsbruecke nach einer Installation laeuft ohne LANG: aus "22:00–06:00" wurde "22:0006:00", aus "Prüfwagen"
+ * "Prfwagen", ohne Fehler (am Geraet gemessen 01.11.2026; ab PHP 8.1 stellt PHP beim Start selbst C.UTF-8 ein). setlocale() waere nur ein
+ * halber Schutz: Es fehlt, wo keine UTF-8-Locale erzeugt ist, und es aendert nebenbei basename() und die Zeichentabellen von PCRE. Einfache
+ * Anfuehrungszeichen sind fuer sh und dash byte-erhaltend; ein Nullbyte kann kein Argument tragen und entfaellt. Nur fuer POSIX-Schalen,
+ * das Plugin laeuft auf keiner anderen.
+ */
+function mg_shell_arg($s)
+{
+    return "'" . str_replace("'", "'\\''", str_replace("\0", '', (string) $s)) . "'";
+}
+
 /** Der Teil der Aufrufzeile, der oeffentlich sein darf: Rechner und Port. */
 function mg_broker_args()
 {
@@ -1228,7 +1277,7 @@ function mg_sub($themen, $sekunden)
     }
     $t = '';
     foreach ((array) $themen as $thema) {
-        $t .= ' -t ' . escapeshellarg((string) $thema);
+        $t .= ' -t ' . mg_shell_arg((string) $thema);
     }
     /* Die Fehlerausgabe geht in eine EIGENE Datei (Befund C2/M2). Bis 1.1.17
      * stand hier "2>&1", und jede Zeile mit einem Leerzeichen galt als
@@ -1748,7 +1797,7 @@ function mg_felder()
         'LKOSTEN'      => array(1, -1, 1000,   'EUR',  'laden', 'ladung_kosten'),
         'LKWH'         => array(1, -1, 200,    'kWh',  'laden', 'ladung_kwh'),
         'LPREIS'       => array(1, -1, 500,    'ct/kWh', 'laden', 'ladung_preis'),
-        'VORKLIMA'     => array(1, -1, 4,      '',     'mg', 'vorklima'),
+        'VORKLIMA'     => array(1, -1, 6,      '',     'mg', 'vorklima'),
     );
     $f = array();
     foreach ($roh as $name => $r) {
@@ -2724,8 +2773,8 @@ function mg_send($befehl, $wert = null, $nr = 1, $warten = true)
     $mg_hor = ($warten && !empty($cfg['wirkung_pruefen']))
         ? mg_ergebnis_horchen($base . '/' . mg_ergebnis_thema($topic), $mg_wz) : null;
     $cmd = mg_broker_umgebung() . 'mosquitto_pub' . mg_broker_args()
-         . ' -t ' . escapeshellarg($base . '/' . $topic)
-         . ' -m ' . escapeshellarg($sendewert) . ' 2>&1';
+         . ' -t ' . mg_shell_arg($base . '/' . $topic)
+         . ' -m ' . mg_shell_arg($sendewert) . ' 2>&1';
     $out = array();
     @exec($cmd, $out, $rc);
     mg_drossel_merken($name, $nr);
@@ -2807,6 +2856,496 @@ function mg_wirkung_gleich($ist, $bdef, $sendewert)
     return strcasecmp($ist, (string) $sendewert) === 0;
 }
 
+/* ---------------- Sprachansagen (1.1.31, Stamm sprachausgabe.php 1.3.0) ----------------
+ *
+ * Die Regeln (Nachtruhe, Sperre, Schalter "Ansagen aus") stehen im Stamm. Hier stehen nur die Anlaesse.
+ * Sprechtoken: mg_ansage_token_pflegen() (Stamm 1.3.1). Ab Werk EIN: der Block tts steht in mg_vorgaben(); mg_config() ergaenzt ihn NUR, wenn der Schluessel in der
+ * gespeicherten Konfiguration fehlt (nie gesetzt, Entscheidung des Hausherrn 01.11.2026, auch nach einem Update). Ein
+ * gespeicherter Block bleibt - auch 'aus'; ein ungueltiger gilt als 'aus' (ansage_block_oder_aus()).
+ *
+ * Der Minutenlauf spricht nie selbst: ein Lautsprecher darf bis zu 30 s brauchen. Er legt die Anlaesse in
+ * <tmp>/ansage_warte.json und startet hoechstens einen abgekoppelten Sender (cron.php --ansage-senden).
+ */
+
+/** "steht unverschlossen" nach so vielen Minuten (Entscheidung des Hausherrn 01.11.2026). */
+define('MG_ANSAGE_OFFEN_MIN', 10);
+/** Aelter wird nichts mehr angesagt (ein aufgestauter Anlass nach einem Update oder Hang). */
+define('MG_ANSAGE_HOECHSTALTER', 600);
+
+/** Die Anlaesse: Name => Beschriftung. Kabel ein/ab ist keine Ansage (Entscheidung 01.11.2026). */
+function mg_ansage_anlaesse()
+{
+    return array('unverschlossen' => mg_t('ANSAGEMG.L_UNVERSCHLOSSEN'), 'ladeziel' => mg_t('ANSAGEMG.L_LADEZIEL'),
+                 'ladung_ende' => mg_t('ANSAGEMG.L_LADUNG_ENDE'), 'ladung_abbruch' => mg_t('ANSAGEMG.L_LADUNG_ABBRUCH'),
+                 'fenster' => mg_t('ANSAGEMG.L_FENSTER'), 'fehler' => mg_t('ANSAGEMG.L_FEHLER'),
+                 'kabel_vergessen' => mg_t('ANSAGEMG.L_KABEL'));
+}
+
+/** Haken je Anlass ab Werk: alle an. */
+function mg_ansage_haken_vorgabe()
+{
+    return array('unverschlossen' => 1, 'ladeziel' => 1, 'ladung_ende' => 1, 'ladung_abbruch' => 1, 'fenster' => 1, 'fehler' => 1, 'kabel_vergessen' => 1);
+}
+
+/** Alle Ausgabearten ausser 'audioserver': die Linie gibt keinen Text an Loxone. */
+function mg_ansage_modi()
+{
+    return array_values(array_diff(ansage_modi(), array('audioserver')));
+}
+
+/** Optionen fuer das Formular: Tabelle der Ziele; kein Sprechtoken noetig (es steht im Zielplugin); "aus" genuegt zum Ausschalten. */
+function mg_ansage_opt()
+{
+    return array('modi' => mg_ansage_modi(), 'ziele' => true, 'token_vor_ort' => true, 'aus_gewinnt' => true);
+}
+
+/** Der Block tts: geprueft und vervollstaendigt, ein ungueltiger gilt als aus. */
+function mg_tts($cfg = null)
+{
+    if ($cfg === null) { $cfg = mg_config(); }
+    return ansage_block_oder_aus(isset($cfg['tts']) ? $cfg['tts'] : array('mode' => 'aus'), mg_ansage_modi());
+}
+
+/** Die Regeln: geprueft; ein ungueltiger Block gilt als Vorgabe (mit Nachtruhe). */
+function mg_ansage_regeln($cfg = null)
+{
+    if ($cfg === null) { $cfg = mg_config(); }
+    $g = '';
+    $r = ansage_regeln_wert(isset($cfg['ansage_regeln']) ? $cfg['ansage_regeln'] : array(), $g);
+    return $r === null ? ansage_regeln_vorgaben() : $r;
+}
+
+/** Der Kontext des Moduls. */
+function mg_ansage_k()
+{
+    $p = mg_paths();
+    return array(
+        'port' => $p['lbhome'] !== '' ? ansage_webport($p['lbhome'] . '/config/system/general.json') : 80,
+        'home' => $p['lbhome'],
+        'kopf' => array('User-Agent: LoxBerry MG iSmart'),
+        'ordner' => @is_dir($p['datadir']) ? $p['datadir'] : '',
+        't' => function ($s) { return mg_t($s); },
+        'absender' => 'mgismart',
+        'werk' => ansage_werk_modus(),
+    );
+}
+
+/** Wohin ein Tabellenfeld des Moduls in der Einmalmeldung reist: name[N] -> name.N (X-2). */
+function mg_ziele_x2_name($n)
+{
+    return is_string($n) ? (string) preg_replace('/^(tts_ziel_[a-z]+)\[([2-9])\]\z/', '$1.$2', $n) : $n;
+}
+
+/** Die Tabelle aus den gesammelten Eingaben zurueck in die Form des POST (X-2); null, wenn keine da ist. */
+function mg_ziele_x2_post(array $werte)
+{
+    $p = array();
+    foreach ($werte as $k => $v) {
+        if (is_string($v) && preg_match('/^(tts_ziel_[a-z]+)\.([2-9])\z/', (string) $k, $m)) { $p[$m[1]][(int) $m[2]] = $v; }
+    }
+    return isset($p['tts_ziel_art']) ? $p : null;
+}
+
+/** Die Tabellenfelder flach: name.N fuer N = 2..6. */
+function mg_ziele_x2_felder()
+{
+    $f = array();
+    foreach (array('tts_ziel_art', 'tts_ziel_wo', 'tts_ziel_laut', 'tts_ziel_sprache', 'tts_ziel_ein', 'tts_ziel_loeschen') as $n) {
+        for ($i = 2; $i <= 6; $i++) { $f[] = $n . '.' . $i; }
+    }
+    return $f;
+}
+
+/**
+ * Der Zeitgeber "steht unverschlossen": true genau einmal je Stand, wenn ZU seit MG_ANSAGE_OFFEN_MIN Minuten 0 ist und das
+ * Auto nicht faehrt. ZU = 1 raeumt ab; ZU unbekannt laesst den Stand stehen und meldet nichts. Fahrt beginnt die Frist neu.
+ * Der Merker steht in <tmp>, wie die Flanken (vorher<n>.json): er ueberlebt ein Update, nicht einen Neustart.
+ */
+function mg_ansage_zeitgeber(array $st, $nr, $jetzt)
+{
+    $f = mg_paths()['tmp'] . '/ansage_offen' . (int) $nr . '.json';
+    $zu = isset($st['ZU']) ? (int) $st['ZU'] : -1;
+    if ($zu === -1) { return false; }
+    $m = mg_json_lesen($f);
+    if ($zu === 1) {
+        if (!empty($m['seit'])) { mg_write_json($f, array()); }
+        return false;
+    }
+    if (empty($m['seit']) || (isset($st['LAEUFT']) && (int) $st['LAEUFT'] === 1 && empty($m['gesagt']))) {
+        mg_write_json($f, array('seit' => (int) $jetzt, 'gesagt' => 0));
+        return false;
+    }
+    if (!empty($m['gesagt']) || (int) $jetzt - (int) $m['seit'] < MG_ANSAGE_OFFEN_MIN * 60) { return false; }
+    mg_write_json($f, array('seit' => (int) $m['seit'], 'gesagt' => 1));
+    return true;
+}
+
+/** Eintraege aus den Ereignissen eines Durchgangs: Liste von array('schluessel', 'text'). Rein bis auf die Sprachdatei. */
+function mg_ansage_eintraege(array $ereignisse, array $st, $vorher, $nr, array $haken, $wagen, $offen_faellig, $kabel = false)
+{
+    $v_laedt = (is_array($vorher) && isset($vorher['LAEDT'])) ? (int) $vorher['LAEDT'] : -1;
+    $soc = isset($st['SOC']) ? (float) $st['SOC'] : -1;
+    $ziel = isset($st['ZIEL']) ? (float) $st['ZIEL'] : -1;
+    $bekannt = $soc >= 0 && $ziel > 0;
+    $aus = array();
+    $dazu = function ($anlass, $text) use (&$aus, $haken, $nr) {
+        if (!empty($haken[$anlass])) { $aus[] = array('schluessel' => $anlass . ':' . (int) $nr, 'text' => $text); }
+    };
+    // Ladeziel nur aus einer Ladung heraus: ein gesenktes Ziel am stehenden Auto ist keine Nachricht.
+    if (in_array('soc_voll', $ereignisse, true) && ((int) $st['LAEDT'] === 1 || $v_laedt === 1)) {
+        $dazu('ladeziel', sprintf(mg_t('ANSAGEMG.S_LADEZIEL'), $wagen, (int) round($soc)));
+    }
+    if (in_array('ladung_ende', $ereignisse, true)) {
+        if ($bekannt && $soc < $ziel - 1) {
+            $dazu('ladung_abbruch', sprintf(mg_t('ANSAGEMG.S_LADUNG_ABBRUCH'), $wagen, (int) round($soc), (int) round($ziel)));
+        } elseif ((int) $st['VOLL'] !== 1 || empty($haken['ladeziel'])) {   // sonst hat "Ladeziel erreicht" es schon gesagt
+            $dazu('ladung_ende', $soc >= 0 ? sprintf(mg_t('ANSAGEMG.S_LADUNG_ENDE'), $wagen, (int) round($soc))
+                                           : sprintf(mg_t('ANSAGEMG.S_LADUNG_ENDE_OHNE'), $wagen));
+        }
+    }
+    if (in_array('fenster', $ereignisse, true)) { $dazu('fenster', sprintf(mg_t('ANSAGEMG.S_FENSTER'), $wagen)); }
+    if (in_array('fehler', $ereignisse, true)) { $dazu('fehler', sprintf(mg_t('ANSAGEMG.S_FEHLER'), $wagen)); }
+    if ($offen_faellig) { $dazu('unverschlossen', sprintf(mg_t('ANSAGEMG.S_UNVERSCHLOSSEN'), $wagen, MG_ANSAGE_OFFEN_MIN)); }
+    if ($kabel) { $dazu('kabel_vergessen', sprintf(mg_t('ANSAGEMG.S_KABEL'), $wagen, (int) round($soc))); }
+    return $aus;
+}
+
+/** Die Warteliste unter einer Dateisperre aendern: $fn(Liste) -> array(neue Liste, Ergebnis). */
+function mg_ansage_warte($fn)
+{
+    $p = mg_paths();
+    if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
+    $h = @fopen($p['tmp'] . '/ansage_warte.json', 'c+');
+    if ($h === false) { return null; }
+    if (!flock($h, LOCK_EX)) { fclose($h); return null; }
+    $d = json_decode((string) stream_get_contents($h), true);
+    list($neu, $erg) = call_user_func($fn, is_array($d) ? $d : array());
+    rewind($h);
+    ftruncate($h, 0);
+    fwrite($h, (string) json_encode($neu));
+    fflush($h);
+    flock($h, LOCK_UN);
+    fclose($h);
+    @chmod($p['tmp'] . '/ansage_warte.json', 0600);
+    return $erg;
+}
+
+/** Der Teil des Minutenlaufs: Anlaesse dieses Fahrzeugs in die Warteliste. Spricht nicht, wartet auf nichts. */
+function mg_ansage_pruefen(array $ereignisse, array $st, $vorher, $nr, array $cfg, $wagen, $jetzt = null, $kabel = false)
+{
+    $jetzt = $jetzt === null ? time() : (int) $jetzt;
+    $offen = mg_ansage_zeitgeber($st, $nr, $jetzt);
+    $tts = mg_tts($cfg);
+    if ($tts['mode'] === 'aus') { return 0; }
+    $l = mg_ansage_eintraege($ereignisse, $st, $vorher, $nr,
+                             (isset($cfg['ansage_haken']) && is_array($cfg['ansage_haken'])) ? $cfg['ansage_haken'] : array(), $wagen, $offen, $kabel);
+    if (!$l) { return 0; }
+    mg_ansage_warte(function ($alt) use ($l, $jetzt) {
+        foreach ($l as $e) { $alt[] = $e + array('zeit' => $jetzt); }
+        return array(array_slice($alt, -50), null);
+    });
+    return count($l);
+}
+
+/**
+ * Den abgekoppelten Sender starten, wenn etwas wartet - hoechstens einen, der Minutenlauf wartet nie. Die Schale schliesst
+ * vor dem exec jede Deskriptor-Nummer ueber 2 (sonst erbte er cron.lock; wie mg_haus_abnehmer_starten()).
+ * Rueckgabe: nichts | laeuft | gestartet | kein_start.
+ */
+function mg_ansage_starten($skript)
+{
+    $p = mg_paths();
+    $w = $p['tmp'] . '/ansage_warte.json';
+    clearstatcache(true, $w);
+    if (!is_file($w) || filesize($w) < 3) { return 'nichts'; }
+    $fh = @fopen($p['tmp'] . '/ansage_senden.lock', 'ce');
+    if ($fh === false) { return 'kein_start'; }
+    if (!flock($fh, LOCK_EX | LOCK_NB)) {
+        fclose($fh);
+        return 'laeuft';
+    }
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    $php = (defined('PHP_BINARY') && PHP_BINARY !== '' && is_executable(PHP_BINARY)) ? PHP_BINARY : 'php';
+    $befehl = 'for f in /proc/$$/fd/*; do n=${f##*/}; [ "$n" -gt 2 ] 2>/dev/null && eval "exec $n>&-"; done; '
+            . 'exec ' . escapeshellarg($php) . ' ' . escapeshellarg($skript) . ' --ansage-senden';
+    $aus = array();
+    $rc = 1;
+    @exec('bash -c ' . escapeshellarg($befehl) . ' </dev/null >/dev/null 2>&1 &', $aus, $rc);
+    return $rc === 0 ? 'gestartet' : 'kein_start';
+}
+
+/**
+ * Der Sender (cron.php --ansage-senden): eigene Sperre, nimmt die Warteliste und spricht nach den Regeln.
+ * "kein Ziel eingerichtet" und "aus" hinterlassen keine Zeile; ein gescheitertes Ziel genau eine je Aenderung
+ * (ab Werk EIN darf kein Protokoll vollaufen, etwa wenn der Music Server gerade aus ist).
+ */
+function mg_ansage_lauf($jetzt = null)
+{
+    $p = mg_paths();
+    if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
+    $fh = @fopen($p['tmp'] . '/ansage_senden.lock', 'ce');
+    if ($fh === false || !flock($fh, LOCK_EX | LOCK_NB)) { return 'laeuft'; }
+    $erg = 'nichts';
+    $l = mg_ansage_warte(function ($alt) { return array(array(), $alt); });
+    $jetzt = $jetzt === null ? time() : (int) $jetzt;
+    $frisch = array();
+    foreach (is_array($l) ? $l : array() as $e) {
+        if (is_array($e) && isset($e['zeit']) && $jetzt - (int) $e['zeit'] <= MG_ANSAGE_HOECHSTALTER) { $frisch[] = $e; }
+    }
+    if ($frisch) {
+        mg_ansage_token_pflegen();
+        $cfg = mg_config();
+        $a = ansage_regel_sprechen($frisch, mg_tts($cfg), mg_ansage_regeln($cfg), mg_ansage_k());
+        $erg = $a['regel'] !== '' ? $a['regel'] : 'gesprochen';
+        if ($a['r'] !== null) {
+            mg_log_if_changed('ansage_lage', $a['r']['stand'] === 0 ? ansage_kurz($a['r']) : 'gesprochen');
+            if ($a['r']['stand'] === 1) { mg_log('Ansage: ' . ansage_regel_kurz($a)); }
+        } elseif ($a['regel'] !== 'AUS' && $a['regel'] !== 'KEIN_ZIEL') {
+            mg_log('Ansage entfaellt: ' . ansage_regel_kurz($a));
+        }
+    }
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return $erg;
+}
+
+/**
+ * Das Sprechtoken aus Alexa-NG und Chromecast4lox uebernehmen (Stamm 1.3.1, Entscheidung des Hausherrn 01.11.2026). Vom Minutenlauf und
+ * vom Sender gerufen; liest zwei kleine Dateien und schreibt NUR bei einer Aenderung. Ein von Hand eingetragenes Token bleibt; der Vermerk
+ * ansage_token_herkunft unterscheidet beide. Das Protokoll nennt die Art, nie das Token. Bei "aus" und bei einem ungueltigen Block geschieht nichts.
+ */
+function mg_ansage_token_pflegen($cfg = null)
+{
+    if ($cfg === null) { $cfg = mg_config(); }
+    $her = isset($cfg['ansage_token_herkunft']) ? $cfg['ansage_token_herkunft'] : array();
+    list($neu, $her2, $g) = ansage_token_abgleich(mg_tts($cfg), $her, mg_ansage_k());
+    if (!$g) { return false; }
+    $cfg = mg_config();
+    $cfg['tts'] = $neu;
+    $cfg['ansage_token_herkunft'] = $her2;
+    if (!mg_config_save($cfg)) {
+        mg_log_if_changed('ansage_token', 'Sprechtoken liess sich nicht speichern; es gilt fuer diesen Lauf nur im Speicher.');
+        return false;
+    }
+    mg_log('Sprechtoken aus dem Zielplugin gespeichert: ' . implode(', ', $g) . '.');
+    return true;
+}
+
+/* ---------------- Kabel vergessen (1.1.31) ---------------- */
+
+/** Der Fahrzeugstand gilt fuer die Warnung bis so viele Minuten: ein stehendes Auto wird selten gefragt, es meldet sich beim Abstellen. */
+define('MG_KABEL_FRISCH_MIN', 720);
+
+/**
+ * Die Warnung "Kabel vergessen": zu Hause, Kabel nicht gesteckt, Akku unter der Schwelle, Stand frisch; abends (ab kabel_uhr) oder wenn
+ * haus/abfahrt naht. Rein bis auf die Uhr im Argument. Unbekannt heisst nie warnen.
+ *   - Hoechstens einmal je Standzeit und je Kalendertag. Die Standzeit endet mit: nicht mehr zu Hause, Fahrt oder Kabel gesteckt.
+ *   - In der Nachtruhe geschieht nichts und nichts wird verbraucht: die Bedingung steht noch an. Abgestellt nach dem Abend, vor dem Ende der
+ *     Nachtruhe: Die Warnung kommt am Morgen, wenn die Nachtruhe endet und das Kabel noch fehlt (bis 12 Uhr).
+ * Rueckgabe array(faellig, neuer Merker).
+ */
+function mg_kabel_entscheiden(array $st, array $m, array $cfg, $abfahrt_in, $nacht, $nacht_bis, $jetzt)
+{
+    $zu = isset($st['ZUHAUSE']) ? (int) $st['ZUHAUSE'] : -1;
+    $st_k = isset($st['STECKER']) ? (int) $st['STECKER'] : -1;
+    if ($zu === 0 || $st_k === 1 || (isset($st['LAEUFT']) && (int) $st['LAEUFT'] === 1)) {
+        $m['seit'] = 0;
+        $m['gesagt'] = 0;
+        return array(false, $m);
+    }
+    if ($zu !== 1 || $st_k !== 0) { return array(false, $m); }
+    if (empty($m['seit'])) { $m['seit'] = (int) $jetzt; }
+    $soc = isset($st['SOC']) ? (float) $st['SOC'] : -1;
+    $fz = isset($st['FZALTER']) ? (float) $st['FZALTER'] : -1;
+    if ($soc < 0 || $soc >= (float) $cfg['kabel_soc'] || $fz < 0 || $fz > MG_KABEL_FRISCH_MIN) { return array(false, $m); }
+    if (!empty($m['gesagt']) || $nacht) { return array(false, $m); }
+    $tag = date('Ymd', (int) $jetzt);
+    if (isset($m['tag']) && (string) $m['tag'] === $tag) { return array(false, $m); }
+    $hm = date('H:i', (int) $jetzt);
+    $abends = $hm >= (string) $cfg['kabel_uhr'];
+    $morgen = false;
+    if (!$abends && $nacht_bis !== '' && $hm < '12:00') {
+        $morgen = (int) $m['seit'] < strtotime(date('Y-m-d', (int) $jetzt) . ' ' . $nacht_bis);
+    }
+    $grenze = (int) $cfg['kabel_abfahrt_min'];
+    $abfahrt = $grenze > 0 && $abfahrt_in !== null && (int) $abfahrt_in >= 1 && (int) $abfahrt_in <= $grenze;
+    if (!$abends && !$morgen && !$abfahrt) { return array(false, $m); }
+    $m['gesagt'] = 1;
+    $m['tag'] = $tag;
+    return array(true, $m);
+}
+
+/** Der Teil des Minutenlaufs: Merker lesen, entscheiden, nur bei einer Aenderung schreiben. Ohne einen Haken geschieht nichts. */
+function mg_kabel_pruefen(array $st, $nr, array $cfg, $jetzt = null)
+{
+    $jetzt = $jetzt === null ? time() : (int) $jetzt;
+    $haken = !empty($cfg['notify']['kabel_vergessen']) || !empty($cfg['ansage_haken']['kabel_vergessen']) || !empty($cfg['signal_kabel']);
+    if (!$haken) { return false; }
+    $f = mg_paths()['tmp'] . '/kabel' . (int) $nr . '.json';
+    $m = mg_json_lesen($f);
+    $in = null;
+    if (!empty($cfg['haus_abfahrt_ein'])) {
+        $c = mg_haus_quellen();
+        if (mg_haus_frisch($c, 'abfahrt', $jetzt)) {
+            $v = trim(mg_haus_wert($c, 'abfahrt', 'haus/abfahrt/in_min'));
+            if (preg_match('/^[0-9]{1,6}\z/', $v)) { $in = (int) $v; }
+        }
+    }
+    $r = mg_ansage_regeln($cfg);
+    list($faellig, $neu) = mg_kabel_entscheiden($st, $m, $cfg, $in, ansage_nachtruhe($r, $jetzt), empty($r['nachtruhe']) ? '' : $r['bis'], $jetzt);
+    if ($neu !== $m) { mg_write_json($f, $neu); }
+    return $faellig;
+}
+
+/** Eine Meldung an SignalBot (Thema <praefix>/befehl/plugin/<ordner>, nie retained; Bauart Renault NG 3.3). */
+function mg_signal_senden(array $cfg, $text)
+{
+    $pr = isset($cfg['signal_praefix']) ? (string) $cfg['signal_praefix'] : '';
+    $o = (string) mg_paths()['plugin'];
+    if (!preg_match('/^[A-Za-z0-9_-]{1,40}\z/', $pr) || !preg_match('/^[a-z0-9_]{1,40}\z/', $o)) {
+        mg_log_if_changed('signal', 'SignalBot-Meldung nicht gesendet: Praefix oder Ordnername passt nicht.');
+        return false;
+    }
+    $js = json_encode(array('text' => (string) $text, 'dringend' => 0), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    return is_string($js) && mg_mqtt_einzeln(array($pr . '/befehl/plugin/' . $o => $js));
+}
+
+/* ---------------- Vorklimatisierung: Mindest-Akku (1.1.31) ---------------- */
+
+/** Warum diese Abfahrt nicht klimatisiert wird: '' (doch), 'akku', 'kabel'. Unbekannt sperrt nicht. Rein. */
+function mg_vorklima_sperre(array $cfg, array $st)
+{
+    $g = isset($cfg['vorklima_min_soc']) ? (float) $cfg['vorklima_min_soc'] : 0;
+    $soc = isset($st['SOC']) ? (float) $st['SOC'] : -1;
+    if ($g > 0 && $soc >= 0 && $soc < $g) { return 'akku'; }
+    if (!empty($cfg['vorklima_nur_kabel']) && isset($st['STECKER']) && (int) $st['STECKER'] === 0) { return 'kabel'; }
+    return '';
+}
+
+/* ---------------- Sammelthemen haus/fahrzeug/<name>/... (1.1.31, Regeln/07) ---------------- */
+
+/** <name> nach der Namensregel von Regeln/07; reserviert: zaehler, anbieter. Ohne brauchbaren Namen mg<n>. Rein. */
+function mg_haus_fahrzeug_name($name, $nr)
+{
+    $s = strtr((string) $name, array('Ä' => 'ae', 'Ö' => 'oe', 'Ü' => 'ue', 'ä' => 'ae', 'ö' => 'oe', 'ü' => 'ue', 'ß' => 'ss'));
+    $s = substr((string) preg_replace('/[^a-z0-9_\-]/', '_', strtolower($s)), 0, 40);
+    if (trim($s, '_') === '' || $s === 'zaehler' || $s === 'anbieter') { return 'mg' . (int) $nr; }
+    return $s;
+}
+
+/** Nr => <name>, je Fahrzeug eindeutig (ein doppelter Name bekommt _<n>). */
+function mg_haus_fahrzeug_namen(array $cfg)
+{
+    $aus = array();
+    foreach (mg_fahrzeuge($cfg) as $nr => $fz) {
+        $n = mg_haus_fahrzeug_name($fz['name'], $nr);
+        $aus[$nr] = in_array($n, $aus, true) ? substr($n, 0, 36) . '_' . (int) $nr : $n;
+    }
+    return $aus;
+}
+
+/** Die retained Zustaende; ohne Aussage '-' (Entscheidung Nr. 5, nie 0 und nie leer). Rein. */
+function mg_haus_fahrzeug_werte(array $st)
+{
+    $bool = function ($k) use ($st) { return (isset($st[$k]) && ((int) $st[$k] === 0 || (int) $st[$k] === 1)) ? (string) (int) $st[$k] : '-'; };
+    $zahl = function ($k, $st2) { return (isset($st2[$k]) && is_numeric($st2[$k]) && (float) $st2[$k] >= 0) ? (string) round((float) $st2[$k], 1) : '-'; };
+    return array('soc' => $zahl('SOC', $st), 'reichweite_km' => $zahl('REICHWEITE', $st), 'kabel' => $bool('STECKER'),
+                 'laedt' => $bool('LAEDT'), 'zuhause' => $bool('ZUHAUSE'));
+}
+
+/** Eine Befehlsdatei mit mosquitto_pub-Zeilen ausfuehren (Argumente durch mg_shell_arg()). True bei rc 0. */
+function mg_haus_fahrzeug_lauf($zeilen)
+{
+    $p = mg_paths();
+    if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
+    $tmp = $p['tmp'] . '/haus_fz.' . getmypid() . '.' . mt_rand(1000, 9999) . '.sh';
+    if (!mg_write_atomic($tmp, $zeilen, 0600)) { return false; }
+    $out = array();
+    $rc = 1;
+    @exec('sh ' . escapeshellarg($tmp) . ' 2>&1', $out, $rc);
+    if (is_file($tmp)) { @unlink($tmp); }
+    if ($rc !== 0) { mg_log_if_changed('haus_fahrzeug', 'haus/fahrzeug nicht gesendet: ' . trim(implode(' ', array_slice($out, 0, 2)))); }
+    return $rc === 0;
+}
+
+/** Die Zeile fuer ein Thema: retained mit Wert, leer zum Abraeumen, ohne -r fuer den Zaehler. */
+function mg_haus_fahrzeug_zeile($thema, $wert, $retain)
+{
+    return mg_broker_umgebung() . 'mosquitto_pub' . mg_broker_args() . ($retain ? ' -r' : '') . ' -t ' . mg_shell_arg($thema)
+         . ($wert === '' ? " -m ''" : ' -m ' . mg_shell_arg($wert)) . " || exit 1\n";
+}
+
+/**
+ * Im Minutenlauf je Fahrzeug: Zustaende bei einer Aenderung und alle 30 Minuten voll, der Zaehler in jedem Lauf (nie retained). Direkt an den Broker,
+ * nicht ueber den UDP-Eingang (Regeln/07, "Technik"). Schweigt der Lauf (kein Einlesen), schweigt der Zaehler: Das ist die Aussage.
+ * Haken aus: einmal abraeumen. Name geaendert: den alten Stamm abraeumen.
+ */
+function mg_haus_fahrzeug_senden($nr, array $st, array $cfg)
+{
+    if (!mg_has_mosquitto()) { return 0; }
+    $f = mg_paths()['tmp'] . '/haus_fahrzeug' . (int) $nr . '.json';
+    $m = mg_json_lesen($f);
+    if (empty($cfg['haus_fahrzeug_ein'])) {
+        if (is_file($f)) {
+            list($rc) = mg_haus_fahrzeug_leeren($cfg);
+            if ($rc === 0) { @unlink($f); }
+        }
+        return 0;
+    }
+    $namen = mg_haus_fahrzeug_namen($cfg);
+    if (!isset($namen[$nr])) { return 0; }
+    $stamm = 'haus/fahrzeug/' . $namen[$nr];
+    $werte = mg_haus_fahrzeug_werte($st);
+    $zeilen = '';
+    if (isset($m['stamm']) && is_string($m['stamm']) && $m['stamm'] !== $stamm && strpos($m['stamm'], 'haus/fahrzeug/') === 0) {
+        foreach (array_keys($werte) as $n) { $zeilen .= mg_haus_fahrzeug_zeile($m['stamm'] . '/' . $n, '', true); }
+    }
+    $jetzt = time();
+    $voll = !isset($m['zeit'], $m['werte'], $m['stamm']) || $m['stamm'] !== $stamm || $jetzt - (int) $m['zeit'] > 1800;
+    foreach ($werte as $n => $w) {
+        if ($voll || !isset($m['werte'][$n]) || (string) $m['werte'][$n] !== $w) {
+            $zeilen .= mg_haus_fahrzeug_zeile($stamm . '/' . $n, $w, true);
+        }
+    }
+    $zeilen .= mg_haus_fahrzeug_zeile($stamm . '/zaehler', (string) max(0, mg_laufzaehler()), false);
+    if (!mg_haus_fahrzeug_lauf($zeilen)) { return 0; }
+    mg_log_if_changed('haus_fahrzeug', 'haus/fahrzeug wird gesendet.');
+    if ($voll || (isset($m['werte']) && $m['werte'] !== $werte)) {
+        mg_write_json($f, array('stamm' => $stamm, 'zeit' => $voll ? $jetzt : (int) $m['zeit'], 'werte' => $werte), 0600);
+    }
+    return 1;
+}
+
+/** Die retained Sammelthemen abraeumen und nachlesen (Haken aus, Deinstallation). Rueckgabe array(rc, Zeilen). */
+function mg_haus_fahrzeug_leeren($cfg = null)
+{
+    if ($cfg === null) { $cfg = mg_config(); }
+    if (!mg_has_mosquitto()) { return array(1, array('<WARNING> mosquitto_pub fehlt - haus/fahrzeug bleibt im Broker.')); }
+    $staemme = array();
+    foreach (mg_haus_fahrzeug_namen($cfg) as $n) { $staemme['haus/fahrzeug/' . $n] = true; }
+    foreach (glob(mg_paths()['tmp'] . '/haus_fahrzeug*.json') ?: array() as $d) {
+        $m = mg_json_lesen($d);
+        if (isset($m['stamm']) && is_string($m['stamm']) && strpos($m['stamm'], 'haus/fahrzeug/') === 0) { $staemme[$m['stamm']] = true; }
+    }
+    $themen = array();
+    $zeilen = '';
+    foreach (array_keys($staemme) as $s) {
+        foreach (array_keys(mg_haus_fahrzeug_werte(array())) as $n) {
+            $themen[] = $s . '/' . $n;
+            $zeilen .= mg_haus_fahrzeug_zeile($s . '/' . $n, '', true);
+        }
+    }
+    if (!$themen) { return array(0, array('<OK> Kein Fahrzeug eingetragen - unter haus/fahrzeug ist nichts abzuraeumen.')); }
+    if (!mg_haus_fahrzeug_lauf($zeilen)) { return array(1, array('<WARNING> haus/fahrzeug liess sich nicht abraeumen.')); }
+    usleep(300000);
+    $g = mg_mqtt_rueckfrage($themen);
+    if ($g['lage'] !== 'ok') { return array(1, array('<WARNING> haus/fahrzeug leer gesendet; das Nachlesen gelang nicht - nicht nachpruefbar.')); }
+    $rest = array_intersect($themen, array_keys($g['behalten']));
+    if ($rest) { return array(1, array('<WARNING> ' . count($rest) . ' Themen unter haus/fahrzeug stehen weiter im Broker.')); }
+    return array(0, array('<OK> ' . count($themen) . ' Themen unter haus/fahrzeug geleert (vom Broker bestaetigt).'));
+}
+
 /* ---------------- Meldungen ---------------- */
 
 function mg_meldungsdatei($nr = 1)
@@ -2878,24 +3417,24 @@ function mg_check_events($st, $nr = 1)
     $fz = mg_fahrzeuge($cfg);
     $wagen = isset($fz[(int) $nr]) ? $fz[(int) $nr]['name'] : ('MG ' . (int) $nr);
 
-    if ($vorher) {
-        $v = function ($k) use ($vorher) {
-            return isset($vorher[$k]) ? (int) $vorher[$k] : -1;
-        };
-        if (!empty($n['soc_voll']) && (int) $st['VOLL'] === 1 && $v('VOLL') === 0) {
-            $melden = $wagen . ': ' . mg_t('MELDUNG.GELADEN') . ' ' . round($st['SOC']) . ' %.';
-        } elseif (!empty($n['stecker']) && (int) $st['STECKER'] === 1 && $v('STECKER') === 0) {
-            $melden = $wagen . ': ' . mg_t('MELDUNG.KABEL_EIN');
-        } elseif (!empty($n['stecker']) && (int) $st['STECKER'] === 0 && $v('STECKER') === 1) {
-            $melden = $wagen . ': ' . mg_t('MELDUNG.KABEL_AB');
-        } elseif (!empty($n['offen']) && (int) $st['ZU'] === 0 && $v('ZU') === 1) {
-            $melden = $wagen . ': ' . mg_t('MELDUNG.UNVERSCHLOSSEN');
-        } elseif (!empty($n['fenster']) && (int) $st['FENSTEROFFEN'] > 0 && $v('FENSTEROFFEN') === 0) {
-            $melden = $wagen . ': ' . mg_t('MELDUNG.FENSTER_OFFEN');
-        } elseif (!empty($n['fehler']) && (int) $st['FEHLER'] === 1 && $v('FEHLER') === 0) {
-            $melden = $wagen . ': ' . mg_t('MELDUNG.BEFEHL_FEHLER');
-        }
+    /* 1.1.31 (Plan Sprachansagen): bis 1.1.30 eine elseif-Kette - je Durchgang nur EINE Meldung, gleichzeitige Ereignisse gingen
+     * verloren (Kabel ab und Ladeziel im selben Lauf: das Kabel fehlte). Jetzt alle, in einem Text. */
+    $ereignisse = $vorher ? mg_ereignisse($st, $vorher) : array();
+    $teile = array();
+    foreach (array('soc_voll' => array('soc_voll', mg_t('MELDUNG.GELADEN') . ' ' . round($st['SOC']) . ' %.'),
+                   'kabel_ein' => array('stecker', mg_t('MELDUNG.KABEL_EIN')), 'kabel_ab' => array('stecker', mg_t('MELDUNG.KABEL_AB')),
+                   'offen' => array('offen', mg_t('MELDUNG.UNVERSCHLOSSEN')), 'fenster' => array('fenster', mg_t('MELDUNG.FENSTER_OFFEN')),
+                   'fehler' => array('fehler', mg_t('MELDUNG.BEFEHL_FEHLER'))) as $ereignis => $mz) {
+        if (in_array($ereignis, $ereignisse, true) && !empty($n[$mz[0]])) { $teile[] = $mz[1]; }
     }
+    /* 1.1.31: Kabel vergessen - ein Zustand, keine Flanke; mg_kabel_pruefen() sagt es hoechstens einmal. */
+    $kabel = mg_kabel_pruefen($st, $nr, $cfg);
+    if ($kabel) {
+        $mg_kt = sprintf(mg_t('MELDUNG.KABEL_VERGESSEN'), (int) round($st['SOC']));
+        if (!empty($n['kabel_vergessen'])) { $teile[] = $mg_kt; }
+        if (!empty($cfg['signal_kabel'])) { mg_signal_senden($cfg, $wagen . ': ' . $mg_kt); }
+    }
+    if ($teile) { $melden = $wagen . ': ' . implode(' ', $teile); }
     // Nur die Feldwerte merken - der Rest wechselt ohnehin bei jedem Lauf.
     $merk = array();
     foreach (mg_felder() as $name => $info) {
@@ -2906,7 +3445,26 @@ function mg_check_events($st, $nr = 1)
         mg_write_json(mg_meldungsdatei($nr), array('zeit' => date('c'), 'text' => $melden));
         mg_log('Meldung: ' . $melden);
     }
+    mg_ansage_pruefen($ereignisse, $st, $vorher, $nr, $cfg, $wagen, null, $kabel);    // 1.1.31: legt nur in die Warteliste
     return array($melden, $vorher);
+}
+
+/**
+ * Alle Flanken eines Durchgangs gegen den vorigen Stand - die eine Quelle fuer Meldung und Ansage. Rein. Jeder Zweig prueft auf
+ * "bekannt" (siehe mg_check_events()).
+ */
+function mg_ereignisse(array $st, array $vorher)
+{
+    $v = function ($k) use ($vorher) { return isset($vorher[$k]) ? (int) $vorher[$k] : -1; };
+    $e = array();
+    if ((int) $st['VOLL'] === 1 && $v('VOLL') === 0) { $e[] = 'soc_voll'; }
+    if ((int) $st['STECKER'] === 1 && $v('STECKER') === 0) { $e[] = 'kabel_ein'; }
+    if ((int) $st['STECKER'] === 0 && $v('STECKER') === 1) { $e[] = 'kabel_ab'; }
+    if ((int) $st['ZU'] === 0 && $v('ZU') === 1) { $e[] = 'offen'; }
+    if ((int) $st['FENSTEROFFEN'] > 0 && $v('FENSTEROFFEN') === 0) { $e[] = 'fenster'; }
+    if ((int) $st['FEHLER'] === 1 && $v('FEHLER') === 0) { $e[] = 'fehler'; }
+    if ((int) $st['LAEDT'] === 0 && $v('LAEDT') === 1) { $e[] = 'ladung_ende'; }
+    return $e;
 }
 
 /* ==================================================================
@@ -3236,6 +3794,8 @@ function mg_automatik()
          * Vorklimatisierung (kein Versuch verbraucht). Schweigt die Quelle,
          * gilt das bisherige Verhalten. */
         $m['warten_anwesend'] = 0;
+        $m['warten_akku'] = 0;      // 1.1.31
+        $m['warten_kabel'] = 0;
         if ($im_fenster && !empty($cfg['vorklima_anwesend_ein']) && mg_haus_frisch($c, 'anwesenheit', $jetzt)
             && trim(mg_haus_wert($c, 'anwesenheit', 'haus/anwesenheit/jemand')) === '0') {
             $m['warten_anwesend'] = 1;
@@ -3243,6 +3803,15 @@ function mg_automatik()
                 $m['kennung'] = mg_vorklima_kennung($jetzt, $in);
             }
             mg_log_if_changed('vorklima_anwesend', 'Vorklimatisierung wartet: niemand zu Hause (haus/anwesenheit/jemand = 0).');
+            $merk['vorklima'][(string) $nr] = $m;
+            $aktion = 'nichts';
+        } elseif ($im_fenster && empty($m['versuche']) && ($vk_sp = mg_vorklima_sperre($cfg, mg_state($nr))) !== '') {
+            /* 1.1.31: Akku unter der Grenze oder Kabel fehlt - nicht senden, kein Fehlversuch, eigener Zustand (VORKLIMA 5 bzw. 6). Ein begonnener Ablauf laeuft weiter. */
+            $m['warten_' . $vk_sp] = 1;
+            if (!isset($m['kennung']) || abs(mg_vorklima_kennung($jetzt, $in) - (int) $m['kennung']) > 300) {
+                $m['kennung'] = mg_vorklima_kennung($jetzt, $in);
+            }
+            mg_log_if_changed('vorklima_sperre', 'Vorklimatisierung ausgesetzt: ' . ($vk_sp === 'akku' ? 'Akku unter ' . (int) $cfg['vorklima_min_soc'] . ' %' : 'Kabel nicht gesteckt') . ', Fahrzeug ' . $nr . '.');
             $merk['vorklima'][(string) $nr] = $m;
             $aktion = 'nichts';
         } else {
@@ -3889,8 +4458,8 @@ function mg_mqtt_zeile($thema, $wert)
 {
     return mg_broker_umgebung() . 'mosquitto_pub' . mg_broker_args()
          . (mg_mqtt_behalten($thema, $wert) ? ' -r' : '')
-         . ' -t ' . escapeshellarg($thema)
-         . ' -m ' . escapeshellarg($wert);
+         . ' -t ' . mg_shell_arg($thema)
+         . ' -m ' . mg_shell_arg($wert);
 }
 
 function mg_mqtt_senden($nr, $st)
@@ -3956,13 +4525,13 @@ function mg_mqtt_senden($nr, $st)
      * Namens ab. Kein einziges Thema kam richtig an.
      *
      * Jetzt schreibt PHP eine fertige Befehlsdatei: jedes Argument geht durch
-     * escapeshellarg(). Es gibt kein Trennzeichen mehr, das falsch verstanden
+     * mg_shell_arg(). Es gibt kein Trennzeichen mehr, das falsch verstanden
      * werden koennte. */
     $p = mg_paths();
     $zeilen = '';
     foreach ($raeumen as $thema) {
         $zeilen .= mg_broker_umgebung() . 'mosquitto_pub' . mg_broker_args()
-                 . ' -r -t ' . escapeshellarg((string) $thema) . " -m '' || exit 1\n";
+                 . ' -r -t ' . mg_shell_arg((string) $thema) . " -m '' || exit 1\n";
     }
     foreach ($zu_senden as $thema => $wert) {
         $zeilen .= mg_mqtt_zeile($thema, $wert) . ' || exit 1' . "\n";
@@ -4028,9 +4597,14 @@ function mg_mqtt_probe($nr = 1)
      * werden sie mit einem Trennzeichen, das in keinem Thema vorkommen kann. */
     $zeilen = '';
     foreach ($paare as $thema => $wert) {
-        $zeilen .= 'set -- -t ' . escapeshellarg($thema) . ' -m ' . escapeshellarg($wert)
+        $zeilen .= 'set -- -t ' . mg_shell_arg($thema) . ' -m ' . mg_shell_arg($wert)
                  . '; printf \'%s\\034%s\\n\' "$2" "$4"' . "\n";
     }
+    /* Seit dem Zeichensatz-Befund 01.11.2026: eine Zeile mit Halbgeviertstrich und Umlaut. Sie prueft auch dann, wenn gerade kein Wert des
+     * Fahrzeugs einen traegt, und zaehlt nicht mit: Die Zahl hinter dem Schraegstrich bleibt die der Themen. */
+    $zeichen = "22:00\xE2\x80\x9306:00, gr\xC3\xBCn";
+    $zeilen .= 'set -- -t ' . mg_shell_arg('probe/zeichen') . ' -m ' . mg_shell_arg($zeichen)
+             . '; printf \'%s\\034%s\\n\' "$2" "$4"' . "\n";
     if (!mg_write_atomic($datei, $zeilen, 0600)) {
         return array(2, '');
     }
@@ -4038,6 +4612,7 @@ function mg_mqtt_probe($nr = 1)
     @exec('sh ' . escapeshellarg($datei) . ' 2>&1', $out, $rc);
     @unlink($datei);
     $themen = array_keys($paare);
+    $zeichen_ok = (array_pop($out) === 'probe/zeichen' . chr(28) . $zeichen);
     if ($rc !== 0 || count($out) !== count($themen)) {
         return array(0, count($out) . '/' . count($themen));
     }
@@ -4049,8 +4624,8 @@ function mg_mqtt_probe($nr = 1)
             $richtig++;
         }
     }
-    return array($richtig === count($themen) ? 1 : 0,
-        $richtig . '/' . count($themen));
+    return array(($richtig === count($themen) && $zeichen_ok) ? 1 : 0,
+        $richtig . '/' . count($themen) . ($zeichen_ok ? '' : ' - ' . mg_t('PRUEF.MQTT_ZEICHEN')));
 }
 
 
@@ -4435,7 +5010,7 @@ function mg_mqtt_verwaiste_loeschen($themen)
             continue;
         }
         $zeilen .= mg_broker_umgebung() . 'mosquitto_pub' . mg_broker_args()
-                 . ' -r -t ' . escapeshellarg((string) $thema) . " -m ''\n";
+                 . ' -r -t ' . mg_shell_arg((string) $thema) . " -m ''\n";
         $gesendet[] = (string) $thema;
     }
     if (!$gesendet) {
@@ -4556,7 +5131,7 @@ function mg_mqtt_leeren($praefix = null)
     $zeilen = '';
     foreach ($ziel as $t) {
         $zeilen .= mg_broker_umgebung() . 'mosquitto_pub' . mg_broker_args()
-                 . ' -r -t ' . escapeshellarg($t) . " -m '' || echo MGFEHL\n";
+                 . ' -r -t ' . mg_shell_arg($t) . " -m '' || echo MGFEHL\n";
     }
     $p = mg_paths();
     if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
@@ -4670,7 +5245,7 @@ function mg_gateway_themen_leeren()
     $zeilen = '';
     foreach ($ziel as $t) {
         $zeilen .= mg_broker_umgebung() . 'mosquitto_pub' . mg_broker_args()
-                 . ' -r -t ' . escapeshellarg($t) . " -m '' || echo MGFEHL\n";
+                 . ' -r -t ' . mg_shell_arg($t) . " -m '' || echo MGFEHL\n";
     }
     if (!is_dir($p['tmp'])) { @mkdir($p['tmp'], 0775, true); }
     $datei = $p['tmp'] . '/gwleeren.' . getmypid() . '.sh';
@@ -6790,6 +7365,20 @@ function mg_selbsttest($live = false)
                 $lk_fz['name'], count($lk_p), (int) round($lk_ab * 100), $lk_g));
         }
     }
+    /* 1.1.31: Sprachansagen. Die Ziele, die Regeln, der Haus-Schalter (nur im offenen Reiter); eingerichtete Ziele antworten mit
+     * ihrer Selbstpruefung, die nichts spricht. Ein nicht eingerichtetes Ziel ist kein Kreuz. */
+    $az_stand = array(1 => 1, 0 => 0, -1 => 2, -2 => 2);
+    $az_k = mg_ansage_k();
+    foreach (ansage_regel_lage(mg_tts($cfg), mg_ansage_regeln($cfg), $az_k, $live) as $az_i => $az_z) {
+        $add('PRUEF.ANSAGE_' . (int) $az_i, $az_stand[$az_z[0]], $az_z[1]);
+    }
+    list($az_b) = ansage_ziele_bereit(ansage_token_fuer_lauf(mg_tts($cfg), $cfg['ansage_token_herkunft'], $az_k), $az_k);
+    $add('PRUEF.HAUS_FAHRZEUG', empty($cfg['haus_fahrzeug_ein']) ? 2 : 1, empty($cfg['haus_fahrzeug_ein']) ? mg_t('PRUEFTEXT.HAUS_FAHRZEUG_AUS')
+        : sprintf(mg_t('PRUEFTEXT.HAUS_FAHRZEUG'), implode(', ', mg_haus_fahrzeug_namen($cfg))));
+    if ($az_b !== null && mg_tts($cfg)['mode'] !== 'aus') {
+        list($az_s, $az_h) = ansage_pruefzeile($az_b, $live, $az_k);
+        $add('PRUEF.ANSAGE_MELDET', $az_stand[$az_s], trim(html_entity_decode(strip_tags((string) $az_h), ENT_QUOTES, 'UTF-8')));
+    }
     list($vl_ok, $vl_txt) = mg_vorlagen_pruefen();
     $add('PRUEF.VORLAGEN', $vl_ok, $vl_txt);
     $add('PRUEF.ENDPUNKT_EIN', empty($cfg['endpunkt_ein']) ? 2 : 1,
@@ -7486,6 +8075,19 @@ function mg_wert_regeln()
         'vorklima_wetter_ein' => array('flag'),
         'vorklima_kalt_unter' => array('ganz', -30, 45),
         'vorklima_heiss_ueber' => array('ganz', -30, 45),
+        // 1.1.31: Sprachansagen
+        'tts' => array('tts'),
+        'ansage_regeln' => array('ansage_regeln'),
+        'ansage_haken' => array('ansage_haken'),
+        'ansage_token_herkunft' => array('ansage_herkunft'),
+        'kabel_soc' => array('ganz', 1, 100),
+        'kabel_uhr' => array('uhrzeit'),
+        'kabel_abfahrt_min' => array('ganz', 0, 720),
+        'signal_kabel' => array('flag'),
+        'signal_praefix' => array('muster', '/^[A-Za-z0-9_\-]{1,40}\z/', 'WERT.PRAEFIX'),
+        'vorklima_min_soc' => array('ganz', 0, 100),
+        'vorklima_nur_kabel' => array('flag'),
+        'haus_fahrzeug_ein' => array('flag'),
     );
 }
 
@@ -7643,13 +8245,44 @@ function mg_wert_pruefen($k, $w, $formular = false)
         }
         return array(true, array_values($w), '');
     }
+    if ($art === 'tts') {
+        // Eine Sicherung traegt nie ein Sprechtoken (Hausregel Sprachmodul); eine Datei mit einem stammt nicht von hier.
+        $g = '';
+        if (ansage_sicherung_mangel($w) || ansage_wert_pruefen($w, $g, mg_ansage_modi()) === null) {
+            return array(false, null, mg_t('WERT.ANSAGE'));
+        }
+        return array(true, $w, '');
+    }
+    if ($art === 'ansage_regeln') {
+        $g = '';
+        $r = ansage_regeln_wert($w, $g);
+        return $r === null ? array(false, null, mg_t('WERT.ANSAGE')) : array(true, $r, '');
+    }
+    if ($art === 'ansage_herkunft') {
+        if (!is_array($w)) { return array(false, null, mg_t('WERT.ANSAGE')); }
+        foreach ($w as $nk => $nv) {
+            if (!in_array($nk, ansage_token_felder(), true) || $nv !== 'nachbar') { return array(false, null, mg_t('WERT.ANSAGE')); }
+        }
+        return array(true, $w, '');
+    }
+    if ($art === 'ansage_haken') {
+        if (!is_array($w)) { return array(false, null, mg_t('WERT.ANSAGE')); }
+        $aus = array();
+        foreach ($w as $nk => $nv) {
+            if (!array_key_exists($nk, mg_ansage_haken_vorgabe()) || !in_array($nv, array(0, 1, '0', '1'), true)) {
+                return array(false, null, mg_t('WERT.ANSAGE'));
+            }
+            $aus[$nk] = (int) $nv;
+        }
+        return array(true, $aus, '');
+    }
     if ($art === 'notify') {
         if (!is_array($w)) {
             return array(false, null, mg_t('WERT.NOTIFY'));
         }
         $aus = array();
         foreach ($w as $nk => $nv) {
-            if (in_array($nk, array('push', 'soc_voll', 'stecker', 'offen', 'fenster', 'fehler'), true)) {
+            if (in_array($nk, array('push', 'soc_voll', 'stecker', 'offen', 'fenster', 'fehler', 'kabel_vergessen'), true)) {
                 list($ok, $nw, ) = mg_wert_pruefen('commands', $nv, false);
             } elseif ($nk === 'push_minutes') {
                 list($ok, $nw, ) = mg_wert_pruefen('notify.push_minutes', $nv, false);
@@ -7680,7 +8313,9 @@ function mg_sicherung_neue_schluessel()
      * Zurueckspielen endpunkt_ein nicht auf 0 (BMS N12). */
     return array('saic_pass', 'befehle_mqtt_ein', 'befehle_mqtt_steuern', 'endpunkt_ein', 'haus_abfahrt_ein',
                  'vorklima_anwesend_ein', 'ankunft_ein', 'ankunft_quellen', 'haus_strompreis_ein',
-                 'vorklima_wetter_ein', 'vorklima_kalt_unter', 'vorklima_heiss_ueber');
+                 'vorklima_wetter_ein', 'vorklima_kalt_unter', 'vorklima_heiss_ueber',
+                 'tts', 'ansage_regeln', 'ansage_haken', 'ansage_token_herkunft', 'kabel_soc', 'kabel_uhr', 'kabel_abfahrt_min',
+                 'signal_kabel', 'signal_praefix', 'vorklima_min_soc', 'vorklima_nur_kabel', 'haus_fahrzeug_ein');     // 1.1.31
 }
 
 /**
@@ -7781,6 +8416,12 @@ function mg_sicherung_lesen($roh, $jetzt = null, &$namen = null)
     foreach ($behalten as $fk) {
         $neu[$fk] = $jetzt[$fk];
     }
+    /* 1.1.31: Sprachansagen - die geltenden Sprechtoken bleiben (die Sicherung traegt keine). Eine Sicherung setzt 'aus' und 'an' wie gespeichert. */
+    if (!in_array('tts', $behalten, true) && isset($neu['tts']) && is_array($neu['tts'])) {
+        $neu['tts'] = ansage_sicherung_tokens_behalten($neu['tts'], isset($jetzt['tts']) ? $jetzt['tts'] : array());
+    }
+    /* Der Vermerk gehoert zum Token dieser Anlage: er reist nicht mit und wird nie aus einer Datei uebernommen. */
+    $neu['ansage_token_herkunft'] = (isset($jetzt['ansage_token_herkunft']) && is_array($jetzt['ansage_token_herkunft'])) ? $jetzt['ansage_token_herkunft'] : array();
     if ($neu['aktionstoken'] === '') {
         $neu['aktionstoken'] = is_string($jetzt['aktionstoken']) ? $jetzt['aktionstoken'] : '';
     }
@@ -7806,6 +8447,11 @@ function mg_rueckspiel_maengel($cfg = null)
         return array('json');
     }
     $namen = array();
+    $mg_rd = json_decode($js, true);    // 1.1.31: so, wie "Einstellungen sichern" sie schreibt - ohne Sprechtoken
+    if (is_array($mg_rd) && isset($mg_rd['tts'])) {
+        $mg_rd['tts'] = ansage_sicherung_bereinigen($mg_rd['tts']);
+        $js = (string) json_encode($mg_rd);
+    }
     list($neu) = mg_sicherung_lesen($js, $cfg, $namen);
     if ($neu !== null) {
         return array();
@@ -7854,12 +8500,25 @@ function mg_eingabe_felder($form)
             'liste' => array(), 'nie' => array()),
         'mqtt' => array(
             'text' => array('broker_host', 'broker_port', 'broker_user', 'prefix', 'saic_user', 'mqtt_praefix'),
-            'haken' => array('broker_eigen', 'broker_pass_loeschen', 'mqtt_ein'),
+            'haken' => array('broker_eigen', 'broker_pass_loeschen', 'mqtt_ein', 'haus_fahrzeug_ein'),
             'liste' => array('vin', 'fzname'), 'nie' => array('broker_pass')),
         'gateway' => array(
             'text' => array('saic_user'), 'haken' => array('saic_pass_loeschen'),
             'liste' => array(), 'nie' => array('saic_pass')),
     );
+    /* 1.1.31: die Felder der Sprachansagen (Stamm). Die Tabelle reist flach als name.N; die Sprechtoken nie. */
+    if ($form === 'settings') {
+        $f['settings']['text'] = array_merge($f['settings']['text'], array('ansage_ruhe_von', 'ansage_ruhe_bis', 'ansage_sperre_min'),
+            array_values(array_diff(ansage_x2_felder(), array('tts_alexa_token_loeschen', 'tts_google_token_loeschen'))), mg_ziele_x2_felder());
+        $f['settings']['text'] = array_merge($f['settings']['text'], array('kabel_soc', 'kabel_uhr', 'kabel_abfahrt_min', 'signal_praefix', 'vorklima_min_soc'));
+        foreach (array('n_kabel', 'signal_kabel', 'vorklima_nur_kabel') as $mg_hz) { $f['settings']['haken'][] = $mg_hz; }
+        $f['settings']['haken'][] = 'ansage_ruhe_ein';
+        $f['settings']['haken'][] = 'tts_alexa_token_loeschen';
+        $f['settings']['haken'][] = 'tts_google_token_loeschen';
+        foreach (array_keys(mg_ansage_haken_vorgabe()) as $a) { $f['settings']['haken'][] = 'ansage_anlass_' . $a; }
+        $f['settings']['nie'][] = 'tts_alexa_token';
+        $f['settings']['nie'][] = 'tts_google_token';
+    }
     return isset($f[$form]) ? $f[$form] : null;
 }
 
@@ -7895,6 +8554,12 @@ function mg_eingaben_sammeln($form, array $beanstandet)
             }
         }
         $werte[$k] = $l;
+    }
+    if ($form === 'settings') {         // 1.1.31: die Tabelle der Ziele kommt als name[N] und reist flach als name.N
+        foreach (mg_ziele_x2_felder() as $k) {
+            list($nn, $ni) = explode('.', $k);
+            if (isset($_POST[$nn][$ni]) && mg_eingabe_taugt($_POST[$nn][$ni])) { $werte[$k] = $_POST[$nn][$ni]; }
+        }
     }
     foreach ($f['nie'] as $k) {
         // Nur markieren, nie mitnehmen - und nur, wenn etwas eingetippt war.
@@ -8147,15 +8812,31 @@ function mg_ergebnis_warten($h, $sekunden)
     return trim((string) $z[0]);
 }
 
+/**
+ * Einen Kindprozess sicher beenden, bevor proc_close() auf ihn wartet: SIGTERM, hoechstens $frist Sekunden warten, dann SIGKILL. Bis 1.1.30 stand nach
+ * SIGTERM sofort proc_close(). Am Geraet 01.11.2026 hing mosquitto_sub nach SIGTERM fest (futex_do_wait), php wartete 5 Stunden in proc_close, die Sperre
+ * haus_lesen.lock hielt jeden neuen Leser auf, und haus/abfahrt galt als schweigend.
+ */
+function mg_proc_beenden($pr, $frist = 2.0)
+{
+    $s = @proc_get_status($pr);
+    if (!is_array($s) || !$s['running']) { return; }
+    @proc_terminate($pr, 15);
+    $bis = microtime(true) + (float) $frist;
+    while (microtime(true) < $bis) {
+        usleep(50000);
+        $s = @proc_get_status($pr);
+        if (!is_array($s) || !$s['running']) { return; }
+    }
+    @proc_terminate($pr, 9);
+}
+
 function mg_ergebnis_ende($h)
 {
     if (!is_array($h)) {
         return;
     }
-    $s = @proc_get_status($h['p']);
-    if (is_array($s) && $s['running']) {
-        @proc_terminate($h['p'], 15);
-    }
+    mg_proc_beenden($h['p']);
     @fclose($h['aus']);
     @proc_close($h['p']);
 }
@@ -8323,7 +9004,7 @@ function mg_vorklima_schritt(array $m, $in_min, $jetzt, $vorlauf, $letztes_ok)
     return array('senden', $m);
 }
 
-/** VORKLIMA aus einem Merker (Rein): 0 nichts/aus, 1 gesendet, 2 mild, 3 Wiederholung, 4 Anwesenheit, -1 gescheitert. */
+/** VORKLIMA aus einem Merker (Rein): 0 nichts/aus, 1 gesendet, 2 mild, 3 Wiederholung, 4 Anwesenheit, 5 Akku unter der Grenze, 6 Kabel fehlt, -1 gescheitert. */
 function mg_vorklima_wert($m, $jetzt)
 {
     if (!is_array($m) || !isset($m['kennung'])) {
@@ -8336,6 +9017,8 @@ function mg_vorklima_wert($m, $jetzt)
     if (!empty($m['erfolg'])) { return 1; }
     if (!empty($m['mild'])) { return 2; }
     if (!empty($m['warten_anwesend'])) { return 4; }
+    if (!empty($m['warten_akku'])) { return 5; }
+    if (!empty($m['warten_kabel'])) { return 6; }
     if (!empty($m['versuche'])) { return 3; }
     return 0;
 }
@@ -8550,7 +9233,7 @@ function mg_haus_sitzung(array $lesen, array $warten, $fenster)
     }
     $s = proc_get_status($pr);
     if ($s['running']) {
-        @proc_terminate($pr, 15);
+        mg_proc_beenden($pr);
     }
     @fclose($rohr[1]);
     @fclose($rohr[2]);
@@ -8730,8 +9413,8 @@ function mg_haus_wert(array $c, $q, $thema)
 
 /**
  * Die Abfahrt fuer die Vorklimatisierung: array(lage ok|..., in_min, grund, quelle haus|termin).
- * Haus-Thema zuerst (frisch); schweigt es, gilt wie bisher termin.php (E-E3: nur noch Rueckfall,
- * entfaellt mit 1.1.29). Ein frisches -1 oder '-' heisst: keine Abfahrt bekannt.
+ * Haus-Thema zuerst (frisch); schweigt es, gilt wie bisher termin.php (E-E3: Rueckfall, er bleibt
+ * bis auf Weiteres). Ein frisches -1 oder '-' heisst: keine Abfahrt bekannt.
  */
 function mg_abfahrt_quelle(array $cfg, $c = null, $jetzt = null)
 {
