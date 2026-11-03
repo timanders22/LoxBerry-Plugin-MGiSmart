@@ -3245,9 +3245,12 @@ function mg_haus_fahrzeug_namen(array $cfg)
     return $aus;
 }
 
-/** Die retained Zustaende; ohne Aussage '-' (Entscheidung Nr. 5, nie 0 und nie leer). Rein. */
+/** Die retained Zustaende; ohne Aussage '-' (Entscheidung Nr. 5, nie 0 und nie leer). Fahrzeugstand unbekannt oder aelter als 6 h: alle '-' (1.1.33). Rein. */
 function mg_haus_fahrzeug_werte(array $st)
 {
+    if (!isset($st['FZALTER']) || !is_numeric($st['FZALTER']) || (float) $st['FZALTER'] < 0 || (float) $st['FZALTER'] > MG_HF_ALT_MIN) {
+        return array('soc' => '-', 'reichweite_km' => '-', 'kabel' => '-', 'laedt' => '-', 'zuhause' => '-');
+    }
     $bool = function ($k) use ($st) { return (isset($st[$k]) && ((int) $st[$k] === 0 || (int) $st[$k] === 1)) ? (string) (int) $st[$k] : '-'; };
     $zahl = function ($k, $st2) { return (isset($st2[$k]) && is_numeric($st2[$k]) && (float) $st2[$k] >= 0) ? (string) round((float) $st2[$k], 1) : '-'; };
     return array('soc' => $zahl('SOC', $st), 'reichweite_km' => $zahl('REICHWEITE', $st), 'kabel' => $bool('STECKER'),
@@ -3263,7 +3266,11 @@ function mg_haus_fahrzeug_lauf($zeilen)
     if (!mg_write_atomic($tmp, $zeilen, 0600)) { return false; }
     $out = array();
     $rc = 1;
-    @exec('sh ' . escapeshellarg($tmp) . ' 2>&1', $out, $rc);
+    /* 1.1.33: feste Frist. Ein haengendes mosquitto_pub hielte sonst den Minutenlauf und mit ihm cron.lock fest. */
+    $to = array();
+    @exec('command -v timeout 2>/dev/null', $to);
+    $vor = !empty($to[0]) ? escapeshellarg(trim($to[0])) . ' -k 5 30 ' : '';
+    @exec($vor . 'sh ' . escapeshellarg($tmp) . ' 2>&1', $out, $rc);
     if (is_file($tmp)) { @unlink($tmp); }
     if ($rc !== 0) { mg_log_if_changed('haus_fahrzeug', 'haus/fahrzeug nicht gesendet: ' . trim(implode(' ', array_slice($out, 0, 2)))); }
     return $rc === 0;
@@ -3298,7 +3305,8 @@ function mg_haus_fahrzeug_senden($nr, array $st, array $cfg)
     $stamm = 'haus/fahrzeug/' . $namen[$nr];
     $werte = mg_haus_fahrzeug_werte($st);
     $zeilen = '';
-    if (isset($m['stamm']) && is_string($m['stamm']) && $m['stamm'] !== $stamm && strpos($m['stamm'], 'haus/fahrzeug/') === 0) {
+    /* 1.1.33: Ein Stamm mit fremdem Zaehler gehoert auch einer anderen Linie: Er bleibt stehen. */
+    if (isset($m['stamm']) && is_string($m['stamm']) && $m['stamm'] !== $stamm && strpos($m['stamm'], 'haus/fahrzeug/') === 0 && !isset(mg_hf_fremd_lesen()[$m['stamm']])) {
         foreach (array_keys($werte) as $n) { $zeilen .= mg_haus_fahrzeug_zeile($m['stamm'] . '/' . $n, '', true); }
     }
     $jetzt = time();
@@ -3317,33 +3325,304 @@ function mg_haus_fahrzeug_senden($nr, array $st, array $cfg)
     return 1;
 }
 
-/** Die retained Sammelthemen abraeumen und nachlesen (Haken aus, Deinstallation). Rueckgabe array(rc, Zeilen). */
-function mg_haus_fahrzeug_leeren($cfg = null)
+/* ---------------- 1.1.33: Stand und fremder Zaehler (Form Renault NG 2.1.25) ---------------- */
+
+if (!defined('MG_HF_ALT_MIN')) { define('MG_HF_ALT_MIN', 360); }      // Fahrzeugstand aelter als 6 h: ohne Aussage
+if (!defined('MG_HF_LAUSCH_S')) { define('MG_HF_LAUSCH_S', 62); }     // laenger als ein Minutentakt jeder Linie
+
+/** Der Merker des Stundenlaufs: Stamm => Zeit der ersten Beobachtung. Liegt im Datenordner, damit ein Neustart die Warnung nicht loescht. */
+function mg_hf_fremd_datei()
+{
+    return mg_paths()['datadir'] . '/haus_fahrzeug_fremd.json';
+}
+
+/** Die Staemme mit fremdem Zaehler aus dem Stundenlauf; nur, was die Namensregel zulaesst. */
+function mg_hf_fremd_lesen()
+{
+    $aus = array();
+    foreach (mg_json_lesen(mg_hf_fremd_datei()) as $s => $t) {
+        if (is_string($s) && preg_match('#^haus/fahrzeug/[a-z0-9_\-]{1,40}$#', $s)) { $aus[$s] = $t; }
+    }
+    return $aus;
+}
+
+/** Alle Staemme dieses Plugins: aus den Fahrzeugnamen und aus den Merkern des Minutenlaufs (ein gerade geaenderter Name steht nur dort). */
+function mg_hf_staemme(array $c)
+{
+    $aus = array();
+    foreach (mg_haus_fahrzeug_namen($c) as $n) { $aus['haus/fahrzeug/' . $n] = true; }
+    foreach (glob(mg_paths()['tmp'] . '/haus_fahrzeug*.json') ?: array() as $d) {
+        $m = mg_json_lesen($d);
+        if (isset($m['stamm']) && is_string($m['stamm']) && strpos($m['stamm'], 'haus/fahrzeug/') === 0) { $aus[$m['stamm']] = true; }
+    }
+    return array_keys($aus);
+}
+
+/**
+ * Ist dieser Zaehlerwert der eigene? Der Zaehler dieser Linie ist der Laufzaehler (0...999, mg_laufzaehler()): eigen ist, was vom Stand beim Hoerbeginn ($von) bis zum Stand jetzt ($bis)
+ * gelaufen sein kann, zwei Laeufe Spielraum davor (ein Lauf, der noch sendet) und einer danach. Rein.
+ */
+function mg_hf_zaehler_eigen($wert, $von, $bis)
+{
+    $wert = (int) $wert;
+    $von = (int) $von;
+    $bis = (int) $bis;
+    if ($von < 0 && $bis < 0) { return false; }
+    if ($von < 0) { $von = $bis; }
+    if ($bis < 0) { $bis = $von; }
+    $spanne = (($bis - $von) % 1000 + 1000) % 1000;
+    for ($i = -2; $i <= $spanne + 1; $i++) {
+        if ((($von + $i) % 1000 + 1000) % 1000 === $wert) { return true; }
+    }
+    return false;
+}
+
+/**
+ * Hoert $sek Sekunden auf <stamm>/zaehler. Ein Wert ausserhalb des eigenen Laufzaehlers heisst: Unter diesem Stamm sendet noch eine andere Linie. Eigene kleine MQTT-Sitzung wie mg_mqtt_rueckfrage(),
+ * kein Kindprozess, feste Frist. Rueckgabe array(ok, Liste der Staemme). ok ist nur wahr, wenn die Sitzung die ganze Zeit stand: Ein abgebrochenes Hoeren sagt nichts und nimmt keine Warnung zurueck.
+ */
+function mg_hf_fremde(array $staemme, $sek)
+{
+    if (!$staemme) { return array(false, array()); }
+    $z = mg_broker_zugang();
+    $host = trim((string) $z['host']);
+    if ($host === '' || $host === 'localhost') { $host = '127.0.0.1'; }
+    $port = (int) $z['port'];
+    if ($port <= 0 || $port > 65535) { $port = 1883; }
+    $ziel = (strpos($host, ':') !== false) ? '[' . $host . ']' : $host;
+    $errno = 0;
+    $errstr = '';
+    $s = @stream_socket_client('tcp://' . $ziel . ':' . $port, $errno, $errstr, 2);
+    if (!$s) { return array(false, array()); }
+    $zk = function ($t) { return pack('n', strlen($t)) . $t; };
+    $lang = function ($n) {
+        $o = '';
+        do {
+            $b = $n % 128;
+            $n = intdiv($n, 128);
+            if ($n > 0) { $b |= 128; }
+            $o .= chr($b);
+        } while ($n > 0);
+        return $o;
+    };
+    $flags = 0x02;
+    $nutz = $zk('mgfremd' . getmypid() . mt_rand(100, 999));
+    if ((string) $z['user'] !== '') {
+        $flags |= 0x80;
+        if ((string) $z['pass'] !== '') { $flags |= 0x40; }
+        $nutz .= $zk((string) $z['user']);
+        if ((string) $z['pass'] !== '') { $nutz .= $zk((string) $z['pass']); }
+    }
+    $kopf = $zk('MQTT') . chr(4) . chr($flags) . pack('n', 120);
+    @fwrite($s, chr(0x10) . $lang(strlen($kopf . $nutz)) . $kopf . $nutz);
+    stream_set_blocking($s, false);
+    $von = mg_laufzaehler();
+    $bis = microtime(true) + 3.0;
+    $puffer = '';
+    $verbunden = false;
+    $abbruch = false;
+    $fremd = array();
+    while (microtime(true) < $bis) {
+        $r = array($s);
+        $w = null;
+        $e = null;
+        if (@stream_select($r, $w, $e, 0, 200000) === false) { $abbruch = true; break; }
+        $t = @fread($s, 65536);
+        if ($t !== false && $t !== '') { $puffer .= $t; }
+        elseif (feof($s)) { $abbruch = true; break; }
+        while (strlen($puffer) >= 2) {
+            $n = 0; $m = 1; $i = 1; $voll = false;
+            while ($i < strlen($puffer) && $i <= 4) {
+                $b = ord($puffer[$i]);
+                $n += ($b & 127) * $m;
+                $m *= 128;
+                $i++;
+                if (!($b & 128)) { $voll = true; break; }
+            }
+            if (!$voll || strlen($puffer) < $i + $n) { break; }
+            $kb = ord($puffer[0]);
+            $rumpf = (string) substr($puffer, $i, $n);
+            $puffer = (string) substr($puffer, $i + $n);
+            $art = $kb >> 4;
+            if ($art === 2) {
+                if (strlen($rumpf) < 2 || ord($rumpf[1]) !== 0) { fclose($s); return array(false, array()); }
+                $verbunden = true;
+                $bis = microtime(true) + (float) $sek;
+                $sub = pack('n', 1);
+                foreach ($staemme as $st) { $sub .= $zk($st . '/zaehler') . chr(0); }
+                @fwrite($s, chr(0x82) . $lang(strlen($sub)) . $sub);
+            } elseif ($art === 9) {
+                for ($k = 2; $k < strlen($rumpf); $k++) {
+                    if (ord($rumpf[$k]) >= 0x80) { fclose($s); return array(false, array()); }
+                }
+            } elseif ($art === 3 && !($kb & 1) && strlen($rumpf) >= 2) {
+                $tl = unpack('n', substr($rumpf, 0, 2));
+                $thema = (string) substr($rumpf, 2, $tl[1]);
+                $wert = (string) substr($rumpf, 2 + $tl[1] + ((($kb >> 1) & 3) > 0 ? 2 : 0));
+                $st = (string) substr($thema, 0, -strlen('/zaehler'));
+                if (!in_array($st, $staemme, true) || in_array($st, $fremd, true) || !preg_match('/^[0-9]{1,3}$/', $wert)) { continue; }
+                if (!mg_hf_zaehler_eigen($wert, $von, mg_laufzaehler())) { $fremd[] = $st; }
+            }
+        }
+    }
+    @fwrite($s, chr(0xE0) . chr(0));
+    fclose($s);
+    return array($verbunden && !$abbruch, $fremd);
+}
+
+/** Der Stundenlauf (bin/cron.php --hf-lauschen, abgekoppelt, hoechstens einer, bis 65 s). Das Ergebnis liest der Reiter Test; ein sauberer Lauf nimmt den Vermerk zurueck. Rueckgabe Zahl der fremden Staemme, -1 = keine Aussage. */
+function mg_hf_lausch_lauf($sek = MG_HF_LAUSCH_S)
+{
+    $pf = mg_paths();
+    if (!is_dir($pf['tmp'])) { @mkdir($pf['tmp'], 0775, true); }
+    $fh = @fopen($pf['tmp'] . '/hf_lauschen.lock', 'ce');
+    if ($fh === false || !flock($fh, LOCK_EX | LOCK_NB)) { return -1; }
+    $aus = -1;
+    list($ok, $fremd) = mg_hf_fremde(mg_hf_staemme(mg_config()), $sek);
+    if ($ok && !mg_upgrade_marke_liegt()) {
+        $alt = mg_hf_fremd_lesen();
+        $neu = array();
+        foreach ($fremd as $st) {
+            $neu[$st] = isset($alt[$st]) ? $alt[$st] : time();
+            if (!isset($alt[$st])) { mg_log($st . ': hier sendet auch eine andere Linie (fremder Zaehler). Bitte einem Fahrzeug einen anderen Namen geben.'); }
+        }
+        foreach (array_keys(array_diff_key($alt, $neu)) as $st) { mg_log($st . ': kein fremder Zaehler mehr.'); }
+        if ($neu || $alt) { mg_write_json(mg_hf_fremd_datei(), $neu); }
+        $aus = count($fremd);
+    }
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return $aus;
+}
+
+/** Einmal je Stunde (Minute 7) den Stundenlauf starten, abgekoppelt und ohne geerbte Deskriptoren (cron.lock): Der Minutenlauf wartet nicht. Rueckgabe aus | nicht_jetzt | laeuft | gestartet | kein_start. */
+function mg_hf_lauschen_starten(array $c, $skript, $jetzt = null)
+{
+    if (empty($c['haus_fahrzeug_ein']) || !mg_haus_fahrzeug_namen($c)) { return 'aus'; }
+    $jetzt = ($jetzt === null) ? time() : (int) $jetzt;
+    if ((int) floor($jetzt / 60) % 60 !== 7) { return 'nicht_jetzt'; }
+    $pf = mg_paths();
+    if (!is_dir($pf['tmp'])) { @mkdir($pf['tmp'], 0775, true); }
+    $fh = @fopen($pf['tmp'] . '/hf_lauschen.lock', 'ce');
+    if ($fh === false) { return 'kein_start'; }
+    if (!flock($fh, LOCK_EX | LOCK_NB)) {
+        fclose($fh);
+        return 'laeuft';
+    }
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    $php = (defined('PHP_BINARY') && PHP_BINARY !== '' && is_executable(PHP_BINARY)) ? PHP_BINARY : 'php';
+    $befehl = 'for f in /proc/$$/fd/*; do n=${f##*/}; [ "$n" -gt 2 ] 2>/dev/null && eval "exec $n>&-"; done; '
+            . 'exec ' . escapeshellarg($php) . ' ' . escapeshellarg($skript) . ' --hf-lauschen';
+    $aus = array();
+    $rc = 1;
+    @exec('bash -c ' . escapeshellarg($befehl) . ' </dev/null >/dev/null 2>&1 &', $aus, $rc);
+    return $rc === 0 ? 'gestartet' : 'kein_start';
+}
+
+/**
+ * Die retained Sammelthemen abraeumen und nachlesen. Rueckgabe array(rc, Zeilen).
+ * $sek 0 (Haken aus, aus dem Minutenlauf): ein Stamm mit fremdem Zaehler laut Stundenlauf bleibt stehen. $sek > 0 (Deinstallation): steht nichts da, wird nicht gewartet; sonst $sek Sekunden auf fremde Zaehler
+ * hoeren (1.1.33). Unter so einem Stamm sendet noch eine andere Linie, und ihre Themen bleiben stehen; laesst sich nicht hoeren, gilt der Vermerk des Stundenlaufs.
+ */
+function mg_haus_fahrzeug_leeren($cfg = null, $sek = 0)
 {
     if ($cfg === null) { $cfg = mg_config(); }
     if (!mg_has_mosquitto()) { return array(1, array('<WARNING> mosquitto_pub fehlt - haus/fahrzeug bleibt im Broker.')); }
-    $staemme = array();
-    foreach (mg_haus_fahrzeug_namen($cfg) as $n) { $staemme['haus/fahrzeug/' . $n] = true; }
-    foreach (glob(mg_paths()['tmp'] . '/haus_fahrzeug*.json') ?: array() as $d) {
-        $m = mg_json_lesen($d);
-        if (isset($m['stamm']) && is_string($m['stamm']) && strpos($m['stamm'], 'haus/fahrzeug/') === 0) { $staemme[$m['stamm']] = true; }
+    $staemme = mg_hf_staemme($cfg);
+    if (!$staemme) { return array(0, array('<OK> Kein Fahrzeug eingetragen - unter haus/fahrzeug ist nichts abzuraeumen.')); }
+    $felder = array_keys(mg_haus_fahrzeug_werte(array()));
+    $vorweg = array();
+    if ((int) $sek > 0) {
+        $alle = array();
+        foreach ($staemme as $s) {
+            foreach ($felder as $n) { $alle[] = $s . '/' . $n; }
+        }
+        $g = mg_mqtt_rueckfrage($alle);
+        if ($g['lage'] !== 'ok') { return array(1, array('<WARNING> Der Broker war nicht zu erreichen - unter haus/fahrzeug kann noch etwas stehen.')); }
+        $da = array();
+        foreach ($staemme as $s) {
+            foreach (array_keys($g['behalten']) as $t) {
+                if (strpos($t, $s . '/') === 0 && !in_array($s, $da, true)) { $da[] = $s; }
+            }
+        }
+        if (!$da) { return array(0, array('<INFO> Unter haus/fahrzeug steht nichts von diesem Plugin - nachgemessen.')); }
+        list($ok, $fremd) = mg_hf_fremde($da, (int) $sek);
+        if (!$ok) { $fremd = array_values(array_unique(array_merge($fremd, array_intersect($da, array_keys(mg_hf_fremd_lesen()))))); }
+        foreach ($fremd as $s) { $vorweg[] = '<WARNING> Unter ' . $s . '/ sendet noch eine andere Linie (fremder Zaehler) - diese Themen bleiben stehen.'; }
+        $staemme = array_values(array_diff($da, $fremd));
+    } else {
+        $staemme = array_values(array_diff($staemme, array_keys(mg_hf_fremd_lesen())));
     }
+    if (!$staemme) { return array(0, $vorweg); }
     $themen = array();
     $zeilen = '';
-    foreach (array_keys($staemme) as $s) {
-        foreach (array_keys(mg_haus_fahrzeug_werte(array())) as $n) {
+    foreach ($staemme as $s) {
+        foreach ($felder as $n) {
             $themen[] = $s . '/' . $n;
             $zeilen .= mg_haus_fahrzeug_zeile($s . '/' . $n, '', true);
         }
     }
-    if (!$themen) { return array(0, array('<OK> Kein Fahrzeug eingetragen - unter haus/fahrzeug ist nichts abzuraeumen.')); }
-    if (!mg_haus_fahrzeug_lauf($zeilen)) { return array(1, array('<WARNING> haus/fahrzeug liess sich nicht abraeumen.')); }
+    if (!mg_haus_fahrzeug_lauf($zeilen)) { return array(1, array_merge($vorweg, array('<WARNING> haus/fahrzeug liess sich nicht abraeumen.'))); }
     usleep(300000);
     $g = mg_mqtt_rueckfrage($themen);
-    if ($g['lage'] !== 'ok') { return array(1, array('<WARNING> haus/fahrzeug leer gesendet; das Nachlesen gelang nicht - nicht nachpruefbar.')); }
+    if ($g['lage'] !== 'ok') { return array(1, array_merge($vorweg, array('<WARNING> haus/fahrzeug leer gesendet; das Nachlesen gelang nicht - nicht nachpruefbar.'))); }
     $rest = array_intersect($themen, array_keys($g['behalten']));
-    if ($rest) { return array(1, array('<WARNING> ' . count($rest) . ' Themen unter haus/fahrzeug stehen weiter im Broker.')); }
-    return array(0, array('<OK> ' . count($themen) . ' Themen unter haus/fahrzeug geleert (vom Broker bestaetigt).'));
+    if ($rest) { return array(1, array_merge($vorweg, array('<WARNING> ' . count($rest) . ' Themen unter haus/fahrzeug stehen weiter im Broker.'))); }
+    return array(0, array_merge($vorweg, array('<OK> ' . count($themen) . ' Themen unter haus/fahrzeug geleert (vom Broker bestaetigt).')));
+}
+
+/**
+ * Ein Kind abwarten, ohne dass proc_close() haengen kann: hoechstens $warten Sekunden ungestoert, SIGTERM, hoechstens $frist, SIGKILL, erst dann proc_close().
+ * Rueckgabe: der Rueckgabewert, 124 nach Ablauf. Nach proc_get_status() liefert proc_close() unter PHP 7.4 -1 (gemessen 01.11.2026): darum merkt sich der Helfer den Wert selbst.
+ */
+function mg_proc_abwarten($pr, $warten, $frist = 2.0)
+{
+    $stufe = 0;
+    $bis = microtime(true) + max(0.0, (float) $warten);
+    $schlaf = 2000;
+    while (true) {
+        $s = @proc_get_status($pr);
+        if (!is_array($s) || empty($s['running'])) {
+            $rc = is_array($s) && isset($s['exitcode']) ? (int) $s['exitcode'] : -1;
+            if (is_array($s) && !empty($s['signaled'])) { $rc = 128 + (int) $s['termsig']; }
+            @proc_close($pr);
+            return $stufe > 0 ? 124 : $rc;
+        }
+        if (microtime(true) >= $bis) {
+            if ($stufe === 1) {
+                @proc_terminate($pr, 9);
+                @proc_close($pr);
+                return 124;
+            }
+            @proc_terminate($pr, 15);
+            $stufe = 1;
+            $bis = microtime(true) + (float) $frist;
+        }
+        usleep($schlaf);
+        $schlaf = min(50000, $schlaf * 2);
+    }
+}
+
+/** Rohre lesen, bis alle zu sind oder die Frist ablaeuft (bis 1.1.31 stream_get_contents ohne Frist). Rueckgabe: je Rohr der Text. */
+function mg_rohre_lesen(array $rohre, $frist)
+{
+    $aus = array();
+    foreach ($rohre as $i => $h) { @stream_set_blocking($h, false); $aus[$i] = ''; }
+    $offen = $rohre;
+    $bis = microtime(true) + (float) $frist;
+    while ($offen && microtime(true) < $bis) {
+        $r = $offen;
+        $w = null;
+        $e = null;
+        if (@stream_select($r, $w, $e, 0, 200000) === false) { break; }
+        foreach ($offen as $i => $h) {
+            $t = @fread($h, 65536);
+            if ($t !== false && $t !== '' && strlen($aus[$i]) < 1048576) { $aus[$i] .= $t; }
+            if (feof($h)) { unset($offen[$i]); }
+        }
+    }
+    return $aus;
 }
 
 /* ---------------- Meldungen ---------------- */
@@ -4183,7 +4462,9 @@ function mg_mqtt_rueckfrage(array $filter)
     /* Genau $n Bytes lesen oder null - bei Zeitablauf und Verbindungsende. */
     $lies = function ($n) use ($s) {
         $d = '';
+        $lies_bis = microtime(true) + 5.0;     // 1.1.32: ein tropfender Broker haelt nicht fest
         while (strlen($d) < $n) {
+            if (microtime(true) >= $lies_bis) { return null; }
             $t = @fread($s, $n - strlen($d));
             if ($t === false || $t === '') {
                 $meta = stream_get_meta_data($s);
@@ -5415,7 +5696,7 @@ function mg_docker(array $args, $sekunden)
     foreach ($offen as $h) {
         fclose($h);
     }
-    $rc = proc_close($proc);
+    $rc = mg_proc_abwarten($proc, 2);     // 1.1.32: mit Frist
     return array((int) $rc, $aus[1], $aus[2]);
 }
 
@@ -6577,7 +6858,7 @@ function mg_benachrichtigen($schwere, $text)
     $to = array();
     @exec('command -v timeout 2>/dev/null', $to);
     if (isset($to[0]) && trim($to[0]) !== '') {
-        $cmd = array_merge(array(trim($to[0]), '20'), $cmd);
+        $cmd = array_merge(array(trim($to[0]), '-k', '5', '20'), $cmd);     // 1.1.32: -k, sonst bleibt ein Kind, das SIGTERM ueberhoert
     }
     $desk = array(0 => array('file', '/dev/null', 'r'), 1 => array('pipe', 'w'), 2 => array('pipe', 'w'));
     $pipes = array();
@@ -6585,10 +6866,11 @@ function mg_benachrichtigen($schwere, $text)
     if (!is_resource($proc)) {
         return array(false, 'proc_open gescheitert');
     }
-    $aus = (string) stream_get_contents($pipes[1]) . ' ' . (string) stream_get_contents($pipes[2]);
+    $mg_ai = mg_rohre_lesen(array($pipes[1], $pipes[2]), 26);     // 1.1.32: mit Frist
+    $aus = (string) $mg_ai[0] . ' ' . (string) $mg_ai[1];
     fclose($pipes[1]);
     fclose($pipes[2]);
-    $rc = proc_close($proc);
+    $rc = mg_proc_abwarten($proc, 1);
     return array($rc === 0, mg_kuerzen(trim(preg_replace('/\s+/', ' ', $aus)), 200));
 }
 
@@ -7373,8 +7655,15 @@ function mg_selbsttest($live = false)
         $add('PRUEF.ANSAGE_' . (int) $az_i, $az_stand[$az_z[0]], $az_z[1]);
     }
     list($az_b) = ansage_ziele_bereit(ansage_token_fuer_lauf(mg_tts($cfg), $cfg['ansage_token_herkunft'], $az_k), $az_k);
-    $add('PRUEF.HAUS_FAHRZEUG', empty($cfg['haus_fahrzeug_ein']) ? 2 : 1, empty($cfg['haus_fahrzeug_ein']) ? mg_t('PRUEFTEXT.HAUS_FAHRZEUG_AUS')
-        : sprintf(mg_t('PRUEFTEXT.HAUS_FAHRZEUG'), implode(', ', mg_haus_fahrzeug_namen($cfg))));
+    $hf_fremd = array();     // 1.1.33: aus dem Stundenlauf; Ausgabe laeuft durch mg_e()
+    foreach (array_keys(mg_hf_fremd_lesen()) as $hf_s) { $hf_fremd[] = substr($hf_s, strlen('haus/fahrzeug/')); }
+    if (empty($cfg['haus_fahrzeug_ein'])) {
+        $add('PRUEF.HAUS_FAHRZEUG', 2, mg_t('PRUEFTEXT.HAUS_FAHRZEUG_AUS'));
+    } elseif ($hf_fremd) {
+        $add('PRUEF.HAUS_FAHRZEUG', 0, sprintf(mg_t('PRUEFTEXT.HAUS_FAHRZEUG_FREMD'), implode(', ', $hf_fremd)));
+    } else {
+        $add('PRUEF.HAUS_FAHRZEUG', 1, sprintf(mg_t('PRUEFTEXT.HAUS_FAHRZEUG'), implode(', ', mg_haus_fahrzeug_namen($cfg))));
+    }
     if ($az_b !== null && mg_tts($cfg)['mode'] !== 'aus') {
         list($az_s, $az_h) = ansage_pruefzeile($az_b, $live, $az_k);
         $add('PRUEF.ANSAGE_MELDET', $az_stand[$az_s], trim(html_entity_decode(strip_tags((string) $az_h), ENT_QUOTES, 'UTF-8')));
@@ -9237,7 +9526,7 @@ function mg_haus_sitzung(array $lesen, array $warten, $fenster)
     }
     @fclose($rohr[1]);
     @fclose($rohr[2]);
-    $ende = @proc_close($pr);
+    $ende = mg_proc_abwarten($pr, 0.5);     // 1.1.32: mit Frist; der Wert wird nicht benutzt, $rc kommt aus $s (proc_close() gaebe hier unter 7.4 -1)
     if ($rc === null && !$s['running']) {
         $rc = (int) $s['exitcode'];
     }

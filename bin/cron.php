@@ -39,7 +39,7 @@ require_once $mg_lib;
  * Rueckgabe 2, OHNE Wirkung (vor Laufzaehler, Momentaufnahme und Automatik). Bis
  * 1.1.27 lief "--mqt-leeren" als voller Minutenlauf durch und schickte unter
  * Umstaenden Befehle ans Auto. */
-$mg_erlaubt = array('--mqtt-leeren', '--gateway-leeren', '--haus-lesen', '--ansage-senden');
+$mg_erlaubt = array('--mqtt-leeren', '--gateway-leeren', '--haus-lesen', '--ansage-senden', '--hf-lauschen');
 foreach (array_slice(isset($argv) ? $argv : array(), 1) as $mg_a) {
     if (!in_array($mg_a, $mg_erlaubt, true)) {
         fwrite(STDERR, 'cron.php: unbekannter Schalter ' . $mg_a . ' - erlaubt sind ' . implode(' ', $mg_erlaubt)
@@ -79,7 +79,7 @@ if (in_array('--mqtt-leeren', array_slice(isset($argv) ? $argv : array(), 1), tr
     foreach ($mg_zeilen as $mg_z) {
         echo $mg_z . "\n";
     }
-    list($mg_rc2, $mg_zeilen) = mg_haus_fahrzeug_leeren();      // 1.1.31
+    list($mg_rc2, $mg_zeilen) = mg_haus_fahrzeug_leeren(null, MG_HF_LAUSCH_S);      // 1.1.31; 1.1.33: hoert auf fremde Zaehler, bis 62 s
     foreach ($mg_zeilen as $mg_z) {
         echo $mg_z . "\n";
     }
@@ -111,6 +111,14 @@ if (in_array('--haus-lesen', array_slice(isset($argv) ? $argv : array(), 1), tru
  * keine Automatik; waehrend eines Updates tut er nichts (die Warteliste bleibt, zu Altes verfaellt). */
 if (in_array('--ansage-senden', array_slice(isset($argv) ? $argv : array(), 1), true)) {
     if (!mg_upgrade_marke_liegt()) { mg_ansage_lauf(); }
+    exit(0);
+}
+
+/* 1.1.33: einmal je Stunde auf fremde Zaehler unter den eigenen haus/fahrzeug-Staemmen hoeren (mg_hf_lauschen_starten(), eigene Sperre, bis 65 s). Kein Laufzaehler, kein Senden;
+ * waehrend eines Updates tut er nichts. */
+if (in_array('--hf-lauschen', array_slice(isset($argv) ? $argv : array(), 1), true)) {
+    mg_nur_lesen(true);
+    if (!mg_upgrade_marke_liegt()) { mg_hf_lausch_lauf(MG_HF_LAUSCH_S); }
     exit(0);
 }
 
@@ -169,6 +177,8 @@ mg_abo_datei($mg_lauf_cfg['mqtt_praefix'], true);
 /* Gruppe 39 (1.1.28, 2.4): hoechstens einen abgekoppelten Leser starten - nie
  * darauf warten; dieser Lauf nimmt den letzten Stand aus haus_quellen.json. */
 mg_haus_abnehmer_starten($mg_lauf_cfg, __FILE__);
+/* 1.1.33: in Minute 7 den Stundenlauf auf fremde Zaehler starten - nie darauf warten. */
+mg_hf_lauschen_starten($mg_lauf_cfg, __FILE__);
 
 /* 1.1.31: das Sprechtoken aus dem Zielplugin - schreibt nur bei einer Aenderung (Stamm 1.3.1). */
 mg_ansage_token_pflegen($mg_lauf_cfg);

@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.31
+Version 1.1.33
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -8,6 +8,23 @@ Klima, Standort — und schickt Befehle zurück: Laden stoppen, Ziel-Ladestand,
 Ladestrombegrenzung, Standklima, „Auto finden".
 
 Kompatibel mit LoxBerry 3.x und **LoxBerry 4** (reines PHP, PHP 7.4 und 8.x).
+
+## Neu in 1.1.33
+
+Diese Fassung baut auf 1.1.32 auf, die als Probe am Gerät lief, aber nie veröffentlicht wurde; **sie bringt also auch alles aus 1.1.32 mit** (Abschnitt darunter).
+
+* **Alter Stand gilt nicht mehr:** Ist der letzte Stand des Fahrzeugs älter als 6 Stunden oder unbekannt, stehen unter `haus/fahrzeug/<name>/` alle Werte auf `-`. Der `zaehler` läuft weiter: Er sagt, dass das Plugin läuft, nicht, dass die Werte stimmen. Die übrigen MQTT-Themen und die Kabel-Warnung (bis 12 Stunden) bleiben, wie sie sind.
+* **Fremder Zähler:** Einmal je Stunde hört das Plugin eine Minute lang auf die eigenen `…/zaehler`. Kommt dort ein Wert, der nicht der eigene sein kann, sendet noch eine andere Linie unter demselben Namen. Der Reiter *Test* warnt, das Protokoll nennt es einmal.
+* **Fremdes bleibt stehen:** Deinstallation, Haken aus und ein geänderter Name räumen einen solchen Namen nicht ab. Die Deinstallation hört dafür selbst bis 62 Sekunden, aber nur, wenn überhaupt etwas dasteht; ihre Frist für diesen Schritt steigt von 90 auf 120 Sekunden. Der Minutenlauf hält sich an das Ergebnis des Stundenlaufs: Ändert sich der Name vor dem ersten Stundenlauf, wird noch abgeräumt.
+* **Frist:** Ein hängendes `mosquitto_pub` der Sammelthemen wird nach 30 Sekunden beendet.
+
+Geprüft mit echtem SDK im Minutenlauf, Fahrzeug- und Broker-Attrappe; an einem Fahrzeug und am Gerät nicht gemessen.
+
+## Neu in 1.1.32
+
+Pflegefassung: Ein Hilfsprogramm, das nicht mehr reagiert, wird beim Melden und beim Docker-Aufruf nach einer festen Frist hart beendet. Bisher konnte der Aufrufer daran stehen bleiben.
+Der Leser der Haus-Themen hat jetzt auch beim Lesen eines Pakets eine feste Frist. Werte, Themen und Ansagen bleiben, wie sie sind.
+
 
 ## Neu in 1.1.31: Das Plugin spricht – ab Werk an
 

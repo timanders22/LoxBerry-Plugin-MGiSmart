@@ -164,7 +164,8 @@ mg_eigener_leser() {   # $1 PID
     a1=$( { tr '\0' '\n' < "$d/cmdline" | sed -n 2p; } 2>/dev/null)
     [ "$(readlink -f "$a1" 2>/dev/null)" = "$MG_CRONPHP" ] || return 1
     a2=$( { tr '\0' '\n' < "$d/cmdline" | sed -n 3p; } 2>/dev/null)
-    [ "$a2" = "--haus-lesen" ] || return 1
+    # 1.1.33: ebenso der Stundenlauf auf fremde Zaehler (--hf-lauschen, bis 65 s).
+    case "$a2" in --haus-lesen|--hf-lauschen) ;; *) return 1 ;; esac
     return 0
 }
 for D in /proc/[0-9]*; do
@@ -321,9 +322,9 @@ if command -v php >/dev/null 2>&1 && [ -f "$MG_CRON" ] \
    && { [ -r "$PCONFIG/mg.json" ] || [ -r "$BK" ]; }; then
     if [ "$(id -u)" = "0" ] && id loxberry >/dev/null 2>&1; then
         su -s /bin/bash loxberry -c "$(printf '%q ' env "LBHOMEDIR=$BASE" "LBPPLUGINDIR=$PDIR" \
-            timeout 90 php "$MG_CRON" --mqtt-leeren)" < /dev/null 2>&1
+            timeout -k 5 120 php "$MG_CRON" --mqtt-leeren)" < /dev/null 2>&1
     else
-        env "LBHOMEDIR=$BASE" "LBPPLUGINDIR=$PDIR" timeout 90 php "$MG_CRON" --mqtt-leeren \
+        env "LBHOMEDIR=$BASE" "LBPPLUGINDIR=$PDIR" timeout -k 5 120 php "$MG_CRON" --mqtt-leeren \
             < /dev/null 2>&1
     fi
 else
