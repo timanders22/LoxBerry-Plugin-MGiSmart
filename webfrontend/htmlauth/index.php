@@ -287,7 +287,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['ansage_test']) || is
     if (isset($_POST['ansage_test_ziel']) && $mg_tnur === 0) {
         $mg_fehler[] = mg_t('MELDUNG.ANSAGE_TEST_FEHL');
     } else {
-        $mg_tr = ansage_testansage(ansage_token_fuer_lauf(mg_tts($mg_cfg), $mg_cfg['ansage_token_herkunft'], $mg_tk), $mg_tk, $mg_tnur);
+        $mg_tr = ansage_testansage(ansage_tafel_einreihen(ansage_token_fuer_lauf(mg_tts($mg_cfg), $mg_cfg['ansage_token_herkunft'], $mg_tk), mg_ansage_regeln($mg_cfg), $mg_tk, true), $mg_tk, $mg_tnur);
         mg_log('Testansage' . ($mg_tnur >= 1 ? ' an Ziel ' . $mg_tnur : '') . ': ' . ansage_kurz($mg_tr));
         if ($mg_tr['stand'] === 1) {
             $mg_meldungen[] = mg_t('MELDUNG.ANSAGE_TEST_OK');
@@ -2232,6 +2232,8 @@ function mg_bausteinliste($nr = 1)
             array(mg_t('BAUSTEIN.Z1_31')),
             array(mg_t('BAUSTEIN.Z1_32')),
             array(mg_t('BAUSTEIN.Z1_33')),
+            array(mg_t('BAUSTEIN.Z1_33A')),
+            array(mg_t('BAUSTEIN.Z1_33B')),
             array(mg_t('BAUSTEIN.Z1_34')),
             array(mg_t('BAUSTEIN.Z1_35')),
             array(mg_t('BAUSTEIN.Z1_36')),

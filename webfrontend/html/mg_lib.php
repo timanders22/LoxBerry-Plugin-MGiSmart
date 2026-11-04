@@ -7654,7 +7654,7 @@ function mg_selbsttest($live = false)
     foreach (ansage_regel_lage(mg_tts($cfg), mg_ansage_regeln($cfg), $az_k, $live) as $az_i => $az_z) {
         $add('PRUEF.ANSAGE_' . (int) $az_i, $az_stand[$az_z[0]], $az_z[1]);
     }
-    list($az_b) = ansage_ziele_bereit(ansage_token_fuer_lauf(mg_tts($cfg), $cfg['ansage_token_herkunft'], $az_k), $az_k);
+    list($az_b) = ansage_ziele_bereit(ansage_tafel_einreihen(ansage_token_fuer_lauf(mg_tts($cfg), $cfg['ansage_token_herkunft'], $az_k), mg_ansage_regeln($cfg), $az_k, true), $az_k);
     $hf_fremd = array();     // 1.1.33: aus dem Stundenlauf; Ausgabe laeuft durch mg_e()
     foreach (array_keys(mg_hf_fremd_lesen()) as $hf_s) { $hf_fremd[] = substr($hf_s, strlen('haus/fahrzeug/')); }
     if (empty($cfg['haus_fahrzeug_ein'])) {
