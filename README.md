@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.35
+Version 1.1.36
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -8,6 +8,12 @@ Klima, Standort — und schickt Befehle zurück: Laden stoppen, Ziel-Ladestand,
 Ladestrombegrenzung, Standklima, „Auto finden".
 
 Kompatibel mit LoxBerry 3.x und **LoxBerry 4** (reines PHP, PHP 7.4 und 8.x).
+
+## Neu in 1.1.36
+
+- **Update:** Scheitert die Sicherung oder die Marke, bricht das Update ab und die bisherige Fassung bleibt.
+- **Formular:** Tafel- und HomePod-Felder gehören jetzt zu den Feldern, die eine Beanstandung im Formular mitführt und markiert. Ein beanstandeter Tafel- oder HomePod-Name bleibt zur Korrektur im Feld stehen.
+- **Vorklimatisierung:** Akku-Grenze und „nur mit Kabel“ greifen jetzt auch nach einer gelungenen Vorklimatisierung am Vortag; wer beim Fensterbeginn nicht zu Hause ist, bekommt sie danach trotzdem, und `VORKLIMA=1` meldet nur noch, was wirklich gesendet wurde.
 
 ## Neu in 1.1.35
 

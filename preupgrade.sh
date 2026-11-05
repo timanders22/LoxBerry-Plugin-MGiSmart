@@ -76,7 +76,7 @@ esac
 if [ -z "$BASE" ]; then
     echo "<WARNING> Das LoxBerry-Wurzelverzeichnis liess sich nicht bestimmen - fuer das Update wurde nichts beiseitegelegt."
     echo "<WARNING> Die Einstellungen holt dann die Zweitschrift neben dem Konfigordner (<ordner>.backup.json) zurueck."
-    exit 1
+    exit 2
 fi
 # Seit 1.1.18 (Entscheidung 1 vom 29.09.2026): die Upgrade-Marke NEBEN dem Datenordner, als Erstes nach der
 # Wurzel. preinstall.sh erkennt daran die Aktualisierung, postinstall.sh spielt nur mit ihr
@@ -92,7 +92,8 @@ fi
 if [ -z "$ABLAGE" ]; then
     echo "<WARNING> Kein brauchbarer Ablageort fuer das Update (Argument 1 und 6) - nichts beiseitegelegt."
     echo "<WARNING> Die Einstellungen holt dann die Zweitschrift neben dem Konfigordner (<ordner>.backup.json) zurueck."
-    exit 1
+    rm -f "$MARKE" 2>/dev/null
+    exit 2
 fi
 mkdir -p "$ABLAGE" 2>/dev/null
 
@@ -118,7 +119,10 @@ mg_ablegen() {   # $1 Quelle, $2 Name in der Ablage
     fi
 }
 mg_ablegen "$BASE/config/plugins/$PFOLDER/mg.json" mg.json
+MG_FEHL_VOR=$MG_FEHL
 mg_ablegen "$BASE/log/plugins/$PFOLDER/mg.log" mg.log
+# Das Protokoll ist nichts, wofuer das Update abbricht.
+MG_FEHL=$MG_FEHL_VOR
 # Die mitgeschriebenen Ladevorgaenge liegen unter data/ und werden vom
 # Installer ebenfalls entfernt. Sie sind kein Zustand, den das Plugin
 # wiederherstellen koennte - also mitnehmen.
@@ -132,6 +136,10 @@ for MG_LL in "$BASE/data/plugins/$PFOLDER"/ladung_laufend[0-9].json \
     [ -f "$MG_LL" ] && mg_ablegen "$MG_LL" "$(basename "$MG_LL")"
 done
 if [ "$MG_FEHL" != 0 ]; then
-    echo "<WARNING> Die Einstellungen holt dann die Zweitschrift neben dem Konfigordner (<ordner>.backup.json) zurueck."
+    # 05.11.2026: bis hierher Warnung und exit 0 - die Zweitschrift schreibt dieser Haken gar nicht frisch.
+    echo "<FAIL> Nicht alles liess sich beiseitelegen ($ABLAGE) - die Aktualisierung wird abgebrochen, damit der Purge die"
+    echo "<FAIL> Originale nicht loescht. Die bisherige Fassung bleibt installiert."
+    rm -f "$MARKE" 2>/dev/null
+    exit 2
 fi
 exit 0

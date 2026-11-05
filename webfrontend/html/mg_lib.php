@@ -4069,6 +4069,13 @@ function mg_automatik()
             : 'Vorklimatisierung ausgesetzt: ' . $grund);
         $in = ($lage === 'ok') ? (int) $in : -1;
         $im_fenster = ($in >= 1 && $in <= $vorlauf);
+        /* 1.1.36 (MG-1, MG-2): gehoert der Merker zu einer anderen Abfahrt, gilt nichts mehr davon, BEVOR
+         * die Warte-Zweige ihn lesen. Bis 1.1.35 sah die Sperre 'versuche' von gestern und griff nicht (Akku 20 %
+         * bei Grenze 30: gesendet), und die Warte-Zweige setzten die neue Kennung auf 'erfolg' von gestern: danach
+         * galt die Abfahrt als erledigt, gesendet wurde nichts, und VORKLIMA meldete 1. */
+        if ($im_fenster) {
+            $m = mg_vorklima_merker_neu($m, mg_vorklima_kennung($jetzt, $in));
+        }
         /* Anwesenheit: meldet haus/anwesenheit/jemand frisch 0, wartet die
          * Vorklimatisierung (kein Versuch verbraucht). Schweigt die Quelle,
          * gilt das bisherige Verhalten. */
@@ -4078,18 +4085,12 @@ function mg_automatik()
         if ($im_fenster && !empty($cfg['vorklima_anwesend_ein']) && mg_haus_frisch($c, 'anwesenheit', $jetzt)
             && trim(mg_haus_wert($c, 'anwesenheit', 'haus/anwesenheit/jemand')) === '0') {
             $m['warten_anwesend'] = 1;
-            if (!isset($m['kennung']) || abs(mg_vorklima_kennung($jetzt, $in) - (int) $m['kennung']) > 300) {
-                $m['kennung'] = mg_vorklima_kennung($jetzt, $in);
-            }
             mg_log_if_changed('vorklima_anwesend', 'Vorklimatisierung wartet: niemand zu Hause (haus/anwesenheit/jemand = 0).');
             $merk['vorklima'][(string) $nr] = $m;
             $aktion = 'nichts';
         } elseif ($im_fenster && empty($m['versuche']) && ($vk_sp = mg_vorklima_sperre($cfg, mg_state($nr))) !== '') {
             /* 1.1.31: Akku unter der Grenze oder Kabel fehlt - nicht senden, kein Fehlversuch, eigener Zustand (VORKLIMA 5 bzw. 6). Ein begonnener Ablauf laeuft weiter. */
             $m['warten_' . $vk_sp] = 1;
-            if (!isset($m['kennung']) || abs(mg_vorklima_kennung($jetzt, $in) - (int) $m['kennung']) > 300) {
-                $m['kennung'] = mg_vorklima_kennung($jetzt, $in);
-            }
             mg_log_if_changed('vorklima_sperre', 'Vorklimatisierung ausgesetzt: ' . ($vk_sp === 'akku' ? 'Akku unter ' . (int) $cfg['vorklima_min_soc'] . ' %' : 'Kabel nicht gesteckt') . ', Fahrzeug ' . $nr . '.');
             $merk['vorklima'][(string) $nr] = $m;
             $aktion = 'nichts';
@@ -8773,8 +8774,9 @@ function mg_rueckspiel_maengel($cfg = null)
 function mg_eingabe_felder($form)
 {
     $f = array(
+        // 1.1.36: Tafel und HomePod dazu: ansage_regeln_formular() beanstandet sie, ohne Eintrag hier ging die Beanstandung samt Eingaben verloren.
         'settings' => array(
-            'text' => array('capacity', 'wartezeit', 'befehl_abstand', 'strom_abstand', 'befehle_stunde',
+            'text' => array('ansage_tafel_namen', 'ansage_homepod_geraet', 'capacity', 'wartezeit', 'befehl_abstand', 'strom_abstand', 'befehle_stunde',
                             'heim_breite', 'heim_laenge', 'heim_radius', 'push_minutes', 'abfahrt_vorlauf',
                             'abfahrt_temp', 'abfahrt_fahrzeug', 'ladeempf_thema', 'ladeempf_grenze',
                             'ladeempf_hoch', 'ladeempf_runter', 'ladeempf_fahrzeug', 'plan_von', 'plan_bis',
@@ -8782,7 +8784,8 @@ function mg_eingabe_felder($form)
             'haken' => array('commands', 'gefahr_ein', 'wirkung_pruefen', 'ort_ein', 'notify_push', 'n_voll',
                              'n_stecker', 'n_offen', 'n_fenster', 'n_fehler', 'abfahrt_ein', 'ladeempf_ein',
                              'ladeempf_unter', 'plan_ein', 'ladungen_ein', 'haus_abfahrt_ein',
-                             'vorklima_anwesend_ein', 'vorklima_wetter_ein', 'ankunft_ein', 'haus_strompreis_ein'),
+                             'vorklima_anwesend_ein', 'vorklima_wetter_ein', 'ankunft_ein', 'haus_strompreis_ein',
+                             'ansage_tafel_ein', 'ansage_homepod_ein'),     // 1.1.36: Stamm 1.4.1 zeigt den Haken wie abgeschickt
             'liste' => array('ankunft_art', 'ankunft_quelle'), 'nie' => array()),   // 1.1.30 (T2-4): auch die Art
         'befehle' => array(
             'text' => array(), 'haken' => array('befehle_mqtt_ein', 'befehle_mqtt_steuern', 'endpunkt_ein'),
@@ -9246,6 +9249,16 @@ function mg_vorklima_kennung($jetzt, $in_min)
  * - $letztes_ok === true -> erledigt. Seit 1.1.30 heisst das: der frische Fahrzeugstand zeigt das Klima an
  *   (mg_automatik(); bis 1.1.29 stand hier "ok > 0", gerufen wurde aber immer mit null).
  */
+/** 1.1.36 (MG-1, MG-2): der Merker dieser Abfahrt. Eine andere Kennung heisst: ganz von vorn (Rein). */
+function mg_vorklima_merker_neu(array $m, $k)
+{
+    if (!isset($m['kennung']) || abs((int) $k - (int) $m['kennung']) > 300) {
+        return array('kennung' => (int) $k, 'versuche' => 0, 'letzter' => 0, 'erfolg' => 0,
+                     'aufgefrischt' => 0, 'aufgegeben' => 0, 'mild' => 0);
+    }
+    return $m;
+}
+
 function mg_vorklima_schritt(array $m, $in_min, $jetzt, $vorlauf, $letztes_ok)
 {
     $jetzt = (int) $jetzt;
@@ -9259,11 +9272,7 @@ function mg_vorklima_schritt(array $m, $in_min, $jetzt, $vorlauf, $letztes_ok)
     if ($in < 1 || $in > max(1, (int) $vorlauf)) {
         return array('nichts', $m);
     }
-    $k = mg_vorklima_kennung($jetzt, $in);
-    if (!isset($m['kennung']) || abs($k - (int) $m['kennung']) > 300) {
-        $m = array('kennung' => $k, 'versuche' => 0, 'letzter' => 0, 'erfolg' => 0,
-                   'aufgefrischt' => 0, 'aufgegeben' => 0, 'mild' => 0);
-    }
+    $m = mg_vorklima_merker_neu($m, mg_vorklima_kennung($jetzt, $in));
     $m += array('versuche' => 0, 'letzter' => 0, 'erfolg' => 0, 'aufgefrischt' => 0, 'aufgegeben' => 0, 'mild' => 0);
     if (!empty($m['erfolg']) || !empty($m['mild'])) {
         return array('erledigt', $m);
