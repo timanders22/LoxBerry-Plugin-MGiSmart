@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.36
+Version 1.1.37
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -8,6 +8,10 @@ Klima, Standort — und schickt Befehle zurück: Laden stoppen, Ziel-Ladestand,
 Ladestrombegrenzung, Standklima, „Auto finden".
 
 Kompatibel mit LoxBerry 3.x und **LoxBerry 4** (reines PHP, PHP 7.4 und 8.x).
+
+## Neu in 1.1.37
+
+- Haus-Position: Unter dem Feld „Breitengrad des Hauses“ steht ein Link zu einer Karte (mapatlas.eu). Dort die Adresse eingeben und die Zahlen unter „Dezimalgrad“ kopieren. Beide Zahlen dürfen auch zusammen ins Feld „Breitengrad des Hauses“ kopiert werden („50.123, 8.456“, getrennt durch Komma, Semikolon, Schrägstrich oder Leerzeichen, Dezimalpunkt); das Plugin teilt sie beim Speichern auf, wenn das Feld Längengrad leer ist oder schon die zweite Zahl trägt. Eine einzelne Zahl mit Komma („51,3“) wird nicht aufgeteilt.
 
 ## Neu in 1.1.36
 

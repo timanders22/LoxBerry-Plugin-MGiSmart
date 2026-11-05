@@ -557,6 +557,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
     mg_formfeld('befehle_stunde', 'EINST.BEFEHLE_STUNDE', $mg_neu, $mg_fehler);
 
     $mg_neu['ort_ein'] = isset($_POST['ort_ein']) ? 1 : 0;
+    // 1.1.37: beide Zahlen aus der Karte zusammen ins Feld Breitengrad kopiert ("50.123, 8.456") - hier aufteilen,
+    // wenn Laengengrad leer ist oder schon die zweite Zahl traegt. Eine Kommazahl allein ("51,3") bleibt eine Zahl.
+    if (isset($_POST['heim_breite']) && is_string($_POST['heim_breite'])
+        && !preg_match('/^\s*-?\d+,\d+\s*\z/', $_POST['heim_breite'])
+        && preg_match('/^\s*(-?\d{1,3}(?:\.\d+)?)\s*[,;\/ ]\s*(-?\d{1,3}(?:\.\d+)?)\s*\z/', $_POST['heim_breite'], $mg_pm)
+        && (!isset($_POST['heim_laenge']) || !is_string($_POST['heim_laenge']) || trim($_POST['heim_laenge']) === ''
+            || str_replace(',', '.', trim($_POST['heim_laenge'])) === $mg_pm[2])) {
+        $_POST['heim_breite'] = $mg_pm[1]; $_POST['heim_laenge'] = $mg_pm[2];
+    }
     foreach (array('heim_breite' => 90, 'heim_laenge' => 180) as $mg_f => $mg_max) {
         $mg_w = trim(str_replace(',', '.', (string) (isset($_POST[$mg_f]) ? $_POST[$mg_f] : '')));
         if ($mg_w === '') {
@@ -1270,6 +1279,7 @@ $mg_kopf_fass = ($mg_kopf_gw === null || (int) $mg_kopf_gw['fassung'] === 0) ? m
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.HEIM_BREITE')) ?></label>
 	<input data-role="none" type="text" name="heim_breite" value="<?= mg_e(mg_eingabe('settings', 'heim_breite', $mg_cfg['heim_breite'])) ?>" placeholder="51.3183"<?= mg_markierung('settings', 'heim_breite') ?>>
+	<div class="sm-hilfe"><a href="<?= mg_e('https://mapatlas.eu/' . (mg_sprache() === 'de' ? 'de' : 'en') . '/tools/coordinates') ?>" target="_blank" rel="noopener"><?= mg_e(mg_t('EINST.KARTE')) ?></a>. <?= mg_e(mg_t('EINST.KARTE_ZUSAMMEN')) ?></div>
 </div>
 <div class="sm-feld">
 	<label><?= mg_e(mg_t('EINST.HEIM_LAENGE')) ?></label>
