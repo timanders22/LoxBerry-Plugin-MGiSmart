@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.38
+Version 1.1.39
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -8,6 +8,10 @@ Klima, Standort — und schickt Befehle zurück: Laden stoppen, Ziel-Ladestand,
 Ladestrombegrenzung, Standklima, „Auto finden".
 
 Kompatibel mit LoxBerry 3.x und **LoxBerry 4** (reines PHP, PHP 7.4 und 8.x).
+
+## Neu in 1.1.39
+
+- **Fehler behoben: Startzeit des Gateway-Containers.** Das Plugin liest sie aus `docker inspect`. Docker schreibt sie meist mit neun Nachkommastellen (`2026-11-07T21:46:20.707384631Z`), und PHP 7.4 – die Fassung von LoxBerry 3.0 bis 4.0 – kann das nicht lesen (PHP 8.4 schon). Am Gerät gemessen am 10.11.2026. Die Folgen: In den Reitern „Gateway einrichten“ und „Test“ stand „läuft seit unbekannt“; die Ampelzeile zur Anmeldung bei MG sagte in den ersten Minuten nach einem Start nicht „der Container läuft erst … s“; und die Anmeldezeilen aus der Startphase des Gateways wurden nie eigens gelesen – die Ampel sah nur die letzten 2000 Protokollzeilen. Fahrzeugdaten und Befehle waren nicht betroffen.
 
 ## Neu in 1.1.38
 

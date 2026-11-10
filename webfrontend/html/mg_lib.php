@@ -5773,13 +5773,31 @@ function mg_gw_eigene($sekunden = 20)
     return array(true, $liste);
 }
 
+/**
+ * 1.1.39: Zeitangabe aus docker inspect (State.StartedAt) als Unix-Zeit, false wenn unlesbar. Docker schreibt bis zu
+ * neun Nachkommastellen ("2026-11-07T21:46:20.707384631Z", Endnullen fallen weg); strtotime() von PHP 7.4 - der
+ * Fassung von LoxBerry 3.0 bis 4.0 - liefert bei neun Stellen false, bei acht und weniger nicht; PHP 8.4 rechnet beides
+ * (am Geraet und unter 7.4.33/8.4.27 gemessen 10.11.2026, Bauart wie Audioserver NG 0.9.8). Damit waren "seit" und "start"
+ * bei fast jedem Start -1: "laeuft seit unbekannt", nie "wartet auf die Anmeldung", und das Startfenster des
+ * Protokolls (b1) wurde nie gelesen.
+ * Die Bruchteile der Sekunde zaehlen hier nicht.
+ */
+function mg_docker_zeit($s)
+{
+    if (!is_string($s) || $s === '' || strpos($s, '0001-01-01') === 0) {
+        return false;   // Docker meldet einen nie gestarteten Container als 0001-01-01T00:00:00Z
+    }
+    $t = strtotime(preg_replace('/(\d{2}:\d{2}:\d{2})\.\d+/', '$1', $s));
+    return ($t !== false && $t > 0) ? $t : false;
+}
+
 /** Kurzfassung des Zustands aus docker inspect. */
 function mg_gw_kurz($info)
 {
     $s = isset($info['State']) && is_array($info['State']) ? $info['State'] : array();
     $l = isset($info['Config']['Labels']) && is_array($info['Config']['Labels'])
         ? $info['Config']['Labels'] : array();
-    $start = isset($s['StartedAt']) ? strtotime((string) $s['StartedAt']) : false;
+    $start = isset($s['StartedAt']) ? mg_docker_zeit((string) $s['StartedAt']) : false;
     return array(
         'id' => isset($info['Id']) ? substr((string) $info['Id'], 0, 12) : '',
         'id_voll' => isset($info['Id']) ? (string) $info['Id'] : '',
