@@ -727,6 +727,97 @@ function mg_config_save(array $cfg)
     return true;
 }
 
+/** Leere Objekte des Rohtextes ($o, json_decode ohne true) im Feld $a wieder als Objekt fuehren (11.11.2026),
+ *  damit json_encode() sie als {} und nicht als [] schreibt - oben wie verschachtelt, auch unter fremden
+ *  Schluesseln. Nur fuer mg_config_vervollstaendigen(); das Speichern im Formular bleibt, wie es ist.
+ *  Bauart Bewaesserung 0.9.56 (bw_json_leere_objekte()). */
+function mg_json_leere_objekte($a, $o)
+{
+    if (!is_array($a)) { return $a; }
+    if (is_object($o)) {
+        if (!get_object_vars($o) && $a === array()) { return new stdClass(); }
+        foreach ($a as $k => $v) {
+            $ks = (string) $k;
+            if (is_array($v) && property_exists($o, $ks)) { $a[$k] = mg_json_leere_objekte($v, $o->$ks); }
+        }
+    } elseif (is_array($o)) {
+        foreach ($a as $k => $v) {
+            if (is_array($v) && array_key_exists($k, $o)) { $a[$k] = mg_json_leere_objekte($v, $o[$k]); }
+        }
+    }
+    return $a;
+}
+
+/**
+ * Fehlende Vorgaben EINMAL in die Datei schreiben (seit 1.1.41, Regeln/05).
+ *
+ * Bis 1.1.40 ergaenzte mg_config() fehlende Schluessel bei jedem Aufruf nur
+ * im Speicher; in die Datei kamen sie erst beim naechsten Speichern im
+ * Formular. Aufgerufen vom Minutentakt (bin/cron.php) vor dem ersten Lesen
+ * der Konfiguration; weil nur bei FEHLENDEN Schluesseln geschrieben wird,
+ * bleibt es bei einem Schreibvorgang.
+ *
+ * Nur, wenn die Datei ein lesbares Objekt mit Merkwort ist
+ * (mg_config_hat_inhalt()). Eine fehlende oder beschaedigte Datei ist Sache
+ * der Selbstheilung in mg_config() - hier wird nichts angelegt. Im
+ * Nur-Lesen-Betrieb und ohne Anlage (Archivmodus) wird nichts geschrieben.
+ *
+ * Geschrieben werden die Werte AUS DER DATEI, nicht die von mg_config()
+ * aufbereiteten (vins, vin, notify, ansage_haken) - plus die fehlenden
+ * Vorgaben. Fremde Schluessel bleiben stehen. Geschrieben wird wie in
+ * mg_config_save(): mg_write_atomic() mit 0600 und die Zweitschrift ueber
+ * mg_zweitschrift_ziehen(); 'vin' wird hier nicht aus 'vins' nachgezogen.
+ * Das normale Speichern schreibt jeden Schluessel aus mg_vorgaben() (es
+ * speichert mg_config()), also auch dieses.
+ *
+ * Rueckgabe: Liste der eingetragenen Schluessel (leer = nichts zu tun oder
+ * nicht geschrieben).
+ */
+function mg_config_vervollstaendigen()
+{
+    if (mg_nur_lesen()) {
+        return array();
+    }
+    $p = mg_paths();
+    if ($p['lbhome'] === '') {
+        return array();
+    }
+    clearstatcache(true, $p['config']);
+    $datei = mg_inhalt_oder_null($p['config']);
+    if (!mg_config_hat_inhalt($datei)) {
+        return array();
+    }
+    // Ein leeres Objekt der Datei ({}) bliebe nach json_decode(..., true) ein leeres Feld und kaeme beim
+    // Schreiben als [] zurueck - der Rohwert wird erhalten, bevor ergaenzt wird (11.11.2026).
+    $datei = mg_json_leere_objekte($datei, json_decode(trim((string) @file_get_contents($p['config']))));
+    $fehlend = array();
+    foreach (mg_vorgaben() as $k => $w) {
+        /* endpunkt_ein bleibt aussen vor (11.11.2026): den Uebergang fuer Bestandsanlagen setzt das
+         * Update; ein hier festgeschriebenes "aus" koennte ein spaeteres Update nicht mehr berichtigen. */
+        if ($k === 'endpunkt_ein') {
+            continue;
+        }
+        if (!array_key_exists($k, $datei)) {
+            $datei[$k] = $w;
+            $fehlend[] = $k;
+        }
+    }
+    if (!$fehlend) {
+        return array();
+    }
+    $json = json_encode($datei, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if (!mg_write_atomic($p['config'], $json, 0600)) {
+        mg_log('FEHLER: Konfiguration nicht vervollstaendigt - ' . $p['config'] . ' liess sich nicht schreiben.');
+        return array();
+    }
+    if (!mg_zweitschrift_ziehen($json, $datei)) {
+        mg_log('FEHLER: Sicherung ' . $p['backup'] . ' liess sich nicht schreiben.');
+    }
+    mg_log('Konfiguration vervollstaendigt - ' . count($fehlend)
+        . ' fehlende Vorgabe(n) in die Datei geschrieben: ' . implode(', ', $fehlend));
+    return $fehlend;
+}
+
 /**
  * Was die Zweitschrift traegt und der neue Stand nicht.
  *

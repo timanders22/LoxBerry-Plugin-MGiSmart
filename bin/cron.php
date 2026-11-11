@@ -129,6 +129,13 @@ if (in_array('--hf-lauschen', array_slice(isset($argv) ? $argv : array(), 1), tr
  * ZAEHLER) und speist status/zaehler; steht der Takt, bleibt er stehen. */
 mg_laufzaehler_weiter();
 
+/* 1.1.41 (Regeln/05): fehlende Vorgaben einmal in die mg.json schreiben - vor
+ * dem ersten Lesen der Konfiguration in diesem Lauf, nicht waehrend eines
+ * Updates (dort nur lesen, siehe unten). Schreibt nur, wenn etwas fehlt. */
+if (!mg_upgrade_marke_liegt()) {
+    mg_config_vervollstaendigen();
+}
+
 /* 1.1.30 (Fremdpruefung T3-1): waehrend eines Updates (Upgrade-Marke frisch, mg_upgrade_marke_liegt()) nur der
  * Zaehler und das Lebenszeichen <mqtt_praefix>/status/ts|zaehler - beides laeuft weiter. Sonst nichts: keine
  * Selbstheilung der mg.json (nur lesen, mg_nur_lesen), kein Haus-Leser, keine Momentaufnahme, keine Mitschrift,

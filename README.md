@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.40
+Version 1.1.41
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -8,6 +8,14 @@ Klima, Standort — und schickt Befehle zurück: Laden stoppen, Ziel-Ladestand,
 Ladestrombegrenzung, Standklima, „Auto finden".
 
 Kompatibel mit LoxBerry 3.x und **LoxBerry 4** (reines PHP, PHP 7.4 und 8.x).
+
+## Neu in 1.1.41
+
+- **Konfiguration wird nach einem Update vervollständigt:** Fehlen in `mg.json` Einstellungen, die eine neuere Fassung mitbringt, trägt das Plugin sie jetzt einmal mit ihrer Vorgabe in die Datei ein, und zwar im Minutentakt (`bin/cron.php`), bevor die Konfiguration gelesen wird. Das Protokoll `mg.log` nennt in einer Zeile die Namen der ergänzten Einstellungen, nie ihre Werte. Bisher ergänzten Takt und Oberfläche fehlende Einstellungen nur beim Lesen; in die Datei kamen sie erst beim nächsten Speichern im Formular. Das Verhalten des Plugins ändert sich dadurch nicht, denn es arbeitete schon bisher mit denselben Vorgaben.
+- Geschrieben werden die Werte so, wie sie in der Datei stehen, plus die fehlenden Vorgaben; Einstellungen, die das Plugin nicht kennt, bleiben stehen. Geschrieben wird nur, wenn etwas fehlt, mit denselben Rechten (0600) und mit der Zweitschrift wie beim Speichern. Eine fehlende Datei, eine beschädigte Datei oder eine Datei ohne Aktionstoken wird nicht angefasst – das bleibt Sache der Selbstheilung. Während eines Updates (Upgrade-Marke liegt) wird nichts geschrieben.
+- Gemessen an einem nachgebauten LoxBerry-Baum unter PHP 7.4 und 8.4 (Prüfstand mit acht Fällen, darunter der Aufruf über `bin/cron.php`). Am Gerät ist das noch nicht gemessen.
+- `endpunkt_ein` trägt das Vervollständigen nicht ein: den Übergang einer bestehenden Anlage setzt weiter allein die Aktualisierung, und ein hier festgeschriebenes „aus“ könnte eine spätere Aktualisierung nicht mehr berichtigen.
+- Leere Objekte (`{}`) in der Datei bleiben beim Vervollständigen erhalten, auch verschachtelte und solche unter unbekannten Schlüsseln; sie werden dabei nicht mehr zu leeren Listen (`[]`). Das Speichern im Formular bleibt, wie es war.
 
 ## Neu in 1.1.40
 
