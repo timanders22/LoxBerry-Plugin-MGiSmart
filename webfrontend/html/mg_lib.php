@@ -130,6 +130,10 @@ if (!function_exists('lb_wurzel_ermitteln')) {
 
 /* 1.1.31: die gemeinsame Sprachausgabe (Stamm 1.3.0), neben dieser Datei - wie sie selbst in html/ (kein Endpunkt, 403). */
 require_once __DIR__ . '/sprachausgabe.php';
+/* 1.1.43: Das gemeinsame Sicherungsmodul (Abschrift von Werkzeuge/gemeinsam/sicherung.php, Auftrag des
+ * Hausherrn 12.11.2026): Einstellungen sichern und zurueckspielen nach denselben Regeln wie in den
+ * anderen Linien. Die Beschreibung dieser Linie steht in mg_sicherung_beschreibung(). */
+require_once __DIR__ . '/sicherung.php';
 
 /* Die LoxBerry-Wurzel: $LBHOMEDIR, wenn dort config/plugins, data/plugins und
  * config/system/general.json liegen, sonst die Aufwaertssuche
@@ -8717,121 +8721,165 @@ function mg_sicherung_neue_schluessel()
                  'signal_kabel', 'signal_praefix', 'vorklima_min_soc', 'vorklima_nur_kabel', 'haus_fahrzeug_ein');     // 1.1.31
 }
 
+/* Eine Sicherungsdatei einlesen - und dabei NICHTS durchgehen lassen.
+ *
+ * 1.1.43: Die eigene Lesefunktion mg_sicherung_lesen() entfaellt. Lesen und
+ * Pruefen macht das gemeinsame Sicherungsmodul (sicherung_lesen() bzw.
+ * sicherung_zurueckspielen(), Beschreibung mg_sicherung_beschreibung(); Auftrag
+ * des Hausherrn 12.11.2026, Werkzeuge/gemeinsam/sicherung.php). Bis 1.1.42
+ * stand hier eine eigene Schleife: ein unbekannter Schluessel - oben wie in den
+ * Bloecken notify, tts, ansage_regeln und ansage_haken - wies die ganze Datei
+ * ab, und eine Datei ohne Kennzeichen oder mit dem eines anderen Plugins wurde
+ * gelesen wie eine eigene (gemessen 12.11.2026 an 1.1.42 mit
+ * Werkzeuge/sicherung_pruefstand.py --profil ist, Klasse A).
+ *
+ * Seither: der Kopf traegt _plugin = 'LoxBerry-Plugin-MGiSmart' und _fassung;
+ * eine Datei mit fremdem Kennzeichen wird abgewiesen, eine ohne nur dann
+ * gelesen, wenn sie eine aeltere eigene Sicherung ist (mg_sicherung_alt_erkennen(),
+ * ab 1.1.18); unbekannte Schluessel oben und in den Bloecken werden verworfen
+ * und mit Namen gemeldet; ein leerer Wert ueberschreibt keinen bestehenden.
+ * Wie bisher: jeder Wert geht durch mg_wert_pruefen() (Typ und Regel der
+ * Vorgabe, Bauart E) und wird in dessen Normalform uebernommen; eine halb
+ * gueltige Datei aendert nichts, alle Beanstandungen werden gesammelt; was
+ * eine fruehere Fassung nicht kennen konnte (mg_sicherung_neue_schluessel()),
+ * behaelt den geltenden Wert; die geltenden Sprechtoken und der Vermerk
+ * ansage_token_herkunft bleiben. Die Beanstandungen tragen KEINE Auszeichnung
+ * und werden NICHT maskiert: die Oberflaeche gibt sie maskiert aus (Befund U6). */
+
 /**
- * Eine Sicherungsdatei einlesen - und dabei NICHTS durchgehen lassen.
+ * 1.1.43: Die Beschreibung dieser Linie fuer das gemeinsame Sicherungsmodul.
  *
- * Die sieben Punkte aus REGELN_2, und der wichtigste ist der dritte: eine
- * halb gueltige Datei ueberschreibt GAR NICHTS. Wer eine Sicherung
- * zurueckspielt, will entweder den ganzen Stand oder gar keinen - eine zur
- * Haelfte uebernommene Konfiguration ist schlimmer als die alte, und man
- * sieht es ihr nicht an.
+ * Bekannt ist jeder Schluessel von mg_vorgaben(). Die Bloecke und ihre
+ * Unterschluessel sind die, die diese Fassung liest und schreibt (gemessen
+ * 12.11.2026): notify die Schalter von mg_wert_pruefen('notify') und
+ * push_minutes; tts die Schluessel von ansage_vorgaben(), die Liste ziele
+ * (art/wo/laut/sprache/ein, ansage_werk_block()) und die Sprechtoken (ein
+ * gesichertes Sprechtoken weist mg_wert_pruefen('tts') ab); ansage_regeln die
+ * Schluessel von ansage_regeln_vorgaben(); ansage_haken die von
+ * mg_ansage_haken_vorgabe(). vins, namen und ankunft_quellen sind Listen von
+ * Texten ohne Unterschluessel.
  *
- * Unbekannte Schluessel sind eine Beanstandung, kein stiller Verlust: sie
- * stammen aus einer anderen Fassung oder einem anderen Plugin. Der lesbare
- * Kopf (_hinweis, _stand - alles, was mit _ beginnt) wird uebergangen (seit
- * 1.1.18, Befund U7; bis 1.1.17 wurde eine Datei mit Kopf als "unbekannte
- * Einstellung _stand" abgewiesen).
- *
- * Seit 1.1.18 wird JEDER Wert vor dem Zusammenfuehren gegen Typ und Regel
- * der Vorgabe geprueft (mg_wert_pruefen(), Bauart E). Ein leeres Merkwort
- * heisst "kein Merkwort gesichert": es gilt das jetzige (Befund C5/U4 - bis
- * 1.1.17 wurde es leer gespeichert, die Selbstheilung kopierte danach die
- * Zweitschrift darueber, und die Meldung "44 Werte uebernommen" stimmte fuer
- * keinen einzigen Wert).
- *
- * Die Beanstandungen tragen KEINE Auszeichnung und werden hier NICHT
- * maskiert: die Oberflaeche gibt sie maskiert aus (Befund U6 - bis 1.1.17
- * stand dort "&lt;b&gt;nicht&lt;/b&gt;" und ein doppelt maskierter Name).
- *
- * Rueckgabe: array(Konfiguration|null, Beanstandungen[], Werte in der Datei).
+ * Was fehlen darf (wie bis 1.1.42): mg_sicherung_neue_schluessel() behaelt
+ * den geltenden Wert; ansage_token_herkunft kommt nie aus einer Datei.
+ * Die Texte gehen unmaskiert hinaus ('e'): die Oberflaeche maskiert jede
+ * Meldung bei der Ausgabe (mg_e()).
  */
-function mg_sicherung_lesen($roh, $jetzt = null, &$namen = null)
+function mg_sicherung_beschreibung()
 {
-    /* $namen (X-3, Verbesserungsbau 01.10.2026): die NAMEN der beanstandeten
-     * Schluessel, nie Werte - fuer die Warnung beim Sichern
-     * (mg_rueckspiel_maengel). */
-    $namen = array();
-    $mangel = array();
-    $daten = json_decode((string) $roh, true);
-    if (!is_array($daten)) {
-        return array(null, array(mg_t('EINST.SICH_KEIN_JSON')), 0);
-    }
+    $p = mg_paths();
     $vorg = mg_vorgaben();
-    $neu = array();
-    $anzahl = 0;
-    foreach ($daten as $k => $w) {
-        $k = (string) $k;
-        // Der lesbare Kopf wird UEBERGANGEN, nicht beanstandet.
-        if ($k !== '' && $k[0] === '_') {
-            continue;
-        }
-        if (!array_key_exists($k, $vorg)) {
-            $mangel[] = sprintf(mg_t('EINST.SICH_FREMD'), $k);
-            $namen[] = $k;
-            continue;
-        }
-        list($ok, $wert, $grund) = mg_wert_pruefen($k, $w, false);
-        if (!$ok) {
-            $mangel[] = sprintf(mg_t('EINST.SICH_WERT'), $k, $grund);
-            $namen[] = $k;
-            continue;
-        }
-        $neu[$k] = $wert;
-        $anzahl++;
+    $wandeln = function ($k) {
+        return function ($w) use ($k) {
+            list($ok, $x) = mg_wert_pruefen($k, $w, false);
+            return $ok ? $x : $w;
+        };
+    };
+    $schluessel = array();
+    foreach (array_keys($vorg) as $k) {
+        $schluessel[$k] = array('art' => 'wert');
     }
-    if ($anzahl === 0 && !$mangel) {
-        $mangel[] = mg_t('EINST.SICH_LEER');
+    $schluessel['notify'] = sicherung_block(array('push', 'soc_voll', 'stecker', 'offen', 'fenster', 'fehler',
+                                                  'kabel_vergessen', 'push_minutes'));
+    $schluessel['tts'] = sicherung_block(array_merge(array_keys(ansage_vorgaben()), ansage_geheim()),
+                             array('ziele' => sicherung_liste(array('art', 'wo', 'laut', 'sprache', 'ein'))))
+                       + array('sichern' => 'ansage_sicherung_bereinigen');
+    $schluessel['ansage_regeln'] = sicherung_block(array_keys(ansage_regeln_vorgaben()));
+    $schluessel['ansage_haken'] = sicherung_block(array_keys(mg_ansage_haken_vorgabe()));
+    foreach (array_keys($vorg) as $k) {
+        $schluessel[$k]['wandeln'] = $wandeln($k);
     }
-    /* FEHLENDE Schluessel sind eine Beanstandung, kein stiller Rueckfall.
-     *
-     * Eine Datei mit einem einzigen Schluessel lief bis 1.1.x ohne
-     * Beanstandung durch, wurde gespeichert, und alle uebrigen Einstellungen
-     * fielen auf Werk zurueck - quittiert mit "1 Wert uebernommen" (gemessen
-     * an VolkswagenID 0.9.11 am 03.09.2026, am 07.09.2026 ueber den Bestand
-     * ausgerollt). Ausgenommen sind nur die Schluessel, die eine aeltere
-     * Fassung nicht kennen konnte (mg_sicherung_neue_schluessel()). */
-    $fehlend = array();
-    $behalten = array();
-    foreach (array_keys($vorg) as $fk) {
-        if (array_key_exists($fk, $daten)) {
-            continue;
-        }
-        if (in_array($fk, mg_sicherung_neue_schluessel(), true)) {
-            $behalten[] = $fk;
-        } else {
-            $fehlend[] = $fk;
+    foreach (mg_sicherung_neue_schluessel() as $k) {
+        if ($k !== 'ansage_token_herkunft' && isset($schluessel[$k])) {
+            $schluessel[$k]['fehlt'] = 'behalten';
         }
     }
-    if ($fehlend) {
-        $mangel[] = sprintf(mg_t('EINST.SICH_FEHLEND'), count($fehlend), implode(', ', $fehlend));
-        $namen = array_merge($namen, $fehlend);
+    return array(
+        'kennzeichen' => 'LoxBerry-Plugin-MGiSmart',
+        'hinweis' => mg_t('EINST.SICH_KOPF'),
+        /* Die Fassung im Kopf kommt aus der Plugin-Datenbank bzw. plugin.cfg - keine fuenfte Stelle neben den
+         * vier, die Werkzeuge/fassung_setzen.py pflegt. */
+        'home' => isset($p['lbhome']) ? (string) $p['lbhome'] : '', 'ordner' => (string) $p['plugin'],
+        'plugin_cfg' => dirname(dirname(__DIR__)) . '/plugin.cfg',
+        'vorgaben' => $vorg,
+        'schluessel' => $schluessel,
+        'nie_aus_datei' => array('ansage_token_herkunft'),
+        /* Die Pruefung "die Datei traegt ein Sprechtoken" (mg_wert_pruefen('tts')) muss den Block der DATEI
+         * sehen: Regel 3 des Moduls setzt fuer ein leeres Sprechtoken das geltende ein. Seit Modul 1.2.0 kommt
+         * der Block der Datei als 4. Argument; geprueft wird der Block mit den Sprechtoken, wie sie in der Datei
+         * stehen (bis zur Umstellung setzte 'vorbehandeln' sie dafuer zurueck). */
+        'pruefen' => function ($k, $w, $neu = null, $roh = null) {
+            if ($k === 'tts' && is_array($w) && is_array($roh)) {
+                foreach (ansage_geheim() as $s) {
+                    if (array_key_exists($s, $roh)) { $w[$s] = $roh[$s]; } else { unset($w[$s]); }
+                }
+            }
+            list($ok, , $grund) = mg_wert_pruefen($k, $w, false);
+            return $ok ? '' : sprintf(mg_t('EINST.SICH_WERT'), $k, $grund);
+        },
+        'vorbereiten' => function ($neu, $jetzt, $r) {
+            /* 1.1.31: die geltenden Sprechtoken bleiben (die Sicherung traegt keine). */
+            if (!in_array('tts', $r['fehlt_behalten'], true) && isset($neu['tts']) && is_array($neu['tts'])) {
+                $neu['tts'] = ansage_sicherung_tokens_behalten($neu['tts'], isset($jetzt['tts']) ? $jetzt['tts'] : array());
+            }
+            /* Der Vermerk gehoert zum Token dieser Anlage: er reist nicht mit. */
+            $neu['ansage_token_herkunft'] = (isset($jetzt['ansage_token_herkunft']) && is_array($jetzt['ansage_token_herkunft']))
+                ? $jetzt['ansage_token_herkunft'] : array();
+            return $neu;
+        },
+        'uebersetzer' => 'mg_sicherung_alt_erkennen',
+        't' => 'mg_t',
+        'e' => function ($s) { return (string) $s; },
+    );
+}
+
+/**
+ * 1.1.43: Eine Sicherung dieser Linie aus der Zeit vor dem Kennzeichen _plugin
+ * (1.1.18 bis 1.1.42) traegt den lesbaren Kopf _hinweis aus EINST.SICH_KOPF,
+ * den nur der Sichern-Knopf dieser Linie schreibt - je nach Sprache der
+ * Oberflaeche deutsch oder englisch. Gemessen 12.11.2026 an allen 26 Fassungen
+ * 1.1.18 bis 1.1.43 (Ordner und Archive): je Sprache genau ein Wortlaut, er
+ * beginnt mit "Sicherung des Plugins MG iSmart." bzw. "Backup of the MG iSmart
+ * plugin.". Daran wird sie erkannt. 1.1.5 bis 1.1.17 schrieben gar keinen Kopf;
+ * eine solche Datei ist nicht sicher von einer fremden zu unterscheiden und
+ * wird abgewiesen (Entscheidung des Hausherrn 12.11.2026).
+ */
+function mg_sicherung_alt_erkennen($d)
+{
+    if (!is_array($d) || !isset($d['_hinweis']) || !is_string($d['_hinweis'])) {
+        return null;
     }
-    if ($mangel) {
-        return array(null, $mangel, 0);
+    foreach (array('Sicherung des Plugins MG iSmart.', 'Backup of the MG iSmart plugin.') as $anfang) {
+        if (strpos($d['_hinweis'], $anfang) === 0) {
+            return $d;
+        }
     }
-    if ($jetzt === null) {
-        $jetzt = mg_config();
+    return null;
+}
+
+/**
+ * 1.1.43: Die Sicherung als Feld - lesbarer Kopf (_hinweis, _plugin, _fassung,
+ * _stand, bei Bedarf _warnung) und alle Schluessel der Vorgaben aus der
+ * geltenden Konfiguration, gebaut vom gemeinsamen Sicherungsmodul
+ * (sicherung_bauen()). Der Block tts in der geprueften Form von mg_tts() und
+ * ohne Sprechtoken; der Vermerk ansage_token_herkunft geht nie mit. X-3 wie
+ * bisher: wuerde das eigene Zurueckspielen die Datei abweisen, nennt _warnung
+ * die Namen, nie Werte; geliefert wird sie trotzdem.
+ */
+function mg_sicherung_daten($cfg = null)
+{
+    if ($cfg === null) {
+        $cfg = mg_config();
     }
-    foreach ($behalten as $fk) {
-        $neu[$fk] = $jetzt[$fk];
-    }
-    /* 1.1.31: Sprachansagen - die geltenden Sprechtoken bleiben (die Sicherung traegt keine). Eine Sicherung setzt 'aus' und 'an' wie gespeichert. */
-    if (!in_array('tts', $behalten, true) && isset($neu['tts']) && is_array($neu['tts'])) {
-        $neu['tts'] = ansage_sicherung_tokens_behalten($neu['tts'], isset($jetzt['tts']) ? $jetzt['tts'] : array());
-    }
-    /* Der Vermerk gehoert zum Token dieser Anlage: er reist nicht mit und wird nie aus einer Datei uebernommen. */
-    $neu['ansage_token_herkunft'] = (isset($jetzt['ansage_token_herkunft']) && is_array($jetzt['ansage_token_herkunft'])) ? $jetzt['ansage_token_herkunft'] : array();
-    if ($neu['aktionstoken'] === '') {
-        $neu['aktionstoken'] = is_string($jetzt['aktionstoken']) ? $jetzt['aktionstoken'] : '';
-    }
-    return array($neu + $vorg, array(), $anzahl);
+    $cfg['tts'] = mg_tts($cfg);
+    return sicherung_bauen(mg_sicherung_beschreibung(), $cfg);
 }
 
 /**
  * X-3 (Verbesserungsbau 01.10.2026): Wuerde die EIGENE Sicherung das eigene
- * Zurueckspielen bestehen? Geprueft wird mit DERSELBEN Funktion wie beim
- * Zurueckspielen (mg_sicherung_lesen). Rueckgabe: die Namen der
- * beanstandeten Schluessel, nie Werte; leer = sie besteht.
+ * Zurueckspielen bestehen? Seit 1.1.43 dieselbe Pruefung wie beim
+ * Zurueckspielen ueber das Sicherungsmodul (sicherung_selbstpruefung()) an
+ * genau der Datei, die "Einstellungen sichern" liefert. Rueckgabe: die Namen
+ * der beanstandeten Schluessel, nie Werte; leer = sie besteht.
  * Anlass: mg_config() prueft beim Lesen keine Grenzen - ein von Hand
  * eingetragener Wert (capacity 500) stand in der Sicherung, und die eigene
  * Datei wurde danach abgewiesen.
@@ -8841,21 +8889,61 @@ function mg_rueckspiel_maengel($cfg = null)
     if ($cfg === null) {
         $cfg = mg_config();
     }
-    $js = json_encode($cfg, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    if ($js === false) {
-        return array('json');
+    $daten = mg_sicherung_daten($cfg);
+    unset($daten['_warnung']);
+    return sicherung_selbstpruefung(mg_sicherung_beschreibung(), $daten, $cfg);
+}
+
+/**
+ * 1.1.43: Nach dem Zurueckspielen nachziehen und sagen, was mit dem Dienst
+ * geschah (Regeln/05). Rueckgabe array(Hinweise, Fehler), Texte unmaskiert.
+ *
+ *  - Zuruecklesen: jede Einstellung der Datei muss so in mg.json stehen
+ *    (wie bis 1.1.42; 'vin' fuehrt mg_config_save() aus vins mit).
+ *  - Die Abo-Datei des MQTT-Gateways folgt dem zurueckgespielten Praefix
+ *    (mg_abo_datei(), wie beim Speichern im Reiter MQTT).
+ *  - Der Minutentakt (bin/cron.php) liest die Einstellungen bei jedem Lauf
+ *    neu; es gibt keinen Dienst, der neu zu starten waere.
+ *  - Der Gateway-Container wird NICHT angefasst (Regeln/04: nichts umbauen
+ *    ohne Entscheidung): traegt die Sicherung einen anderen iSMART- oder
+ *    Broker-Zugang, ein anderes Praefix, andere Fahrzeuge oder eine andere
+ *    Kapazitaet, sagt der Hinweis, dass er bis zum Neuanlegen mit dem
+ *    bisherigen Stand laeuft.
+ */
+function mg_sicherung_nachziehen($neu, $jetzt)
+{
+    $hinweise = array();
+    $fehler = array();
+    $datei = mg_json_lesen(mg_paths()['config']);
+    $soll = $neu;
+    $soll['vin'] = isset($neu['vins'][0]) ? (string) $neu['vins'][0] : '';
+    $anders = array();
+    foreach ($soll as $k => $v) {
+        if (!array_key_exists($k, $datei) || json_encode($datei[$k]) !== json_encode($v)) {
+            $anders[] = $k;
+        }
     }
-    $namen = array();
-    $mg_rd = json_decode($js, true);    // 1.1.31: so, wie "Einstellungen sichern" sie schreibt - ohne Sprechtoken
-    if (is_array($mg_rd) && isset($mg_rd['tts'])) {
-        $mg_rd['tts'] = ansage_sicherung_bereinigen($mg_rd['tts']);
-        $js = (string) json_encode($mg_rd);
+    if ($anders) {
+        $fehler[] = sprintf(mg_t('EINST.SICH_ABWEICHUNG'), count($anders), implode(', ', $anders));
+        mg_log('Sicherung zurueckgespielt, aber nach dem Zuruecklesen abweichend: ' . implode(', ', $anders) . '.');
     }
-    list($neu) = mg_sicherung_lesen($js, $cfg, $namen);
-    if ($neu !== null) {
-        return array();
+    if (isset($neu['mqtt_praefix'])) {
+        mg_abo_datei((string) $neu['mqtt_praefix'], true);
     }
-    return $namen ? array_values(array_unique($namen)) : array('?');
+    $hinweise[] = mg_t('EINST.SICH_DIENST_TAKT');
+    $gw = array();
+    foreach (array('saic_user', 'saic_pass', 'prefix', 'vins', 'capacity', 'broker_host', 'broker_port',
+                   'broker_user', 'broker_pass') as $k) {
+        $a = (is_array($jetzt) && array_key_exists($k, $jetzt)) ? $jetzt[$k] : null;
+        $n = array_key_exists($k, $neu) ? $neu[$k] : null;
+        if (json_encode($a) !== json_encode($n)) {
+            $gw[] = $k;
+        }
+    }
+    if ($gw) {
+        $hinweise[] = sprintf(mg_t('EINST.SICH_DIENST_GATEWAY'), implode(', ', $gw));
+    }
+    return array($hinweise, $fehler);
 }
 
 /* ==================================================================

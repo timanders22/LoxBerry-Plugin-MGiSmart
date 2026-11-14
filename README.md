@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.42
+Version 1.1.43
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -8,6 +8,20 @@ Klima, Standort — und schickt Befehle zurück: Laden stoppen, Ziel-Ladestand,
 Ladestrombegrenzung, Standklima, „Auto finden".
 
 Kompatibel mit LoxBerry 3.x und **LoxBerry 4** (reines PHP, PHP 7.4 und 8.x).
+
+## Neu in 1.1.43
+
+- **Verhalten geändert – Einstellungen sichern und zurückspielen nach der gemeinsamen Vorlage:** Die Knöpfe im Reiter *Einstellungen* arbeiten jetzt mit demselben Sicherungsmodul wie die übrigen Plugins dieser Reihe. Für den Anwender ändert sich:
+  - Die Sicherungsdatei trägt im Kopf das Kennzeichen des Plugins (`_plugin` = `LoxBerry-Plugin-MGiSmart`) und die Fassung (`_fassung`). Eine Datei eines anderen Plugins und eine Datei ohne Kennzeichen werden als Ganzes abgewiesen; es ändert sich dann nichts. Sicherungen dieses Plugins von 1.1.18 bis 1.1.42 tragen noch kein Kennzeichen; sie werden an ihrem Kopf `_hinweis` erkannt, deutsch wie englisch, und weiter angenommen, und die Meldung sagt das. Sicherungen von 1.1.5 bis 1.1.17 hatten gar keinen Kopf; sie lassen sich von einer fremden Datei nicht sicher unterscheiden und werden seit dieser Fassung abgewiesen (bis 1.1.42 wurden sie angenommen).
+  - Eine Einstellung, die diese Fassung nicht kennt, wird nicht übernommen und mit ihrem Namen gemeldet, nie mit ihrem Wert – oben in der Datei und in den Blöcken (Benachrichtigungen, Sprachansagen, Ansageregeln, Ansageanlässe). Die übrigen Einstellungen werden zurückgespielt. Bis 1.1.42 wies ein unbekannter Name die ganze Datei ab.
+  - Ein leerer Wert in der Sicherung überschreibt keinen bestehenden; der bisherige Wert bleibt, und die Meldung nennt den Namen. Bisher galt das nur für das Aktionstoken.
+  - Nach dem Zurückspielen sagt die Meldung, was mit dem Dienst geschieht: Der Minutentakt liest die Einstellungen beim nächsten Lauf. Ändert die Sicherung iSMART- oder Broker-Zugang, Präfix, Fahrzeuge oder Kapazität, sagt sie außerdem, dass der Gateway-Container bis zum Neuanlegen im Reiter *Gateway einrichten* mit dem bisherigen Stand arbeitet. Angefasst wird er nicht. Die Abo-Datei des MQTT-Gateways folgt dem zurückgespielten Präfix.
+- Unverändert: Eine Datei mit einem unzulässigen Wert ändert gar nichts, und alle Beanstandungen werden genannt. Aktionstoken, Broker- und iSMART-Zugang gehören in die Datei, die Sprechtoken nicht; die geltenden bleiben. Nach dem Zurückspielen zieht die Zweitschrift mit, die Datei wird zurückgelesen, und eine Abweichung wird gemeldet.
+- **Verhalten geändert – Zurückspielen nur mit Haken:** Zwischen dem Feld für die Sicherungsdatei und dem Knopf „Einstellungen zurückspielen“ steht ein Haken „Ja, die geltenden Einstellungen durch die Sicherung ersetzen“, ab Werk aus. Ohne ihn wird die Datei nicht gelesen und nichts geändert, und die Meldung sagt es. Haken, Text und die Prüfung der hochgeladenen Datei (über das Formular gekommen, höchstens 256 KB) kommen aus dem gemeinsamen Sicherungsmodul 1.1.0 und sind in allen Plugins dieser Reihe gleich.
+- **Gemeinsames Sicherungsmodul 1.2.0:** Das Modul kann jetzt, was einzelne Plugins dieser Reihe bisher selbst darum herum gebaut haben (Entscheidung „Einheitlichkeit“). Die Prüfung „die Datei trägt ein Sprechtoken“ liest den Block der Datei jetzt über das Modul statt über eine eigene Umgehung; am Verhalten ändert sich nichts.
+- **Gemeinsames Sicherungsmodul 1.2.1:** Ein Vermerk, der nie aus einer Sicherungsdatei kommt (etwa, dass ein Sprechtoken aus einem Nachbar-Plugin übernommen wurde), behält beim Zurückspielen seinen geltenden Wert. An diesem Plugin ändert sich dadurch nichts; es setzte den Vermerk schon bisher selbst wieder ein.
+- **Gemeinsames Sicherungsmodul 1.2.2:** Fehlt eine Einstellung in der Sicherung und setzt das Plugin ihren Wert nach einer eigenen Übergangsregel (etwa aus einer verwandten Einstellung derselben Sicherung), bleibt dieser Wert beim Zurückspielen, und die Meldung nennt ihn als nach einer Übergangsregel abgeleitet – nicht als Werkseinstellung und nicht als bisherigen Wert. An diesem Plugin ändert sich dadurch nichts.
+- Gemessen mit einem Prüfstand auf dem Arbeitsrechner unter PHP 7.4 und 8.4, der über einen Webserver die echten Knöpfe drückt, mit den Sicherungen aller 38 Vorfassungen von 1.1.5 bis 1.1.42; am Gerät nicht gemessen.
 
 ## Neu in 1.1.42
 

@@ -180,22 +180,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['vorlage'])) {
  * alle Felder richtig, und das Plugin kaeme trotzdem nicht an die Anlage; die
  * Datei waere wertlos. Damit traegt sie Geheimnisse, und der Hinweis am Knopf
  * sagt das. Seit 1.1.18 mit lesbarem Kopf (_hinweis, _stand; Befund U7) -
- * mg_sicherung_lesen() uebergeht ihn. Wie jeder Download steht dieser Zweig
+ * das Zurueckspielen uebergeht ihn. Wie jeder Download steht dieser Zweig
  * vor lbheader() und ohne Umleitung. */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mg_sichern'])) {
-    /* X-3 (Verbesserungsbau 01.10.2026): wuerde diese Sicherung das eigene
-     * Zurueckspielen nicht bestehen, steht das als _warnung im Kopf - nur
-     * Namen, nie Werte. Geliefert wird sie trotzdem vollstaendig; das
-     * Zurueckspielen uebergeht Schluessel mit '_'. */
-    $mg_sich = mg_config();
-    $mg_sich['tts'] = ansage_sicherung_bereinigen(mg_tts($mg_sich));    // 1.1.31: ein Sprechtoken steht in keiner Sicherung
-    unset($mg_sich['ansage_token_herkunft']);
-    $mg_sich_namen = mg_rueckspiel_maengel($mg_sich);
-    $mg_js = json_encode(array('_hinweis' => mg_t('EINST.SICH_KOPF'), '_stand' => date('Y-m-d H:i'))
-        + ($mg_sich_namen ? array('_warnung' => sprintf(mg_t('EINST.SICH_WARN_KOPF'), implode(', ', $mg_sich_namen)))
-                          : array())
-        + $mg_sich, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    if ($mg_js !== false) {
+    /* 1.1.43: Kopf und Inhalt baut das gemeinsame Sicherungsmodul (mg_sicherung_daten() ->
+     * sicherung_bauen()): _hinweis, _plugin = 'LoxBerry-Plugin-MGiSmart', _fassung, _stand. Ein
+     * Sprechtoken steht in keiner Sicherung, der Vermerk ansage_token_herkunft auch nicht (Beschreibung:
+     * 'sichern', 'nie_aus_datei'). X-3 wie bisher: wuerde diese Sicherung das eigene Zurueckspielen nicht
+     * bestehen, steht das als _warnung im Kopf - nur Namen, nie Werte; geliefert wird sie trotzdem. */
+    $mg_js = sicherung_json(mg_sicherung_daten());
+    if ($mg_js !== '') {
         while (ob_get_level() > 0) { @ob_end_clean(); }
         header('Content-Type: application/json; charset=utf-8');
         header('Content-Disposition: attachment; filename="mgismart_einstellungen_'
@@ -705,54 +699,46 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
  * Plugins ist wenige Kilobyte gross; alles darueber wird gar nicht gelesen.
  *
  * Seit 1.1.18 (Befunde C5, U2-U5): jeder Wert wird vor dem Zusammenfuehren
- * gegen Typ und Regel geprueft (mg_sicherung_lesen(), Bauart E), ein leeres
+ * gegen Typ und Regel geprueft (mg_wert_pruefen(), Bauart E), ein leeres
  * Merkwort heisst "kein Merkwort gesichert", und die Meldung zaehlt die
  * Werte NACH dem Zuruecklesen der gespeicherten Datei. Bis 1.1.17 meldete
  * sie "44 Werte uebernommen", auch wenn die Selbstheilung die Datei gleich
  * danach mit der Zweitschrift ueberschrieben hatte. Die Seite danach zeigt
  * das neue Merkwort, weil der Zweig wie jeder andere mit einer Umleitung
- * endet (U1) - das folgende GET liest die Konfiguration neu (C6). */
+ * endet (U1) - das folgende GET liest die Konfiguration neu (C6).
+ * Seit 1.1.43 ueber das gemeinsame Sicherungsmodul: die Zahl der Meldung ist
+ * die der uebernommenen Werte; das Zuruecklesen bleibt und meldet jede
+ * Abweichung (mg_sicherung_nachziehen()). */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mg_zurueck'])) {
-    if (!isset($_FILES['mg_sicherung']) || !is_array($_FILES['mg_sicherung'])
-        || !isset($_FILES['mg_sicherung']['tmp_name'])
-        || !is_string($_FILES['mg_sicherung']['tmp_name'])
-        || !@is_uploaded_file($_FILES['mg_sicherung']['tmp_name'])) {
-        $mg_fehler[] = mg_t('EINST.SICH_KEINE_DATEI');
-    } elseif ((int) $_FILES['mg_sicherung']['size'] > 262144) {
-        $mg_fehler[] = mg_t('EINST.SICH_ZU_GROSS');
+    /* 1.1.43: Haken, hochgeladene Datei und Groessengrenze prueft das gemeinsame Sicherungsmodul
+     * (sicherung_eingang(), Modul 1.1.0, Entscheidung des Hausherrn 12.11.2026) - in jeder Linie gleich, und
+     * vor is_uploaded_file() steht der Haken zurueck_ok: ohne ihn wird nichts gelesen und nichts geaendert. */
+    list($mg_ein_roh, $mg_ein_ab) = sicherung_eingang(mg_sicherung_beschreibung(), $_POST, $_FILES, 'mg_sicherung');
+    if ($mg_ein_ab !== null) {
+        $mg_ein_m = sicherung_meldungen(mg_sicherung_beschreibung(), $mg_ein_ab);
+        foreach ($mg_ein_m['fehler'] as $mg_ein_x) { $mg_fehler[] = $mg_ein_x; }
     } else {
-        list($mg_neu, $mg_mangel, $mg_n) = mg_sicherung_lesen(
-            (string) @file_get_contents($_FILES['mg_sicherung']['tmp_name']), $mg_cfg);
-        if ($mg_neu === null) {
-            /* ALLE Beanstandungen, nicht nur die erste - und geaendert wird
-             * nichts. */
-            $mg_fehler[] = mg_t('EINST.SICH_ABGELEHNT') . ' '
-                            . implode(' ', $mg_mangel);
-        } elseif (mg_config_save($mg_neu)) {
-            $mg_datei = mg_json_lesen(mg_paths()['config']);
-            $mg_soll = $mg_neu;
-            $mg_soll['vin'] = isset($mg_neu['vins'][0]) ? (string) $mg_neu['vins'][0] : '';
-            $mg_gleich = 0;
-            $mg_anders = array();
-            foreach ($mg_soll as $mg_k => $mg_v) {
-                if (array_key_exists($mg_k, $mg_datei)
-                    && json_encode($mg_datei[$mg_k]) === json_encode($mg_v)) {
-                    $mg_gleich++;
-                } else {
-                    $mg_anders[] = $mg_k;
-                }
-            }
-            if ($mg_anders) {
-                $mg_fehler[] = sprintf(mg_t('EINST.SICH_ABWEICHUNG'), count($mg_anders),
-                    implode(', ', $mg_anders));
-            } else {
-                $mg_meldungen[] = sprintf(mg_t('EINST.SICH_UEBERNOMMEN'), $mg_gleich);
-            }
-            mg_log('Sicherung zurueckgespielt: ' . $mg_gleich . ' Werte nach dem Zuruecklesen gleich'
-                . ($mg_anders ? ', abweichend: ' . implode(', ', $mg_anders) : '') . '.');
-        } else {
-            $mg_fehler[] = mg_t('EINST.SICH_SCHREIBFEHLER');
-        }
+        /* 1.1.43: das gemeinsame Sicherungsmodul (sicherung_zurueckspielen()) liest, prueft, verwirft
+         * Unbekanntes mit Namen, laesst leere Werte den bisherigen stehen und aendert bei einer
+         * Beanstandung GAR NICHTS (alle Beanstandungen, nicht nur die erste). Die Schritte dieser Linie
+         * davor und danach stehen in den Rueckrufen: Sprechtoken und Vermerk aus dem geltenden Stand
+         * (mg_sicherung_beschreibung(), 'vorbereiten'), Speichern samt Zweitschrift (mg_config_save()),
+         * Zuruecklesen, Abo-Datei und die Saetze zu Minutentakt und Gateway-Container
+         * (mg_sicherung_nachziehen()). Eine Protokollzeile schreibt das Modul. */
+        $mg_b = mg_sicherung_beschreibung();
+        $mg_b['jetzt'] = function () use ($mg_cfg) { return $mg_cfg; };
+        $mg_b['speichern'] = function ($neu) { return mg_config_save($neu); };
+        $mg_b['zweitschrift'] = function () { $p = mg_paths(); return array($p['config'], $p['backup']); };
+        $mg_b['nachziehen'] = function ($neu, $jetzt) use (&$mg_fehler) {
+            list($h, $f) = mg_sicherung_nachziehen($neu, $jetzt);
+            foreach ($f as $x) { $mg_fehler[] = $x; }
+            return $h;
+        };
+        $mg_b['log'] = 'mg_log';
+        $mg_r = sicherung_zurueckspielen($mg_b, $mg_ein_roh);
+        $mg_m = sicherung_meldungen($mg_b, $mg_r);
+        foreach ($mg_m['fehler'] as $mg_x) { $mg_fehler[] = $mg_x; }
+        foreach ($mg_m['hinweise'] as $mg_x) { $mg_meldungen[] = $mg_x; }
     }
     $mg_tab = 'tab-settings';
 }
@@ -1575,6 +1561,7 @@ for ($mg_i = 0; $mg_i < max(1, $mg_anzahl); $mg_i++) {
     <input data-role="none" type="hidden" name="activetab" value="tab-settings">
     <input data-role="none" type="hidden" name="fmt" value="<?= mg_e($mg_fmt) ?>">
     <input data-role="none" type="file" name="mg_sicherung" accept=".json">
+    <?= sicherung_haken_zeile(mg_sicherung_beschreibung()) ?>
     <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="mg_zurueck" value="1"><?= mg_t('EINST.K_ZURUECK') ?></button>
   </form>
 </div>
