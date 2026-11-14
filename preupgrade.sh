@@ -17,6 +17,10 @@
 # Wer eine Konfiguration ueber das Upgrade retten will, muss das VOR dem
 # Loeschen tun. $1 ist eine Kennung, $6 der Arbeitsordner des Installers.
 
+# [upgrade_daten] Argumente des Installers festhalten - unten sichert der gemeinsame Baustein
+# [upgrade_daten] upgrade_daten.sh (neben diesem Skript) den ganzen Datenordner.
+UPGD_ORDNER="$3"; UPGD_WURZEL="$5"
+
 PFOLDER="${3:-mgismart}"
 # Gruppe 39 (1.1.28, V7-a/T1-3): dieselbe Pruefung wie preinstall.sh - ein Ordnername
 # mit "/" oder "." waere ein Pfad hinaus (Marke, Ablage). Bis 1.1.27 lief das Skript weiter.
@@ -140,6 +144,15 @@ if [ "$MG_FEHL" != 0 ]; then
     echo "<FAIL> Nicht alles liess sich beiseitelegen ($ABLAGE) - die Aktualisierung wird abgebrochen, damit der Purge die"
     echo "<FAIL> Originale nicht loescht. Die bisherige Fassung bleibt installiert."
     rm -f "$MARKE" 2>/dev/null
+    exit 2
+fi
+# [upgrade_daten] Gemeinsamer Baustein (Werkzeuge/gemeinsam/upgrade_daten.sh): den ganzen Datenordner
+# [upgrade_daten] neben den Ordner sichern; misslingt das, bricht die Aktualisierung mit Rueckgabe 2 ab.
+if [ -f "$(dirname "$0")/upgrade_daten.sh" ] && . "$(dirname "$0")/upgrade_daten.sh"; then
+    upgrade_daten_sichern "$UPGD_ORDNER" "$UPGD_WURZEL" || exit 2
+else
+    echo "<FAIL> Der Baustein upgrade_daten.sh fehlt neben $(basename "$0") - die Aktualisierung wird abgebrochen,"
+    echo "<FAIL> die bisherige Fassung bleibt installiert."
     exit 2
 fi
 exit 0

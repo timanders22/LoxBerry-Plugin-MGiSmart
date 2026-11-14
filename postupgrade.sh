@@ -306,7 +306,10 @@ if [ -n "$ARGV1" ]; then
     for MG_LL in "$ARGV1"/ladung_laufend[0-9].json "$ARGV1"/ladung_laufend[0-9][0-9].json; do
         [ -f "$MG_LL" ] || continue
         MG_LZ="$DDIR/$(basename "$MG_LL")"
-        if [ -e "$MG_LZ" ]; then
+        # 1.1.44: der gemeinsame Baustein upgrade_daten.sh (am Anfang von postinstall.sh) hat sie womoeglich schon zurueckgespielt.
+        if [ -f "$MG_LZ" ] && cmp -s "$MG_LL" "$MG_LZ"; then
+            echo "<OK> Mitschrift der laufenden Ladung ist zurueck ($(basename "$MG_LL"))."
+        elif [ -e "$MG_LZ" ]; then
             echo "<INFO> $(basename "$MG_LL"): im Datenordner liegt schon eine neue Mitschrift - die alte bleibt in der Ablage."
         elif mg_kopieren "$MG_LL" "$MG_LZ" 644; then
             echo "<OK> Mitschrift der laufenden Ladung uebernommen ($(basename "$MG_LL"))."

@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.43
+Version 1.1.44
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -8,6 +8,14 @@ Klima, Standort — und schickt Befehle zurück: Laden stoppen, Ziel-Ladestand,
 Ladestrombegrenzung, Standklima, „Auto finden".
 
 Kompatibel mit LoxBerry 3.x und **LoxBerry 4** (reines PHP, PHP 7.4 und 8.x).
+
+## Neu in 1.1.44
+
+- **Der Datenordner übersteht ein Update:** Bei jedem Update löscht LoxBerry den Datenordner des Plugins (`data/plugins/mgismart/`). Bis 1.1.43 brachte das Plugin davon nur die Ladevorgänge und die Mitschrift einer laufenden Ladung hinüber; verloren gingen unter anderem die Sperrzeiten und Merker der Ansage-Regeln (`ansage_regeln.json`) und die zuletzt gesprochenen Ansagen (`*_letzte.json`). Jetzt sichert `preupgrade.sh` über den gemeinsamen Baustein `upgrade_daten.sh` den ganzen Datenordner mit Unterordnern, Rechten und Zeitstempeln neben den Ordner (`data/plugins/mgismart.upgrade_daten/`, Ordner 0700) – ohne Sperr- und PID-Dateien und Sockets – und zählt die Kopie Datei für Datei gegen. `postinstall.sh` spielt als Erstes jede Datei zurück, die nach dem Update fehlt – vor allem anderen, was die Installation tut. Was die neue Fassung schon angelegt hat, wird nicht überschrieben; was davon nicht aus dem Archiv stammt, nennt das Installationsprotokoll mit Namen. Danach wird die Sicherung entfernt.
+- **Verhalten geändert – lieber kein Update als ein leerer Datenordner:** Lässt sich der Datenordner nicht vollständig sichern (zu wenig Platz, fehlende Rechte, eine unlesbare Datei), meldet `preupgrade.sh` das mit `<FAIL>` und bricht die Aktualisierung ab; die bisherige Fassung bleibt mit ihrem Datenordner installiert.
+- Eine Sicherung, die älter als eine Stunde ist, stammt nicht aus diesem Update; sie wird nicht eingespielt, bleibt liegen, und das Protokoll sagt es. Die Deinstallation räumt eine liegengebliebene Sicherung mit ab.
+- Das Installationsprotokoll sagt bei der Mitschrift einer laufenden Ladung jetzt, dass sie zurück ist, statt von einer „neuen Mitschrift“ zu sprechen.
+- Der Baustein `upgrade_daten.sh` (Fassung 1.0.0) ist gemeinsam; die übrigen Plugins dieser Reihe bekommen ihn byte-gleich mit ihrer nächsten Fassung. Gemessen mit einem nachgestellten Update-Lauf auf dem Arbeitsrechner (WSL, so aufgerufen wie vom LoxBerry-Installer) und am Gerät (LoxBerry 4.0, PHP 7.4, Aktualisierung von 1.1.43 am 14.11.2026): 9 Dateien gesichert, 7 zurückgespielt, 2 schon gleich, mit unveränderter Prüfsumme und ursprünglichem Zeitstempel.
 
 ## Neu in 1.1.43
 
@@ -876,7 +884,11 @@ alle vier kennen:
 | `data/plugins/mgismart/mosquitto/mosquitto_pub` | dasselbe | 0600 im Ordner 0700 |
 
 Die Deinstallation entfernt alle vier sowie `/tmp/mgismart`; die
-Plugin-Ordner räumt LoxBerry selbst weg. Passwort **und** Merkwort werden im
+Plugin-Ordner räumt LoxBerry selbst weg. Während eines Updates liegen die
+beiden `mosquitto`-Dateien seit 1.1.44 zusätzlich kurz in der Sicherung des
+Datenordners (`data/plugins/mgismart.upgrade_daten/`, Ordner 0700);
+`postinstall.sh` entfernt sie nach dem Zurückspielen, und die Deinstallation räumt eine
+liegengebliebene Sicherung mit ab. Passwort **und** Merkwort werden im
 Protokoll maskiert. Im Plugin sind keine persönlichen Daten enthalten.
 
 Der **Standort** wird nur als Abstand zum eingetragenen Hausstandort in die
@@ -1021,8 +1033,9 @@ läuft.
   Wert folgt unmittelbar, ohne Retain — und merkt sich das im Datenordner
   (`retain_zeitbezug_geraeumt`, eine Zeile `<präfix>/<n>` je Fahrzeug). Wer
   das Präfix umstellt oder ein Fahrzeug hinzufügt, bekommt die Abräumung dort
-  noch einmal. Der Installer leert den Datenordner bei jedem Update; nach
-  einem Update geschieht die Abräumung deshalb erneut einmal, ohne Schaden.
+  noch einmal. Der Installer leert den Datenordner bei jedem Update; seit
+  1.1.44 trägt das Plugin ihn hinüber, und der Merker bleibt erhalten (bis
+  1.1.43 geschah die Abräumung nach einem Update erneut einmal, ohne Schaden).
 * **Der Preis:** nach einem Neustart des MQTT-Gateways oder des Brokers
   stehen diese vier Werte erst wieder an, wenn das Plugin sie sendet — bei
   einer Änderung sofort, sonst mit dem vollständigen Satz, der alle halbe
