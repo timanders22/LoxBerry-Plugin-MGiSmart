@@ -972,42 +972,11 @@ function mg_formtoken_ok($cfg = null)
  */
 function mg_pluginversion()
 {
-    static $v = null;
-    if ($v !== null) {
-        return $v;
-    }
-    if (class_exists('LBSystem', false) && method_exists('LBSystem', 'pluginversion')) {
-        /* Ueber den Ordnernamen fragen (Regeln/03): ohne Argument haengt die
-         * Antwort am ersten eingebundenen Skript - am Geraet gemessen
-         * 17.09.2026: aus einem fremden Einstieg (php -r) NULL, mit dem
-         * Ordnernamen die installierte Fassung. Installiert liegt diese Datei
-         * unter webfrontend/html(auth)/plugins/<ordner>/. */
-        $aus = @LBSystem::pluginversion(basename(__DIR__));
-        if ($aus !== null && trim((string) $aus) !== '') {
-            $v = trim((string) $aus);
-            return $v;
-        }
-    }
-    $v = '';
-    foreach (array(
-        dirname(dirname(dirname(__FILE__))) . '/plugin.cfg',
-        dirname(dirname(dirname(dirname(dirname(__FILE__))))) . '/plugin.cfg',
-    ) as $kand) {
-        if (!is_file($kand)) {
-            continue;
-        }
-        foreach (file($kand, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: array() as $zeile) {
-            $zeile = trim($zeile);
-            if ($zeile === '' || $zeile[0] === '#' || $zeile[0] === ';') {
-                continue;
-            }
-            if (preg_match('/^VERSION\s*=\s*(.+)$/i', $zeile, $tr)) {
-                $v = trim($tr[1], " \t\"'");
-                break 2;
-            }
-        }
-    }
-    return $v;
+    /* 21.11.2026 (Fassung im Titel, Entscheidung des Hausherrn): aus dem gemeinsamen Stueck fassung.php,
+     * fuer alle Linien gleich - LBSystem::pluginversion(<ordner>), Plugin-Datenbank ueber den Ordnernamen,
+     * plugin.cfg des entpackten Archivs; nichts gefunden: ''. */
+    require_once __DIR__ . '/fassung.php';
+    return plugin_fassung(__DIR__);
 }
 
 /* ---------------- Protokoll ---------------- */

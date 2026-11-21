@@ -1010,7 +1010,8 @@ function mg_formfeld($k, $bez, array &$neu, array &$fehler, $regel = null)
  * ================================================================== */
 
 if (class_exists('LBWeb', false)) {
-    LBWeb::lbheader('MG iSmart' . ($mg_ver !== '' ? ' ' . $mg_ver : ''),
+    require_once __DIR__ . '/fassung.php';   // Fassung im Titel: gemeinsames Stueck fassung.php (21.11.2026)
+    LBWeb::lbheader(plugin_kopftitel('MG iSmart', __DIR__),
         'https://github.com/SAIC-iSmart-API/saic-python-mqtt-gateway', 'help.html');
 } else {
     echo '<!DOCTYPE html><html lang="de"><head><meta charset="utf-8">'
