@@ -3289,12 +3289,44 @@ function mg_vorklima_sperre(array $cfg, array $st)
 
 /* ---------------- Sammelthemen haus/fahrzeug/<name>/... (1.1.31, Regeln/07) ---------------- */
 
-/** <name> nach der Namensregel von Regeln/07; reserviert: zaehler, anbieter. Ohne brauchbaren Namen mg<n>. Rein. */
+/** <name> nach der gemeinsamen Namensregel (Regeln/07 Nr. 15, Entscheidung des Hausherrn 22.11.2026), wie
+ * ew_haus_name() (Ecowitt-Weiche), hausName() (Zigbee2MqttNG) und klima_name() (BLE-Scanner NG): klein, ae/oe/ue/ss,
+ * jede Folge anderer Zeichen ausser a-z, 0-9, _ und - wird ein _, _ am Rand faellt weg, hoechstens 40 Zeichen
+ * (danach rechts kein _);
+ *  reserviert: zaehler, anbieter. Ohne brauchbaren Namen mg<n>. Rein. Bis 1.1.48: mg_haus_fahrzeug_name_alt(). */
 function mg_haus_fahrzeug_name($name, $nr)
+{
+    $s = str_replace(array("\u{00E4}", "\u{00F6}", "\u{00FC}", "\u{00DF}", "\u{00C4}", "\u{00D6}", "\u{00DC}"),
+                     array('ae', 'oe', 'ue', 'ss', 'ae', 'oe', 'ue'), (string) $name);
+    $s = preg_replace('/[^a-z0-9_-]+/', '_', strtolower($s));
+    $s = rtrim(substr(trim((string) $s, '_'), 0, 40), '_');
+    if ($s === '' || $s === 'zaehler' || $s === 'anbieter') { return 'mg' . (int) $nr; }
+    return $s;
+}
+
+/** Der <name> nach der Regel bis 1.1.48 (jedes Zeichen einzeln zu _, am Rand nichts entfernt) - nur fuer mg_hf_altstamm(). Rein. */
+function mg_haus_fahrzeug_name_alt($name, $nr)
 {
     $s = strtr((string) $name, array('Ä' => 'ae', 'Ö' => 'oe', 'Ü' => 'ue', 'ä' => 'ae', 'ö' => 'oe', 'ü' => 'ue', 'ß' => 'ss'));
     $s = substr((string) preg_replace('/[^a-z0-9_\-]/', '_', strtolower($s)), 0, 40);
     if (trim($s, '_') === '' || $s === 'zaehler' || $s === 'anbieter') { return 'mg' . (int) $nr; }
+    return $s;
+}
+
+/** 22.11.2026 (gemeinsame Namensregel): der Stamm, unter dem dieses Plugin bis 1.1.48 das Fahrzeug $nr gemeldet haben
+ *  kann, wenn der alte Name anders lautet und kein aktueller Stamm ist; sonst ''. Gebraucht nur ohne Merker (er liegt
+ *  unter /tmp und faellt beim Neustart weg). Rein bis auf die Konfiguration als Argument. */
+function mg_hf_altstamm(array $cfg, $nr, $stamm)
+{
+    $alt = array();
+    foreach (mg_fahrzeuge($cfg) as $k => $fz) {
+        $n = mg_haus_fahrzeug_name_alt($fz['name'], $k);
+        $alt[$k] = in_array($n, $alt, true) ? substr($n, 0, 36) . '_' . (int) $k : $n;
+    }
+    if (!isset($alt[$nr])) { return ''; }
+    $s = 'haus/fahrzeug/' . $alt[$nr];
+    if ($s === $stamm) { return ''; }
+    foreach (mg_haus_fahrzeug_namen($cfg) as $n) { if ('haus/fahrzeug/' . $n === $s) { return ''; } }
     return $s;
 }
 
@@ -3304,7 +3336,7 @@ function mg_haus_fahrzeug_namen(array $cfg)
     $aus = array();
     foreach (mg_fahrzeuge($cfg) as $nr => $fz) {
         $n = mg_haus_fahrzeug_name($fz['name'], $nr);
-        $aus[$nr] = in_array($n, $aus, true) ? substr($n, 0, 36) . '_' . (int) $nr : $n;
+        $aus[$nr] = in_array($n, $aus, true) ? rtrim(substr($n, 0, 36), '_') . '_' . (int) $nr : $n;
     }
     return $aus;
 }
@@ -3372,6 +3404,13 @@ function mg_haus_fahrzeug_senden($nr, array $st, array $cfg)
     /* 1.1.33: Ein Stamm mit fremdem Zaehler gehoert auch einer anderen Linie: Er bleibt stehen. */
     if (isset($m['stamm']) && is_string($m['stamm']) && $m['stamm'] !== $stamm && strpos($m['stamm'], 'haus/fahrzeug/') === 0 && !isset(mg_hf_fremd_lesen()[$m['stamm']])) {
         foreach (array_keys($werte) as $n) { $zeilen .= mg_haus_fahrzeug_zeile($m['stamm'] . '/' . $n, '', true); }
+    }
+    /* 22.11.2026 (gemeinsame Namensregel): ohne Merker einmal den Stamm nach der Namensregel bis 1.1.48 leeren. */
+    if (!isset($m['stamm'])) {
+        $s_alt = mg_hf_altstamm($cfg, $nr, $stamm);
+        if ($s_alt !== '' && !isset(mg_hf_fremd_lesen()[$s_alt])) {
+            foreach (array_keys($werte) as $n) { $zeilen .= mg_haus_fahrzeug_zeile($s_alt . '/' . $n, '', true); }
+        }
     }
     $jetzt = time();
     $voll = !isset($m['zeit'], $m['werte'], $m['stamm']) || $m['stamm'] !== $stamm || $jetzt - (int) $m['zeit'] > 1800;

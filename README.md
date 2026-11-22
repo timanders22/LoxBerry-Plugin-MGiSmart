@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.48
+Version 1.1.49
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -8,6 +8,11 @@ Klima, Standort — und schickt Befehle zurück: Laden stoppen, Ziel-Ladestand,
 Ladestrombegrenzung, Standklima, „Auto finden".
 
 Kompatibel mit LoxBerry 3.x und **LoxBerry 4** (reines PHP, PHP 7.4 und 8.x).
+
+## Neu in 1.1.49
+
+- **Geändert – Fahrzeugname unter `haus/fahrzeug/` nach der gemeinsamen Namensregel (Entscheidung des Hausherrn 22.11.2026):** Der Name entsteht jetzt wie in allen Plugins: klein, Umlaute ausgeschrieben, jede Folge anderer Zeichen außer a–z, 0–9, `_` und `-` wird ein einziges `_`, ein `_` am Anfang und am Ende fällt weg, höchstens 40 Zeichen. Bisher wurde jedes Zeichen einzeln ersetzt. **Ein Fahrzeugname mit mehreren Leer- oder Sonderzeichen hintereinander oder mit solchen Zeichen am Anfang oder Ende ändert sich deshalb** (Beispiel: „Mein Auto (2)“ war `mein_auto__2_`, ist jetzt `mein_auto_2`); ein `-` bleibt wie bisher stehen. Nach dem Update leert das Plugin einmal die zurückbehaltenen Themen unter dem alten Namen (nicht, wenn dort der Zähler einer anderen Linie läuft). Wer den Namen in einem anderen Plugin (Abfahrts-Assistent, Marstek Venus, Dashboard) oder in Loxone eingetragen hat, trägt den neuen ein. Gemessen auf dem Arbeitsrechner; am Gerät nicht gemessen.
+- Haben Sie unter „Bei Ankunft sofort abfragen“ eine Person oder einen Tag des BLE-Scanner NG gewählt, dessen Name sich mit dem BLE-Scanner NG 1.3.46 ändert (siehe dort), wählen Sie ihn neu.
 
 ## Neu in 1.1.48
 
