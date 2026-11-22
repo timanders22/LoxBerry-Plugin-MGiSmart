@@ -3240,6 +3240,26 @@ function mg_kabel_entscheiden(array $st, array $m, array $cfg, $abfahrt_in, $nac
     return array(true, $m);
 }
 
+/**
+ * 1.1.50 (Entscheidung des Hausherrn 22.11.2026, Sprachmodul 1.5.0): Nachtruhe und ihr Ende fuer die Kabelwarnung, an Nicht-Schultagen mit dem
+ * spaeteren Ende. Die Regeln fuer heute (ansage_regeln_heute_lesen(), hoechstens eine kurze Sitzung am Broker) werden nur am
+ * Vormittag gefragt und nur, wenn die Warnung nach den Regeln fuer Schultage kaeme oder mit einem spaeteren Ende bis 12 Uhr
+ * kaeme ($warnt(nacht, bis) -> bool); sonst bleiben die Regeln, wie sie sind. $merk haelt die Antwort fuer weitere Fahrzeuge
+ * desselben Laufs. Rueckgabe array(nacht, bis); bis '' ohne Nachtruhe.
+ */
+function mg_kabel_ruhe_heute(array $r, $jetzt, array $k, $warnt, &$merk = null)
+{
+    $jetzt = (int) $jetzt;
+    $nacht = ansage_nachtruhe($r, $jetzt);
+    $bis = empty($r['nachtruhe']) ? '' : (string) $r['bis'];
+    if ($bis === '' || $nacht || !function_exists('ansage_regeln_heute_lesen') || date('H:i', $jetzt) >= '12:00') { return array($nacht, $bis); }
+    if (!is_array($merk)) {
+        if (!call_user_func($warnt, false, $bis) && !call_user_func($warnt, false, '12:00')) { return array($nacht, $bis); }
+        list($merk) = ansage_regeln_heute_lesen($r, $k + array('jetzt' => function () use ($jetzt) { return $jetzt; }));
+    }
+    return array(ansage_nachtruhe($merk, $jetzt), (string) $merk['bis']);
+}
+
 /** Der Teil des Minutenlaufs: Merker lesen, entscheiden, nur bei einer Aenderung schreiben. Ohne einen Haken geschieht nichts. */
 function mg_kabel_pruefen(array $st, $nr, array $cfg, $jetzt = null)
 {
@@ -3257,7 +3277,10 @@ function mg_kabel_pruefen(array $st, $nr, array $cfg, $jetzt = null)
         }
     }
     $r = mg_ansage_regeln($cfg);
-    list($faellig, $neu) = mg_kabel_entscheiden($st, $m, $cfg, $in, ansage_nachtruhe($r, $jetzt), empty($r['nachtruhe']) ? '' : $r['bis'], $jetzt);
+    /* 1.1.50: Nachtruhe und ihr Ende mit den Regeln fuer heute (an Nicht-Schultagen spaeter). */
+    $warnt = function ($n, $b) use ($st, $m, $cfg, $in, $jetzt) { list($f) = mg_kabel_entscheiden($st, $m, $cfg, $in, $n, $b, $jetzt); return $f; };
+    list($nacht, $bis) = mg_kabel_ruhe_heute($r, $jetzt, mg_ansage_k(), $warnt);
+    list($faellig, $neu) = mg_kabel_entscheiden($st, $m, $cfg, $in, $nacht, $bis, $jetzt);
     if ($neu !== $m) { mg_write_json($f, $neu); }
     return $faellig;
 }
@@ -9005,7 +9028,7 @@ function mg_eingabe_felder($form)
     );
     /* 1.1.31: die Felder der Sprachansagen (Stamm). Die Tabelle reist flach als name.N; die Sprechtoken nie. */
     if ($form === 'settings') {
-        $f['settings']['text'] = array_merge($f['settings']['text'], array('ansage_ruhe_von', 'ansage_ruhe_bis', 'ansage_sperre_min'),
+        $f['settings']['text'] = array_merge($f['settings']['text'], array('ansage_ruhe_von', 'ansage_ruhe_bis', 'ansage_ruhe_bis_frei' /* 1.1.50, Stamm 1.5.0 */, 'ansage_sperre_min'),
             array_values(array_diff(ansage_x2_felder(), array('tts_alexa_token_loeschen', 'tts_google_token_loeschen'))), mg_ziele_x2_felder());
         $f['settings']['text'] = array_merge($f['settings']['text'], array('kabel_soc', 'kabel_uhr', 'kabel_abfahrt_min', 'signal_praefix', 'vorklima_min_soc'));
         foreach (array('n_kabel', 'signal_kabel', 'vorklima_nur_kabel') as $mg_hz) { $f['settings']['haken'][] = $mg_hz; }
