@@ -130,10 +130,12 @@ if (!function_exists('lb_wurzel_ermitteln')) {
 
 /* 1.1.31: die gemeinsame Sprachausgabe (Stamm 1.3.0), neben dieser Datei - wie sie selbst in html/ (kein Endpunkt, 403). */
 require_once __DIR__ . '/sprachausgabe.php';
+require_once __DIR__ . '/meldung.php';     // Statusmeldungen an SignalBot (seit 1.1.51)
 /* 1.1.43: Das gemeinsame Sicherungsmodul (Abschrift von Werkzeuge/gemeinsam/sicherung.php, Auftrag des
  * Hausherrn 12.11.2026): Einstellungen sichern und zurueckspielen nach denselben Regeln wie in den
  * anderen Linien. Die Beschreibung dieser Linie steht in mg_sicherung_beschreibung(). */
 require_once __DIR__ . '/sicherung.php';
+require_once __DIR__ . '/haus_bereiche.php';     // gemeinsame Bereiche unter haus/ (seit 1.1.51, Regeln/07)
 
 /* Die LoxBerry-Wurzel: $LBHOMEDIR, wenn dort config/plugins, data/plugins und
  * config/system/general.json liegen, sonst die Aufwaertssuche
@@ -365,6 +367,7 @@ function mg_vorgaben()
         'tts' => ansage_werk_block(),
         'ansage_regeln' => ansage_regeln_vorgaben(),
         'ansage_haken' => mg_ansage_haken_vorgabe(),
+        'meldung' => meld_vorgaben(mg_meld_haken_vorgabe(), mg_meld_haken_vorgabe()),     // 1.1.51: Meldungen an SignalBot, ab Werk aus
         'ansage_token_herkunft' => array(),     // Feldname => 'nachbar': uebernommen, nicht von Hand (Stamm 1.3.1)
 
         // --- Kabel vergessen (1.1.31) ---
@@ -650,6 +653,8 @@ function mg_config()
         }
     }
     $cfg = mg_json_lesen($quelle);
+    $mg_mb = mg_meld_aus_bestand($cfg);     // 1.1.51: signal_kabel -> Block 'meldung' (F1), vor den Vorgaben
+    if ($mg_mb !== null) { $cfg['meldung'] = $mg_mb; }
     $cfg += mg_vorgaben();
 
     /* Altbestand: bis 1.0.8 gab es genau eine VIN in 'vin'. Sie wandert in die
@@ -795,6 +800,8 @@ function mg_config_vervollstaendigen()
     // Schreiben als [] zurueck - der Rohwert wird erhalten, bevor ergaenzt wird (11.11.2026).
     $datei = mg_json_leere_objekte($datei, json_decode(trim((string) @file_get_contents($p['config']))));
     $fehlend = array();
+    $mg_mb = mg_meld_aus_bestand($datei);     // 1.1.51: wie mg_config() - nicht die Vorgabe 'aus' festschreiben
+    if ($mg_mb !== null) { $datei['meldung'] = $mg_mb; $fehlend[] = 'meldung'; }
     foreach (mg_vorgaben() as $k => $w) {
         /* endpunkt_ein bleibt aussen vor (11.11.2026): den Uebergang fuer Bestandsanlagen setzt das
          * Update; ein hier festgeschriebenes "aus" koennte ein spaeteres Update nicht mehr berichtigen. */
@@ -3094,15 +3101,53 @@ function mg_ansage_warte($fn)
     return $erg;
 }
 
+/** 1.1.51: ein Ereignis ausserhalb der Ansage (heute notify_ext()) fuer die Meldung an SignalBot in die Warteliste - nur
+ *  mit dem Haken dieses Anlasses; der Sender des Laufs (mg_ansage_starten()) schickt es. Rueckgabe 1 gelegt, 0 nicht. */
+function mg_meld_legen($anlass, $schluessel, $text, $cfg = null)
+{
+    if ($cfg === null) { $cfg = mg_config(); }
+    if (!meld_anlass_an(mg_meld_block($cfg), (string) $anlass)) { return 0; }
+    $jetzt = time();
+    mg_ansage_warte(function ($alt) use ($schluessel, $text, $jetzt) {
+        $alt[] = array('schluessel' => (string) $schluessel, 'text' => (string) $text, 'zeit' => $jetzt, 'weg' => 'm');
+        return array(array_slice($alt, -50), null);
+    });
+    return 1;
+}
+
+/** 1.1.51: die Eintraege eines Weges ('a' Ansage, 'm' Meldung an SignalBot); ohne 'weg' (vor dem Update gelegt) fuer beide. */
+function mg_meld_weg(array $l, $weg)
+{
+    $aus = array();
+    foreach ($l as $e) {
+        if (!is_array($e)) { continue; }
+        $w = isset($e['weg']) ? (string) $e['weg'] : '';
+        if ($w === '' || $w === $weg) { unset($e['weg']); $aus[] = $e; }
+    }
+    return $aus;
+}
+
 /** Der Teil des Minutenlaufs: Anlaesse dieses Fahrzeugs in die Warteliste. Spricht nicht, wartet auf nichts. */
 function mg_ansage_pruefen(array $ereignisse, array $st, $vorher, $nr, array $cfg, $wagen, $jetzt = null, $kabel = false)
 {
     $jetzt = $jetzt === null ? time() : (int) $jetzt;
     $offen = mg_ansage_zeitgeber($st, $nr, $jetzt);
     $tts = mg_tts($cfg);
-    if ($tts['mode'] === 'aus') { return 0; }
-    $l = mg_ansage_eintraege($ereignisse, $st, $vorher, $nr,
-                             (isset($cfg['ansage_haken']) && is_array($cfg['ansage_haken'])) ? $cfg['ansage_haken'] : array(), $wagen, $offen, $kabel);
+    /* 1.1.51 (Signal-Welle): Ansage und Meldung an SignalBot je mit ihren eigenen Haken; jeder Eintrag traegt seinen Weg
+     * ('weg' a|m), der Sender trennt sie wieder (mg_meld_weg()). Ohne Ausgabeart und ohne Meldung wie bisher: nichts. */
+    $l = array();
+    if ($tts['mode'] !== 'aus') {
+        foreach (mg_ansage_eintraege($ereignisse, $st, $vorher, $nr,
+                                     (isset($cfg['ansage_haken']) && is_array($cfg['ansage_haken'])) ? $cfg['ansage_haken'] : array(), $wagen, $offen, $kabel) as $e) {
+            $l[] = $e + array('weg' => 'a');
+        }
+    }
+    if (mg_meld_aktiv($cfg)) {
+        $mg_mb = mg_meld_block($cfg);
+        foreach (mg_ansage_eintraege($ereignisse, $st, $vorher, $nr, $mg_mb['haken'], $wagen, $offen, $kabel) as $e) {
+            $l[] = $e + array('weg' => 'm');
+        }
+    }
     if (!$l) { return 0; }
     mg_ansage_warte(function ($alt) use ($l, $jetzt) {
         foreach ($l as $e) { $alt[] = $e + array('zeit' => $jetzt); }
@@ -3156,6 +3201,10 @@ function mg_ansage_lauf($jetzt = null)
     $frisch = array();
     foreach (is_array($l) ? $l : array() as $e) {
         if (is_array($e) && isset($e['zeit']) && $jetzt - (int) $e['zeit'] <= MG_ANSAGE_HOECHSTALTER) { $frisch[] = $e; }
+    }
+    if ($frisch) {     // 1.1.51: die Eintraege der Meldung an SignalBot, dann die der Ansage
+        mg_meld_senden(mg_meld_weg($frisch, 'm'), mg_config());
+        $frisch = mg_meld_weg($frisch, 'a');
     }
     if ($frisch) {
         mg_ansage_token_pflegen();
@@ -3264,7 +3313,7 @@ function mg_kabel_ruhe_heute(array $r, $jetzt, array $k, $warnt, &$merk = null)
 function mg_kabel_pruefen(array $st, $nr, array $cfg, $jetzt = null)
 {
     $jetzt = $jetzt === null ? time() : (int) $jetzt;
-    $haken = !empty($cfg['notify']['kabel_vergessen']) || !empty($cfg['ansage_haken']['kabel_vergessen']) || !empty($cfg['signal_kabel']);
+    $haken = !empty($cfg['notify']['kabel_vergessen']) || !empty($cfg['ansage_haken']['kabel_vergessen']) || meld_anlass_an(mg_meld_block($cfg), 'kabel_vergessen');     // 1.1.51: statt signal_kabel
     if (!$haken) { return false; }
     $f = mg_paths()['tmp'] . '/kabel' . (int) $nr . '.json';
     $m = mg_json_lesen($f);
@@ -3285,18 +3334,18 @@ function mg_kabel_pruefen(array $st, $nr, array $cfg, $jetzt = null)
     return $faellig;
 }
 
-/** Eine Meldung an SignalBot (Thema <praefix>/befehl/plugin/<ordner>, nie retained; Bauart Renault NG 3.3). */
-function mg_signal_senden(array $cfg, $text)
+/** 1.1.51 (Entscheidung des Hausherrn 24.11.2026, F1 "Abloesen"): der Block 'meldung' aus dem bisherigen Haken
+ *  signal_kabel - nur fuer eine Datei, die noch keinen Block traegt und signal_kabel gesetzt hat: an, gemeldet wird
+ *  wie bisher nur "Kabel vergessen". Sonst null (dann gilt die Vorgabe: aus). */
+function mg_meld_aus_bestand($datei)
 {
-    $pr = isset($cfg['signal_praefix']) ? (string) $cfg['signal_praefix'] : '';
-    $o = (string) mg_paths()['plugin'];
-    if (!preg_match('/^[A-Za-z0-9_-]{1,40}\z/', $pr) || !preg_match('/^[a-z0-9_]{1,40}\z/', $o)) {
-        mg_log_if_changed('signal', 'SignalBot-Meldung nicht gesendet: Praefix oder Ordnername passt nicht.');
-        return false;
-    }
-    $js = json_encode(array('text' => (string) $text, 'dringend' => 0), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    return is_string($js) && mg_mqtt_einzeln(array($pr . '/befehl/plugin/' . $o => $js));
+    if (!is_array($datei) || array_key_exists('meldung', $datei) || empty($datei['signal_kabel'])) { return null; }
+    $h = array();
+    foreach (array_keys(mg_meld_anlaesse()) as $a) { $h[$a] = $a === 'kabel_vergessen' ? 1 : 0; }
+    return array('ein' => 1, 'haken' => $h, 'sperre_min' => defined('MELD_SPERRE_VORGABE') ? MELD_SPERRE_VORGABE : 60);
 }
+
+/* 1.1.51: mg_signal_senden() (Thema <praefix>/befehl/plugin/<ordner>) entfaellt - abgeloest durch das gemeinsame Modul. */
 
 /* ---------------- Vorklimatisierung: Mindest-Akku (1.1.31) ---------------- */
 
@@ -3837,7 +3886,7 @@ function mg_check_events($st, $nr = 1)
     if ($kabel) {
         $mg_kt = sprintf(mg_t('MELDUNG.KABEL_VERGESSEN'), (int) round($st['SOC']));
         if (!empty($n['kabel_vergessen'])) { $teile[] = $mg_kt; }
-        if (!empty($cfg['signal_kabel'])) { mg_signal_senden($cfg, $wagen . ': ' . $mg_kt); }
+        /* 1.1.51: an SignalBot geht "Kabel vergessen" ueber die Warteliste und das gemeinsame Modul (mg_ansage_pruefen()). */
     }
     if ($teile) { $melden = $wagen . ': ' . implode(' ', $teile); }
     // Nur die Feldwerte merken - der Rest wechselt ohnehin bei jedem Lauf.
@@ -4273,6 +4322,7 @@ function mg_automatik()
                 MG_VORKLIMA_VERSUCHE);
             mg_log('Automatik Vorklimatisierung: ' . $t);
             mg_benachrichtigen(3, $t);
+            mg_meld_legen('vorklima', 'vorklima:' . $nr, $t, $cfg);     // 1.1.51: dazu an SignalBot (Haken vorklima)
         }
         $merk['vorklima'][(string) $nr] = $m;
     }
@@ -4876,6 +4926,7 @@ function mg_mqtt_senden($nr, $st)
     if (empty($cfg['mqtt_ein']) || !mg_has_mosquitto()) {
         return 0;
     }
+    mg_praefix_haus_melden($cfg);   // 1.1.51: Praefix im gemeinsamen Bereich? melden, nicht anhalten
     $paare = mg_mqtt_argumente($nr, $st);
     if (!$paare) {
         return 0;
@@ -7084,6 +7135,9 @@ function mg_broker_wechsel_pruefen($cfg = null)
         return 'spaeter';
     }
     $text = sprintf(mg_t_in('GW.BROKER_GEAENDERT_MELDUNG', mg_lb_sprache()), mg_gw_name());
+    if (!isset($st['paar']) || $st['paar'] !== $paar) {     // 1.1.51: an SignalBot einmal je Paar (nicht bei jedem neuen Versuch)
+        mg_meld_legen('broker_zugang', 'broker_zugang:' . $paar, $text, $cfg);
+    }
     list($ok, $aus) = mg_benachrichtigen(3, $text);
     $st['paar'] = $paar;
     $st['versuch'] = time();
@@ -7569,6 +7623,9 @@ function mg_selbsttest($live = false)
     $add('PRUEF.MBSTRING', function_exists('mb_substr') ? 1 : 2,
         function_exists('mb_substr') ? 'mbstring' : 'substr');
 
+    // 1.1.51: faellt das Themen-Praefix auf einen gemeinsamen Bereich unter haus/ (Regeln/07)?
+    $mg_hb = mg_pruef_praefix_haus($cfg);
+    $add('HAUSBEREICH.F_TEST', $mg_hb[0] === -1 ? 2 : $mg_hb[0], $mg_hb[1]);
     $anzahl = mg_fahrzeug_anzahl($cfg);
     $add('PRUEF.FAHRZEUGE', $anzahl > 0 ? 1 : 0, (string) $anzahl);
     $add('PRUEF.BENUTZER', trim((string) $cfg['saic_user']) !== '' ? 1 : 0,
@@ -8513,6 +8570,7 @@ function mg_wert_regeln()
         'tts' => array('tts'),
         'ansage_regeln' => array('ansage_regeln'),
         'ansage_haken' => array('ansage_haken'),
+        'meldung' => array('meldung'),     // 1.1.51: Block des gemeinsamen Moduls meldung.php
         'ansage_token_herkunft' => array('ansage_herkunft'),
         'kabel_soc' => array('ganz', 1, 100),
         'kabel_uhr' => array('uhrzeit'),
@@ -8699,6 +8757,15 @@ function mg_wert_pruefen($k, $w, $formular = false)
         }
         return array(true, $w, '');
     }
+    if ($art === 'meldung') {     // 1.1.51: Block 'Meldungen an SignalBot' (meld_block_pruefen(), fail closed)
+        $mf = meld_block_pruefen($w, mg_meld_anlaesse());
+        if ($mf) {
+            $mt = array();
+            foreach ($mf as $mx) { $mt[] = meld_beanstandung_text($mx, mg_meld_k()); }
+            return array(false, null, implode('; ', $mt));
+        }
+        return array(true, $w, '');
+    }
     if ($art === 'ansage_haken') {
         if (!is_array($w)) { return array(false, null, mg_t('WERT.ANSAGE')); }
         $aus = array();
@@ -8749,7 +8816,8 @@ function mg_sicherung_neue_schluessel()
                  'vorklima_anwesend_ein', 'ankunft_ein', 'ankunft_quellen', 'haus_strompreis_ein',
                  'vorklima_wetter_ein', 'vorklima_kalt_unter', 'vorklima_heiss_ueber',
                  'tts', 'ansage_regeln', 'ansage_haken', 'ansage_token_herkunft', 'kabel_soc', 'kabel_uhr', 'kabel_abfahrt_min',
-                 'signal_kabel', 'signal_praefix', 'vorklima_min_soc', 'vorklima_nur_kabel', 'haus_fahrzeug_ein');     // 1.1.31
+                 'signal_kabel', 'signal_praefix', 'vorklima_min_soc', 'vorklima_nur_kabel', 'haus_fahrzeug_ein',     // 1.1.31
+                 'meldung');     // 1.1.51
 }
 
 /* Eine Sicherungsdatei einlesen - und dabei NICHTS durchgehen lassen.
@@ -8816,6 +8884,7 @@ function mg_sicherung_beschreibung()
                        + array('sichern' => 'ansage_sicherung_bereinigen');
     $schluessel['ansage_regeln'] = sicherung_block(array_keys(ansage_regeln_vorgaben()));
     $schluessel['ansage_haken'] = sicherung_block(array_keys(mg_ansage_haken_vorgabe()));
+    $schluessel['meldung'] = meld_sicherung_knoten(mg_meld_anlaesse(), mg_meld_k());     // 1.1.51
     foreach (array_keys($vorg) as $k) {
         $schluessel[$k]['wandeln'] = $wandeln($k);
     }
@@ -8845,6 +8914,11 @@ function mg_sicherung_beschreibung()
                 }
             }
             list($ok, , $grund) = mg_wert_pruefen($k, $w, false);
+            /* 1.1.51: kein Praefix auf einem gemeinsamen Bereich unter haus/ (Regeln/07) - wie im Formular. */
+            if ($ok && $k === 'mqtt_praefix' && is_string($w) && hb_bereich(trim($w, '/ ')) !== '') {
+                $ok = false;
+                $grund = sprintf(mg_t('HAUSBEREICH.SICH_W'), hb_bereich(trim($w, '/ ')));
+            }
             return $ok ? '' : sprintf(mg_t('EINST.SICH_WERT'), $k, $grund);
         },
         'vorbereiten' => function ($neu, $jetzt, $r) {
@@ -9030,8 +9104,8 @@ function mg_eingabe_felder($form)
     if ($form === 'settings') {
         $f['settings']['text'] = array_merge($f['settings']['text'], array('ansage_ruhe_von', 'ansage_ruhe_bis', 'ansage_ruhe_bis_frei' /* 1.1.50, Stamm 1.5.0 */, 'ansage_sperre_min'),
             array_values(array_diff(ansage_x2_felder(), array('tts_alexa_token_loeschen', 'tts_google_token_loeschen'))), mg_ziele_x2_felder());
-        $f['settings']['text'] = array_merge($f['settings']['text'], array('kabel_soc', 'kabel_uhr', 'kabel_abfahrt_min', 'signal_praefix', 'vorklima_min_soc'));
-        foreach (array('n_kabel', 'signal_kabel', 'vorklima_nur_kabel') as $mg_hz) { $f['settings']['haken'][] = $mg_hz; }
+        $f['settings']['text'] = array_merge($f['settings']['text'], array('kabel_soc', 'kabel_uhr', 'kabel_abfahrt_min', 'vorklima_min_soc'));     // 1.1.51: ohne signal_praefix
+        foreach (array('n_kabel', 'vorklima_nur_kabel') as $mg_hz) { $f['settings']['haken'][] = $mg_hz; }     // 1.1.51: ohne signal_kabel
         $f['settings']['haken'][] = 'ansage_ruhe_ein';
         $f['settings']['haken'][] = 'tts_alexa_token_loeschen';
         $f['settings']['haken'][] = 'tts_google_token_loeschen';
@@ -10387,4 +10461,158 @@ function mg_vorlagen_pruefen()
         }
     }
     return $schlecht ? array(0, implode(', ', $schlecht)) : array(1, count($teile) . ' ' . mg_t('PRUEF.VORLAGEN_CRLF'));
+}
+
+/**
+ * 1.1.51 (Entscheidung des Hausherrn 23.11.2026 "Nur gemeinsame Bereiche", Regeln/07): Zeile im Reiter Test -
+ * faellt das gespeicherte Themen-Praefix auf einen gemeinsamen Bereich unter haus/? Speichern und Zurueckspielen
+ * weisen ein solches Praefix ab; ein schon gespeichertes bleibt in Betrieb und ist hier rot, grau bei ausgeschaltetem MQTT.
+ * Liste und Pruefung aus dem gemeinsamen Modul haus_bereiche.php. Rueckgabe array(stand, html).
+ */
+function mg_pruef_praefix_haus($cfg)
+{
+    $p = (trim((string) $cfg['mqtt_praefix'], '/ ') !== '' ? trim((string) $cfg['mqtt_praefix'], '/ ') : 'mg');
+    $b = hb_bereich($p);
+    if ($b !== '') {
+        if (!(!empty($cfg['mqtt_ein']))) {
+            return array(-1, sprintf(mg_t('HAUSBEREICH.A_AUS'), strval($p), strval($b)));
+        }
+        return array(0, sprintf(mg_t('HAUSBEREICH.A_NEIN'), strval($p), strval($b)));
+    }
+    return array(1, sprintf(mg_t('HAUSBEREICH.A_JA'), strval($p)));
+}
+
+/**
+ * 1.1.51: einmal je Aenderung eine Protokollzeile, solange das Praefix auf einen gemeinsamen Bereich faellt; der
+ * Versand bleibt, wie er ist. Gemerkt in praefix_haus_gemeldet.txt im Datenordner. Rueckgabe der Bereich oder ''.
+ */
+function mg_praefix_haus_melden($cfg, $merk = null)
+{
+    $p = (trim((string) $cfg['mqtt_praefix'], '/ ') !== '' ? trim((string) $cfg['mqtt_praefix'], '/ ') : 'mg');
+    if ($merk === null) {
+        $merk = mg_paths()['datadir'] . '/praefix_haus_gemeldet.txt';
+    }
+    $b = hb_melden_faellig($p, $merk);
+    if ($b !== '') {
+        mg_log(hb_logtext($p, $b));
+    }
+    return $b;
+}
+
+if (!function_exists('mg_meld_block')) {
+
+/* ---------------- Statusmeldungen an SignalBot (1.1.51, gemeinsames Modul meldung.php) ----------------
+ *
+ * Auftrag des Hausherrn 23.11.2026, Entscheidungen 23./24.11.2026: dieselben Anlaesse wie die Ansage, eigener Haken je
+ * Anlass, ab Werk aus; Sperre, Bremse und Versand im Modul. Die Erkennung laeuft auch ohne Ausgabeart, wenn eine Meldung
+ * eingeschaltet ist (mg_meld_aktiv()), und legt einen Anlass hin, wenn Ansage ODER Meldung ihn will
+ * (mg_meld_will()); der Sender trennt die Wege wieder (mg_meld_nur_ansage()).
+ */
+
+/** Die meldbaren Anlaesse: Name => Beschriftung (dieselben wie die Ansage). */
+function mg_meld_anlaesse()
+{
+    return mg_ansage_anlaesse() + array('broker_zugang' => mg_t('MELDUNG.L_MELD_BROKER'), 'vorklima' => mg_t('MELDUNG.L_MELD_VORKLIMA'));
+}
+
+/** Die ab-Werk-Haken der Ansage dieser Linie: so stehen auch die Haken der Meldung, solange der Block nie gespeichert ist. */
+function mg_meld_haken_vorgabe()
+{
+    return mg_ansage_haken_vorgabe() + array('broker_zugang' => 1, 'vorklima' => 1);
+}
+
+/** Ist der Haken dieses Anlasses fuer die ANSAGE gesetzt? */
+function mg_ansage_anlass_sprache($a, $cfg = null)
+{
+    if ($cfg === null) { $cfg = mg_config(); }
+    return is_array($cfg) && isset($cfg['ansage_haken']) && is_array($cfg['ansage_haken']) && !empty($cfg['ansage_haken'][$a]) && array_key_exists($a, mg_ansage_anlaesse());
+}
+
+/** Der wirksame Block 'meldung' fuer den Betrieb (ungueltig gespeichert gilt als aus und wird im Formular genannt). */
+function mg_meld_block($cfg = null)
+{
+    if ($cfg === null) { $cfg = mg_config(); }
+    list($b) = meld_block(is_array($cfg) && array_key_exists('meldung', $cfg) ? $cfg['meldung'] : null, mg_meld_anlaesse(), mg_meld_haken_vorgabe());
+    return $b;
+}
+
+/** Die Beanstandungen eines gespeicherten Blocks (leer = gueltig). */
+function mg_meld_bean($cfg = null)
+{
+    if ($cfg === null) { $cfg = mg_config(); }
+    list(, $f) = meld_block(is_array($cfg) && array_key_exists('meldung', $cfg) ? $cfg['meldung'] : null, mg_meld_anlaesse(), mg_meld_haken_vorgabe());
+    return $f;
+}
+
+/** Ist irgendein Anlass zur Meldung eingeschaltet? Dann laeuft die Erkennung auch ohne Ausgabeart. */
+function mg_meld_aktiv($cfg = null)
+{
+    return meld_irgendein_an(mg_meld_block($cfg));
+}
+
+/** Will die Ansage ODER die Meldung diesen Anlass? */
+function mg_meld_will($a, $cfg = null)
+{
+    if ($cfg === null) { $cfg = mg_config(); }
+    return mg_ansage_anlass_sprache($a, $cfg) || meld_anlass_an(mg_meld_block($cfg), (string) $a);
+}
+
+/** Der Kontext des Moduls: Datenordner (data/plugins/<ordner>, daraus der Absender) und Texte - wie bei der Ansage. */
+function mg_meld_k()
+{
+    return mg_ansage_k();
+}
+
+/** Fuer die Ansage nur Eintraege, deren Ansage-Haken gesetzt ist; ein Eintrag ohne bekannten Anlass bleibt wie bisher. */
+function mg_meld_nur_ansage(array $l, $cfg = null)
+{
+    if ($cfg === null) { $cfg = mg_config(); }
+    $anl = mg_meld_anlaesse();
+    $aus = array();
+    foreach ($l as $e) {
+        if (is_array($e) && array_key_exists(meld_anlass_von($e), $anl) && !mg_ansage_anlass_sprache(meld_anlass_von($e), $cfg)) { continue; }
+        $aus[] = $e;
+    }
+    return $aus;
+}
+
+/** Die Eintraege an SignalBot melden. Protokoll: eine Zeile, wenn gesendet oder gescheitert (nie der Text). */
+function mg_meld_senden(array $l, $cfg = null)
+{
+    if ($cfg === null) { $cfg = mg_config(); }
+    $b = mg_meld_block($cfg);
+    if (empty($b['ein']) || !$l) { return null; }
+    $a = meld_regel_senden($l, $b, mg_meld_k());
+    if ($a['regel'] === '' || in_array($a['regel'], array('BREMSE', 'STAND', 'ORDNER'), true)) {
+        mg_log(meld_regel_kurz($a));
+    }
+    return $a;
+}
+
+/** Der Knopf "Testmeldung senden": array(angenommen, Satz). Geht an Haken, Sperre und Bremse vorbei. */
+function mg_meld_test()
+{
+    $r = meld_testmeldung(mg_meld_k());
+    mg_log('Testmeldung an SignalBot: ' . ($r[0] ? 'angenommen' : 'nicht angenommen'));
+    return $r;
+}
+
+/** Der Block im Einstellungsformular (unter den Ansage-Regeln, im selben Formular), mit Lage und Knopf. */
+function mg_meld_form_html($cfg = null)
+{
+    if ($cfg === null) { $cfg = mg_config(); }
+    $e = function ($s) { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); };
+    $k = mg_meld_k();
+    $o = array();
+    /* 1.1.51: unsichtbarer Doppel des Speicherknopfs VOR dem Knopf Testmeldung - die Eingabetaste in einem Textfeld
+     * loest den ersten Absendeknopf des Formulars aus; sie soll speichern wie bisher, nicht die Testmeldung senden. */
+    $o[] = '<button data-role="none" type="submit" tabindex="-1" aria-hidden="true" style="position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden"></button>';
+    $o[] = '<h3>' . $e(meld_t('TITEL', $k)) . '</h3>';
+    $o[] = meld_formular_html(mg_meld_block($cfg), mg_meld_anlaesse(), array(), $k);
+    list(, $lage) = meld_pruefzeile(mg_meld_block($cfg), mg_meld_bean($cfg), $k);
+    $o[] = '<div class="sm-hilfe">' . $e(meld_t('F_TEST', $k) . ' ' . $lage) . '</div>';
+    $o[] = '<div class="sm-knopfreihe"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="meld_test" value="1">'
+         . $e(meld_t('K_TEST', $k)) . '</button></div>';
+    return implode("\n", $o) . "\n";
+}
 }

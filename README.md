@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: MG iSmart
 
-Version 1.1.50
+Version 1.1.51
 
 Bringt die Daten eines oder mehrerer **MG-Elektrofahrzeuge** (iSMART / SAIC)
 nach Loxone — Ladestand, Reichweite, Ladeleistung, Türen, Fenster, Reifendruck,
@@ -8,6 +8,12 @@ Klima, Standort — und schickt Befehle zurück: Laden stoppen, Ziel-Ladestand,
 Ladestrombegrenzung, Standklima, „Auto finden".
 
 Kompatibel mit LoxBerry 3.x und **LoxBerry 4** (reines PHP, PHP 7.4 und 8.x).
+
+## Neu in 1.1.51
+
+- **Themen-Präfix auf einem gemeinsamen Bereich (Entscheidung des Hausherrn 23.11.2026 „Nur gemeinsame Bereiche“):** Ein MQTT-Präfix, das einer der gemeinsamen Bereiche unter `haus/` ist oder darin beginnt (`haus/<bereich>` bzw. `haus/<bereich>/…` für abfahrt, abfuhr, alarm, ansage, anwesenheit, energie, fahrzeug, kalender, klima, pv, raumklima, sonne, speicher, strompreis, szene, tag, tuer, usv, wetter), weisen Speichern im Reiter *MQTT* und das Zurückspielen einer Sicherung jetzt mit Namen ab: Dort liefern die Plugins einander Zustände ohne eigenes Präfix. `haus` allein und andere Präfixe unter `haus/` (etwa `haus/fenster`) bleiben erlaubt; Groß und Klein zählen wie bei MQTT. Ist ein solches Präfix schon gespeichert, ändert sich am Betrieb nichts – das Plugin sendet weiter darunter, nennt es einmal im Protokoll, und der Reiter *Test* zeigt die Zeile „Liegt das Themen-Präfix außerhalb der gemeinsamen Bereiche unter haus/?“ rot. Liste und Texte kommen aus dem gemeinsamen Modul `haus_bereiche.php`.
+- **Statusmeldungen an SignalBot über das gemeinsame Modul (Entscheidungen des Hausherrn 23./24.11.2026):** Im Reiter *Einstellungen* steht unter den Ansage-Regeln der Block *Meldungen an SignalBot*: dieselben sieben Anlässe wie die Ansage und dazu die zwei Ereignisse, die bisher nur als LoxBerry-Benachrichtigung kamen (*Broker-Zugang geändert*, *Vorklimatisierung gescheitert*), je mit eigenem Haken, ab Werk aus. Die Nachricht geht unter `haus/meldung/mgismart` an SignalBot (ab 0.9.44, dort „Meldungen unter haus/meldung annehmen“). Dieselbe Meldung höchstens einmal in 60 Minuten (einstellbar), insgesamt höchstens 10 je Stunde. Der bisherige Haken *Kabel vergessen auch über SignalBot melden* und das Feld *MQTT-Präfix von SignalBot* entfallen: War der Haken gesetzt, ist der Block nach dem Update an, mit dem einen Anlass *Kabel vergessen*. Ältere Sicherungen bleiben lesbar.
+- Gemeinsames Sicherungsmodul auf 1.3.0 nachgezogen (Einheitlichkeit, wie in der Welle Lade-Beanstandungen); am Verhalten von „Einstellungen sichern“ und „Einstellungen zurückspielen“ ändert sich nichts.
 
 ## Neu in 1.1.50
 

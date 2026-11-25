@@ -277,6 +277,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ptest'])) {
 }
 
 /* 1.1.31: die Testansage geht an den Regeln vorbei (auch nachts, auch mit "Ansagen aus") - wer den Knopf drueckt, will es hoeren. */
+/* 1.1.51: Testmeldung an SignalBot (Knopf unter den Ansage-Regeln). */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['meld_test'])) {
+    list($meld_ok, $meld_satz) = mg_meld_test();
+    if ($meld_ok) { $mg_meldungen[] = $meld_satz; } else { $mg_fehler[] = $meld_satz; }
+    $mg_tab = 'tab-test';
+}
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['ansage_test']) || isset($_POST['ansage_test_ziel']))) {
     $mg_tk = mg_ansage_k();
     $mg_tnur = isset($_POST['ansage_test_ziel']) ? ansage_test_ziel($_POST) : 0;
@@ -476,6 +482,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mqtt_save'])) {
     $mg_neu['mqtt_ein'] = isset($_POST['mqtt_ein']) ? 1 : 0;
     $mg_neu['haus_fahrzeug_ein'] = isset($_POST['haus_fahrzeug_ein']) ? 1 : 0;     // 1.1.31
     mg_formfeld('mqtt_praefix', 'MQTTR.EIGEN_PRAEFIX', $mg_neu, $mg_fehler);
+    /* 1.1.51 (Entscheidung des Hausherrn 23.11.2026 "Nur gemeinsame Bereiche", Regeln/07): kein Praefix auf einem
+     * gemeinsamen Bereich unter haus/ - nur hier und beim Zurueckspielen, nicht in der Pruefung beim Lesen der
+     * Konfiguration: ein schon gespeichertes bleibt in Betrieb, der Reiter Test meldet es. */
+    $mg_hbp = trim((string) $mg_neu['mqtt_praefix'], '/ ');
+    if (hb_bereich($mg_hbp) !== '' && $mg_hbp !== trim((string) mg_config()['mqtt_praefix'], '/ ')) {   // nur NEUE Eingaben: ein schon gespeichertes Praefix sperrt das Speichern
+        // des Reiters nicht (Regeln/07; Bauart Einspeisebremse 0.9.25)
+        $mg_fehler[] = sprintf(mg_t('HAUSBEREICH.FEHLER'), $mg_hbp, hb_bereich($mg_hbp));
+        $mg_beanstandet[] = 'mqtt_praefix';
+    }
 
     /* Zwei verschiedene Praefixe: unter 'prefix' HORCHT das Plugin auf
      * das Gateway, unter 'mqtt_praefix' SENDET es selbst. Fallen beide
@@ -528,7 +543,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mqtt_save'])) {
     $mg_tab = 'tab-mqtt';
 }
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save']) && !isset($_POST['meld_test'])) {     // 1.1.51: der Knopf Testmeldung (im selben Formular, verstecktes Feld save) speichert nicht
     $mg_neu = mg_config();
     $mg_f0 = count($mg_fehler);   // Nr. 16: kam etwas dazu, wird nichts gespeichert
     /* Abweisen statt verbiegen (seit 1.1.18, Befund U8): bis 1.1.17 wurde
@@ -631,7 +646,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
 
     /* Gruppe 39 (1.1.28): Haus-Themen (2.4), Wettergrenze (3.2), Ladekosten (3.1). */
     foreach (array('haus_abfahrt_ein', 'vorklima_anwesend_ein', 'vorklima_wetter_ein', 'ankunft_ein',
-                   'haus_strompreis_ein', 'signal_kabel', 'vorklima_nur_kabel') as $mg_h) {
+                   'haus_strompreis_ein', 'vorklima_nur_kabel') as $mg_h) {     // 1.1.51: ohne signal_kabel (Block 'meldung')
         $mg_neu[$mg_h] = isset($_POST[$mg_h]) ? 1 : 0;
     }
     mg_formfeld('vorklima_kalt_unter', 'EINST.VORKLIMA_KALT', $mg_neu, $mg_fehler);
@@ -640,7 +655,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
     mg_formfeld('kabel_soc', 'EINST.KABEL_SOC', $mg_neu, $mg_fehler);
     mg_formfeld('kabel_uhr', 'EINST.KABEL_UHR', $mg_neu, $mg_fehler);
     mg_formfeld('kabel_abfahrt_min', 'EINST.KABEL_ABFAHRT', $mg_neu, $mg_fehler);
-    mg_formfeld('signal_praefix', 'EINST.SIGNAL_PRAEFIX', $mg_neu, $mg_fehler);
+    /* 1.1.51: das Feld signal_praefix entfaellt (Meldungen unter haus/meldung/<ordner>, gemeinsames Modul). */
     if ((int) $mg_neu['vorklima_kalt_unter'] >= (int) $mg_neu['vorklima_heiss_ueber']) {
         $mg_fehler[] = mg_t('FEHLER.KALT_HEISS');
         $mg_beanstandet[] = 'vorklima_kalt_unter';
@@ -670,12 +685,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
         $mg_thinw = array();
         $mg_tneu = ansage_formular_lesen($_POST, mg_tts($mg_cfg), $mg_tmangel, $mg_tbean, mg_ansage_opt(), mg_ansage_k(), $mg_thinw);
         list($mg_rneu, $mg_hneu) = ansage_regeln_formular($_POST, mg_ansage_regeln($mg_cfg), mg_ansage_anlaesse(), $mg_tmangel, $mg_tbean, mg_ansage_k());
+        // 1.1.51: der Block 'Meldungen an SignalBot' (eine Beanstandung haelt das Speichern an, wie die Ansage)
+        $mg_mneu = meld_formular_lesen($_POST, isset($mg_cfg['meldung']) ? $mg_cfg['meldung'] : null, mg_meld_anlaesse(), $mg_tmangel, $mg_tbean, mg_meld_k(), mg_meld_haken_vorgabe());
         foreach ($mg_tmangel as $mg_tm) { $mg_fehler[] = $mg_tm['text']; }
         foreach ($mg_tbean as $mg_tb) { $mg_beanstandet[] = mg_ziele_x2_name($mg_tb); }
         foreach ($mg_thinw as $mg_th) { $mg_meldungen[] = $mg_th['text']; }
         $mg_neu['tts'] = $mg_tneu;
         $mg_neu['ansage_regeln'] = $mg_rneu;
         $mg_neu['ansage_haken'] = $mg_hneu;
+        $mg_neu['meldung'] = $mg_mneu;     // 1.1.51
         $mg_neu['ansage_token_herkunft'] = ansage_token_herkunft_formular($_POST, isset($mg_neu['ansage_token_herkunft']) ? $mg_neu['ansage_token_herkunft'] : array());
     }
 
@@ -1321,6 +1339,7 @@ echo ansage_formular_html(mg_tts($mg_cfg), $mg_th + array('modi' => mg_ansage_mo
 echo ansage_regeln_html(mg_ansage_regeln($mg_cfg), isset($mg_cfg['ansage_haken']) && is_array($mg_cfg['ansage_haken']) ? $mg_cfg['ansage_haken'] : array(),
     mg_ansage_anlaesse(), $mg_th + array('token_vor_ort' => true), mg_ansage_k());
 ?>
+<?= mg_meld_form_html($mg_cfg) ?>
 
 <h3><?= mg_e(mg_t('EINST.H_KABEL')) ?></h3>
 <div class="sm-hilfe"><?php echo mg_t('EINST.KABEL_HILFE'); ?></div>
@@ -1337,16 +1356,7 @@ echo ansage_regeln_html(mg_ansage_regeln($mg_cfg), isset($mg_cfg['ansage_haken']
 	<input data-role="none" type="number" name="kabel_abfahrt_min" min="0" max="720" value="<?= mg_e(mg_eingabe('settings', 'kabel_abfahrt_min', (int) $mg_cfg['kabel_abfahrt_min'])) ?>"<?= mg_markierung('settings', 'kabel_abfahrt_min') ?>>
 	<div class="sm-hilfe"><?php echo mg_t('EINST.KABEL_ABFAHRT_HILFE'); ?></div>
 </div>
-<div class="sm-feld">
-	<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;">
-	<input data-role="none" type="checkbox" name="signal_kabel" <?= mg_eingabe_an('settings', 'signal_kabel', !empty($mg_cfg['signal_kabel'])) ? 'checked' : '' ?>>
-	<?= mg_e(mg_t('EINST.SIGNAL_KABEL')) ?></label>
-	<div class="sm-hilfe"><?php echo mg_t('EINST.SIGNAL_KABEL_HILFE'); ?></div>
-</div>
-<div class="sm-feld">
-	<label><?= mg_e(mg_t('EINST.SIGNAL_PRAEFIX')) ?></label>
-	<input data-role="none" type="text" name="signal_praefix" maxlength="40" value="<?= mg_e(mg_eingabe('settings', 'signal_praefix', $mg_cfg['signal_praefix'])) ?>"<?= mg_markierung('settings', 'signal_praefix') ?>>
-</div>
+<?php /* 1.1.51: Haken und Praefix fuer SignalBot entfallen - "Kabel vergessen" ist ein Anlass im Block "Meldungen an SignalBot" oben. */ ?>
 
 <h2><?= mg_e(mg_t('EINST.H_AUTOMATIK')) ?></h2>
 <div class="sm-feld">
